@@ -1,0 +1,27 @@
+# DigitalOcean App Platform spec.
+#   doctl apps create --spec .do/app.yaml
+# Then set DASHBOARD_PASSWORD and TURTLE_TOKEN under Settings -> web -> Environment Variables.
+# Secret values deliberately aren't stored in this file.
+name: minerdash
+region: nyc
+services:
+  - name: web
+    github:
+      repo: wjesst11/CC-Tweaked
+      branch: main
+      deploy_on_push: true
+    environment_slug: node-js
+    run_command: npm start
+    http_port: 8080
+    # Keep this at 1: turtle connections and their state live in this process's memory.
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    health_check:
+      http_path: /healthz
+    envs:
+      - key: DASHBOARD_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+      - key: TURTLE_TOKEN
+        scope: RUN_TIME
+        type: SECRET

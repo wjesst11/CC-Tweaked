@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MinerDash</title>
+  <meta name="description" content="Control your CC:Tweaked mining turtles from the browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Crect x='4' y='4' width='8' height='8' fill='%23fff'/%3E%3Crect x='6' y='6' width='4' height='2' fill='%232a78d6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <!-- Sign in ----------------------------------------------------------- -->
+  <main id="login" class="login" hidden>
+    <form id="login-form" class="card login-card">
+      <div class="brand"><span class="logo" aria-hidden="true"></span>MinerDash</div>
+      <h1>Sign in</h1>
+      <p class="muted">Enter the dashboard password you set as <code>DASHBOARD_PASSWORD</code>.</p>
+      <label class="field">
+        <span>Password</span>
+        <input id="password" type="password" autocomplete="current-password" required autofocus>
+      </label>
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+      <button class="btn primary" type="submit">Sign in</button>
+    </form>
+  </main>
+
+  <!-- App ----------------------------------------------------------------- -->
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand"><span class="logo" aria-hidden="true"></span>MinerDash</div>
+      <span id="conn" class="conn" data-state="connecting">Connecting…</span>
+      <div class="spacer"></div>
+      <div class="topbar-actions">
+        <button id="btn-install" class="btn">Add turtle</button>
+        <button id="btn-recall-all" class="btn">Recall all</button>
+        <button id="btn-stop-all" class="btn danger">Stop all</button>
+        <button id="btn-theme" class="btn icon" title="Toggle light/dark" aria-label="Toggle light/dark theme">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
+        </button>
+        <button id="btn-logout" class="btn ghost">Sign out</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <h2>Turtles</h2>
+          <span id="turtle-count" class="muted"></span>
+        </div>
+        <ul id="turtle-list" class="turtle-list"></ul>
+        <p id="list-empty" class="list-empty muted">No turtles have connected yet.</p>
+      </aside>
+
+      <main class="detail">
+        <section id="empty" class="card empty-state">
+          <h1>Connect your first turtle</h1>
+          <p class="muted">Turtles show up here as soon as they run the MinerDash script.</p>
+          <ol class="steps install-steps"></ol>
+        </section>
+
+        <section id="turtle" class="turtle" hidden>
+          <div class="turtle-head">
+            <div class="turtle-title">
+              <h1 id="t-name"></h1>
+              <div class="turtle-meta">
+                <span id="t-status" class="status"></span>
+                <span id="t-meta" class="muted"></span>
+              </div>
+            </div>
+            <div class="head-actions">
+              <button id="btn-rename" class="btn ghost needs-online">Rename</button>
+              <button id="btn-update" class="btn ghost needs-idle" title="Download the latest script from this server and reboot">Update script</button>
+              <button id="btn-forget" class="btn ghost" hidden>Forget</button>
+            </div>
+          </div>
+
+          <div class="stats">
+            <section class="card stat">
+              <div class="stat-label">Fuel</div>
+              <div id="fuel-value" class="stat-value">–</div>
+              <div id="fuel-meter" class="meter"><div class="meter-fill"></div></div>
+              <div id="fuel-sub" class="stat-sub"></div>
+            </section>
+            <section class="card stat">
+              <div class="stat-label">Position</div>
+              <div id="pos-value" class="stat-value coords">–</div>
+              <div id="pos-sub" class="stat-sub"></div>
+            </section>
+            <section class="card stat">
+              <div class="stat-head">
+                <div class="stat-label">Job</div>
+                <button id="btn-stop" class="btn danger sm needs-online" title="Stop (Esc)">Stop</button>
+              </div>
+              <div id="job-value" class="stat-value">Idle</div>
+              <div id="job-meter" class="meter" hidden><div class="meter-fill"></div></div>
+              <div id="job-sub" class="stat-sub"></div>
+            </section>
+          </div>
+
+          <div class="panels">
+            <div class="col">
+              <section class="card">
+                <div class="card-head">
+                  <h2>Drive</h2>
+                  <label class="check">
+                    <input id="auto-dig" type="checkbox">
+                    <span>Dig through blocks</span>
+                  </label>
+                </div>
+                <div class="drive">
+                  <div class="dpad">
+                    <button class="pad needs-idle" data-cmd="turnLeft" data-key="a" title="Turn left (A)">
+                      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4 3.5 7.5 7 11M4 7.5h7a5 5 0 0 1 0 10H8"/></svg>
+                      <kbd>A</kbd><span class="sr">Turn left</span>
+                    </button>
+                    <button class="pad needs-idle" data-cmd="forward" data-key="w" title="Forward (W)">
+                      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4M5 9l5-5 5 5"/></svg>
+                      <kbd>W</kbd><span class="sr">Forward</span>
+                    </button>
+                    <button class="pad needs-idle" data-cmd="turnRight" data-key="d" title="Turn right (D)">
+                      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13 4l3.5 3.5L13 11M16 7.5H9a5 5 0 0 0 0 10h3"/></svg>
+                      <kbd>D</kbd><span class="sr">Turn right</span>
+                    </button>
+                    <span></span>
+                    <button class="pad needs-idle" data-cmd="back" data-key="s" title="Back (S)">
+                      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M5 11l5 5 5-5"/></svg>
+                      <kbd>S</kbd><span class="sr">Back</span>
+                    </button>
+                    <span></span>
+                  </div>
+                  <div class="vpad">
+                    <button class="pad needs-idle" data-cmd="up" data-key="e" title="Up (E)">
+                      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3h12M10 17V7M6 11l4-4 4 4"/></svg>
+                      <kbd>E</kbd><span class="sr">Up</span>
+                    </button>
+                    <button class="pad needs-idle" data-cmd="down" data-key="q" title="Down (Q)">
+                      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 17h12M10 3v10M6 9l4 4 4-4"/></svg>
+                      <kbd>Q</kbd><span class="sr">Down</span>
+                    </button>
+                  </div>
+                </div>
+                <table class="around">
+                  <tbody>
+                    <tr>
+                      <th scope="row">Above</th>
+                      <td id="around-up" class="block-name"></td>
+                      <td class="around-actions">
+                        <button class="btn sm needs-idle" data-cmd="digUp">Dig</button>
+                        <button class="btn sm needs-idle" data-cmd="placeUp">Place</button>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row">Front</th>
+                      <td id="around-front" class="block-name"></td>
+                      <td class="around-actions">
+                        <button class="btn sm needs-idle" data-cmd="dig">Dig</button>
+                        <button class="btn sm needs-idle" data-cmd="place">Place</button>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row">Below</th>
+                      <td id="around-down" class="block-name"></td>
+                      <td class="around-actions">
+                        <button class="btn sm needs-idle" data-cmd="digDown">Dig</button>
+                        <button class="btn sm needs-idle" data-cmd="placeDown">Place</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p class="hint">Keys: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move and turn, <kbd>E</kbd>/<kbd>Q</kbd> up and down, <kbd>Esc</kbd> stops. Place uses the selected slot.</p>
+              </section>
+
+              <section class="card">
+                <div class="card-head">
+                  <h2>Inventory</h2>
+                  <span id="inv-summary" class="muted"></span>
+                </div>
+                <div id="inv-grid" class="inv-grid"></div>
+                <div class="row">
+                  <button class="btn needs-idle" data-cmd="refuel">Refuel from slot</button>
+                  <button class="btn needs-idle" data-cmd="drop">Drop slot</button>
+                  <button class="btn needs-idle" data-cmd="dropAll">Drop all</button>
+                </div>
+                <p class="hint">Click a slot to select it. Items drop in front of the turtle, so face a chest to store them.</p>
+              </section>
+            </div>
+
+            <div class="col">
+              <section class="card">
+                <div class="card-head"><h2>Start a job</h2></div>
+                <div class="tabs" role="tablist">
+                  <button class="tab" role="tab" data-tab="quarry">Quarry</button>
+                  <button class="tab" role="tab" data-tab="tunnel">Tunnel</button>
+                </div>
+                <form class="job-form" data-job="quarry">
+                  <div class="fields">
+                    <label class="field"><span>Length</span><input name="length" type="number" min="1" max="128" value="8" required></label>
+                    <label class="field"><span>Width</span><input name="width" type="number" min="1" max="128" value="8" required></label>
+                    <label class="field"><span>Depth</span><input name="depth" type="number" min="1" max="384" value="16" required></label>
+                  </div>
+                  <p class="hint">Digs a box forward and to the right of the turtle, starting one block below it. Stops early at bedrock.</p>
+                  <button class="btn primary needs-idle" type="submit">Start quarry</button>
+                </form>
+                <form class="job-form" data-job="tunnel" hidden>
+                  <div class="fields">
+                    <label class="field"><span>Length</span><input name="length" type="number" min="1" max="1024" value="32" required></label>
+                    <label class="field"><span>Height</span>
+                      <select name="height">
+                        <option value="1">1</option>
+                        <option value="2" selected>2</option>
+                        <option value="3">3</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p class="hint">Digs straight ahead. A 2-high tunnel is walkable.</p>
+                  <button class="btn primary needs-idle" type="submit">Start tunnel</button>
+                </form>
+                <div class="callout">
+                  Jobs make the turtle's current spot <b>home</b>. Put a chest directly
+                  <b>behind</b> the turtle: it unloads there when full and when finished,
+                  and burns mined coal when fuel runs low.
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-head">
+                  <h2>Map</h2>
+                  <span class="muted">Top-down, relative to where it started</span>
+                </div>
+                <svg id="map" class="map" viewBox="0 0 240 240" role="img" aria-label="Top-down map of the turtle and its home"></svg>
+                <ul class="legend">
+                  <li><span class="key key-turtle"></span>Turtle</li>
+                  <li><span class="key key-home"></span>Home</li>
+                  <li><span class="key key-trail"></span>Path</li>
+                </ul>
+                <div class="row">
+                  <button class="btn needs-online" data-cmd="goHome" title="Stops any running job">Go home</button>
+                  <button class="btn needs-idle" data-cmd="setHome">Set home here</button>
+                  <button id="btn-reset-pos" class="btn ghost needs-idle" title="Use after moving the turtle by hand">Reset position</button>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-head"><h2>Log</h2></div>
+                <ol id="log" class="log" aria-live="polite"></ol>
+              </section>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="install-dialog" class="dialog">
+    <h2>Add a turtle</h2>
+    <ol class="steps install-steps"></ol>
+    <form method="dialog" class="row end"><button class="btn primary">Done</button></form>
+  </dialog>
+
+  <template id="install-steps">
+    <li>Use a <b>mining turtle</b> (pickaxe equipped) with a little fuel. Name it with <code>label set Miner1</code>.</li>
+    <li>
+      On the turtle, run:
+      <div class="code">
+        <code class="install-cmd"></code>
+        <button class="btn sm copy" type="button">Copy</button>
+      </div>
+    </li>
+    <li>Run <code>startup</code> and paste your <b>TURTLE_TOKEN</b> when asked. It reconnects on its own after reboots and chunk reloads.</li>
+    <li>For jobs, place a chest directly behind the turtle.</li>
+  </template>
+
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>
