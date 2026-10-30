@@ -4,8 +4,9 @@ A web dashboard for running a fleet of CC:Tweaked mining turtles, deployed on Di
 
 - **Fleet jobs.** Send any group of turtles to mine a Y level (each turtle digs its own parallel tunnel and follows ore veins), or split a big quarry between them.
 - **A shared depot.** Every turtle unloads at the same dock with three chests: junk, valuables and fuel. Items are sorted by name patterns you choose. Turtles refuel from the fuel chest and deposit the coal they mine into it.
-- **No collisions.** Each turtle flies at its own height ("lane"), and the server gives the dock to one turtle at a time. A turtle that meets another waits instead of digging it.
+- **No collisions.** Turtles take the shortest open route, and the server shares where every turtle is and where it's about to move, so they steer around each other. The lower ID has right of way, and turtles standing still are treated as obstacles. The dock is used by one turtle at a time. A turtle never digs another one.
 - **Travel never breaks blocks.** Going home, to the depot or to a job, a turtle plans a route through open air and goes around roofs, trees and hills. If there's no open way, it stops and says where it is instead of digging.
+- **Retracing home.** Each turtle remembers the blocks it has moved through since it left home. Going home (when a job ends, is cancelled, or runs into a problem), it goes back that way, clearing only sand, gravel and other blocks that fell into its path.
 - **Protection.** Turtles never dig chests, barrels, shulker boxes, hoppers, Create blocks, or any ComputerCraft block such as other turtles and your GPS computers. They never dig or build inside protected areas, like a friend's base. The rules live on every turtle, so they hold even if the server is down.
 - **Pause, Resume, Cancel.** Pause freezes a turtle in place. Cancel stops the job and sends it home. **Pause all**, **Resume all** and **Recall all** act on the whole fleet.
 - **Permanent homes.** A turtle's home is where it first runs the script. Change it from the dashboard any time.
@@ -57,8 +58,8 @@ A home doesn't need open sky directly above it, but it does need some open way o
 
 ## Set up the fleet (Fleet page)
 
-1. **Depot.** Build a dock spot with the sky open above it, and three chests next to it on different sides (north, south, east, west, above or below). Enter the dock's coordinates, or drive a turtle there and click **Dock at …'s position**. Then choose which side each chest is on.
-2. **Travel height.** The lowest flying height. Turtle *n* flies at travel height + *n*, so pick a height above your builds and protected areas, with up to 64 blocks of room above it.
+1. **Depot.** Pick a dock spot and put three chests next to it on different sides (north, south, east, west, above or below). Enter the dock's coordinates, or drive a turtle there and click **Dock at …'s position**. Then choose which side each chest is on. Turtles come straight down into the dock, so keep the sky above it open. With a chest *above* the dock, they come down the column next to it instead (the dashboard tells you which side), so keep that one open.
+2. **Waiting height.** Turtles waiting for the dock line up in the air just east of it, one per block, starting at this height. It must be at least 3 blocks above the dock, with up to 64 blocks of room above it.
 3. **Protection.** Add protected areas (two corners, inclusive) and adjust the block patterns. `*` matches anything, so `create:*` covers every Create block.
 4. **Item sorting.** Name patterns for valuables and fuel. Everything else is junk. With a big fleet the junk chest fills quickly, so empty it into a trash can or a hopper line.
 5. Click **Save fleet settings**. Every turtle gets them right away.
@@ -70,13 +71,14 @@ Pick turtles in the picker (**All ready** selects every online, idle turtle that
 - **Mine a level.** Choose an ore preset or a Y level, a start point, a direction and a tunnel length. Each turtle digs its own 2-high tunnel, *spacing* blocks apart. It mines any ore veins it sees in the floor and walls, unless the vein runs into a protected area. To reach the level, each turtle digs a 1×1 shaft straight down at its tunnel's start, so pick a start out in the open, away from builds.
 - **Quarry an area.** Two corners plus top and bottom Y. The area is split into one strip per turtle. Only blocks inside the box are dug: turtles drop in from above through open air, so set the top at ground level. Anything above it, like trees, is left alone. A box whose top is buried is refused rather than dug down to.
 
-The planned area is outlined on the fleet map before you start. Each turtle flies to its spot without digging, and then works. When it's full or low on fuel, it flies to the depot, waits its turn, sorts its items into the chests, refuels, and goes back. When it's done it unloads one last time and flies home.
+The planned area is outlined on the fleet map before you start. Each turtle flies to its spot by the shortest open route without digging, and then works. When it's full or low on fuel, it flies to the depot, waits its turn, sorts its items into the chests, refuels, and goes back. When it's done it unloads one last time and flies home.
 
 Before anything starts, the server checks that no job, and no shaft down to it, would dig into a protected area, the depot, or a turtle's home. If one would, it refuses and tells you why.
 
 - **Pause** stops a turtle where it is. A turtle at the dock finishes its turn first.
 - **Resume** carries on.
-- **Cancel** (or **Go home**, or **Recall** for a group) backs the turtle out of its job the way it came in and flies it home.
+- **Cancel** (or **Go home**, or **Recall** for a group) retraces the turtle's way home.
+- **If something stops a job,** such as a protected block in the way or a dock column that's blocked, the turtle notes why ("Job stopped: …"), retraces its way home, and waits. Fix the problem and press **Resume**, and it goes back to work.
 
 If a turtle reboots mid-job, it picks the job back up by itself.
 

@@ -21,11 +21,10 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "1.3.0"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "1.4.0"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
-// No "Above": turtles reach the dock by flying straight down into it.
-const SIDES = { north: "North", east: "East", south: "South", west: "West", down: "Below" };
+const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
 const KEYS = { w: "forward", s: "back", a: "turnLeft", d: "turnRight", e: "up", q: "down" };
 const DIGGABLE = new Set(["forward", "up", "down"]);
 const JOB_NAMES = { quarry: "Quarry", tunnel: "Tunnel", goHome: "Going home" };
@@ -1179,6 +1178,22 @@ function renderFleetPreview() {
   if (!$("#bulk-rename").hidden) renderBulkRenamePreview();
 }
 
+// Which way turtles get into the dock, from the sides picked in the form (it
+// mirrors dockApproach in fleet.js).
+function renderDockApproach() {
+  const side = (field) => $(`[data-field="depot.${field}"]`).value;
+  const used = new Set([side("junk"), side("valuables"), side("fuel")]);
+  const el = $("#dock-approach");
+  if (used.size < 3) {
+    el.textContent = "Each chest needs its own side of the dock.";
+  } else if (!used.has("up")) {
+    el.textContent = "Turtles come straight down into the dock, so keep the sky above it open.";
+  } else {
+    const entry = ["south", "north", "west"].find((s) => !used.has(s));
+    el.textContent = `With a chest above the dock, turtles come down the column on its ${entry} side and step in sideways, so keep the sky above that block open.`;
+  }
+}
+
 function renderDepotStatus() {
   const { holder, queue = [] } = state.depot;
   const name = (id) => {
@@ -1271,6 +1286,7 @@ function fillFleetForm() {
     $('[data-field="depot.fuel"]').value = "west";
   }
   $("#areas").replaceChildren(...(f.protect?.areas ?? []).map(areaRow));
+  renderDockApproach();
   setSaveMsg("");
 }
 
@@ -1599,7 +1615,10 @@ function bindEvents() {
   for (const sideSelect of $$("select.side")) {
     sideSelect.innerHTML = Object.entries(SIDES).map(([v, label]) => `<option value="${v}">${label}</option>`).join("");
   }
-  $("#fleet-settings").addEventListener("input", markFleetDirty);
+  $("#fleet-settings").addEventListener("input", () => {
+    markFleetDirty();
+    renderDockApproach();
+  });
   $("#btn-add-area").addEventListener("click", () => {
     const w = currentTurtle()?.status?.world;
     // Start a new area as a 20x20 box around the selected turtle, if it has GPS.

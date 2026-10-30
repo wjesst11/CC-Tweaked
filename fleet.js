@@ -4,9 +4,9 @@
 export const COMPASS = ["north", "east", "south", "west"];
 const CX = [0, 1, 0, -1];
 const CZ = [-1, 0, 1, 0];
-// No "up": turtles reach the dock by flying straight down into it.
-const SIDES = ["north", "east", "south", "west", "down"];
-// Lanes sit above travelY, one per turtle; leave room for a big fleet.
+const SIDES = ["north", "east", "south", "west", "up", "down"];
+// Turtles waiting for the dock stack above travelY, one block each; leave
+// room for a big fleet.
 const MAX_LANES = 64;
 
 export const DEFAULT_FLEET = {
@@ -97,6 +97,17 @@ function intersects(a, b) {
 
 const contains = (b, p) => intersects(b, box(p.x, p.y, p.z, p.x, p.y, p.z));
 
+// Turtles come down into the dock from above, unless a chest is above it:
+// then down the open column beside it (never east, where turtles queue) and in
+// from the side. Returns that column, or null.
+export function dockApproach(depot) {
+  const used = new Set([depot.junk, depot.valuables, depot.fuel]);
+  if (!used.has("up")) return null;
+  const side = ["south", "north", "west"].find((s) => !used.has(s));
+  const i = COMPASS.indexOf(side);
+  return { side, x: depot.x + CX[i], z: depot.z + CZ[i] };
+}
+
 export function laneTop(fleet) {
   return fleet.travelY + MAX_LANES;
 }
@@ -105,11 +116,14 @@ export function laneTop(fleet) {
 // turtles fly down to reach it, and the column they queue in.
 function depotBoxes(fleet) {
   const D = fleet.depot;
-  return [
+  const boxes = [
     box(D.x - 1, D.y - 1, D.z - 1, D.x + 1, D.y + 1, D.z + 1),
     box(D.x, D.y, D.z, D.x, laneTop(fleet), D.z),
     box(D.x + 1, fleet.travelY, D.z, D.x + 1, laneTop(fleet), D.z),
   ];
+  const approach = dockApproach(D);
+  if (approach) boxes.push(box(approach.x, D.y, approach.z, approach.x, laneTop(fleet), approach.z));
+  return boxes;
 }
 
 // Returns an error message, or null if the settings are usable.
@@ -117,13 +131,9 @@ export function validateFleet(fleet) {
   if (!fleet.depot) return null;
   const { junk, valuables, fuel } = fleet.depot;
   if (new Set([junk, valuables, fuel]).size < 3) return "Each depot chest needs its own side of the dock.";
-  if (fleet.travelY === null) return "Set a travel height.";
-  if (fleet.travelY < fleet.depot.y + 3) return "The travel height must be at least 3 blocks above the dock.";
-  if (laneTop(fleet) > 319) return `The travel height can be at most ${319 - MAX_LANES} (lanes stack above it).`;
-  const highest = Math.max(-Infinity, ...fleet.protect.areas.map((a) => Math.max(a.y1, a.y2)));
-  if (fleet.travelY <= highest) {
-    return `The travel height must be above your protected areas (the highest reaches Y ${highest}).`;
-  }
+  if (fleet.travelY === null) return "Set a waiting height.";
+  if (fleet.travelY < fleet.depot.y + 3) return "The waiting height must be at least 3 blocks above the dock.";
+  if (laneTop(fleet) > 319) return `The waiting height can be at most ${319 - MAX_LANES} (the queue stacks above it).`;
   return null;
 }
 
@@ -133,7 +143,7 @@ export function validateFleet(fleet) {
 // { assignments: [{ id, args, volume }] } or { error }.
 export function planFleetJob(fleet, kind, params, ready, homes) {
   if (!fleet.depot) return { error: "Set up the depot first (Fleet settings)." };
-  if (fleet.travelY === null) return { error: "Set the travel height first (Fleet settings)." };
+  if (fleet.travelY === null) return { error: "Set the waiting height first (Fleet settings)." };
   if (!ready.length) return { error: "No turtles are ready." };
   const top = laneTop(fleet);
   let jobs;
@@ -184,9 +194,6 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
 
   const depot = depotBoxes(fleet);
   for (const job of jobs) {
-    if (job.volume.y2 >= fleet.travelY) {
-      return { error: "The job reaches the travel height. Mine lower or raise the travel height." };
-    }
     for (const part of [job.volume, job.shaft]) {
       for (const area of fleet.protect.areas) {
         if (intersects(part, area)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };

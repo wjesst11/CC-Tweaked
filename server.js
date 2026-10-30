@@ -513,6 +513,33 @@ setInterval(() => {
   }
 }, 15_000);
 
+// Tell each moving turtle where nearby turtles are, so its routes can avoid
+// them. Moving turtles give way to lower IDs. Turtles standing still (or
+// offline, which are still physically there) are sent as "parked", since they
+// won't move out of the way.
+const TRAFFIC_RANGE = 24;
+setInterval(() => {
+  const located = [...turtles.values()].filter((t) => t.status?.world && t.status.gpsTrusted);
+  for (const r of located) {
+    if (!r.socket || !r.status.moving) continue;
+    const cells = [];
+    const parked = [];
+    for (const o of located) {
+      if (o === r) continue;
+      const a = o.status.world;
+      const b = r.status.world;
+      if (Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.z - b.z)) > TRAFFIC_RANGE) continue;
+      if (!o.socket || !o.status.moving) {
+        parked.push(a);
+      } else if (o.id < r.id) {
+        cells.push(a);
+        if (o.status.next) cells.push(o.status.next);
+      }
+    }
+    if (cells.length || parked.length) send(r.socket, { type: "traffic", cells, parked });
+  }
+}, 1_000);
+
 // Hands out dock turns that were held back during the post-restart grace period.
 setInterval(() => {
   if (depot.holder === null && depot.queue.length) pumpDepot();

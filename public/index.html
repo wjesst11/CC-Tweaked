@@ -434,7 +434,7 @@
           <div id="fleet-settings" class="settings">
             <section class="card">
               <div class="card-head"><h2>Depot</h2><span id="depot-status" class="muted"></span></div>
-              <p class="hint flush">Turtles take turns standing on the dock block to sort their items into three chests next to it and refuel. Keep the sky above the dock open.</p>
+              <p class="hint flush">Turtles take turns standing on the dock block to sort their items into three chests next to it and refuel.</p>
               <div class="fields">
                 <label class="field"><span>Dock X</span><input data-field="depot.x" type="number"></label>
                 <label class="field"><span>Dock Y</span><input data-field="depot.y" type="number"></label>
@@ -446,11 +446,12 @@
                 <label class="field"><span>Valuables chest</span><select data-field="depot.valuables" class="side"></select></label>
                 <label class="field"><span>Fuel chest</span><select data-field="depot.fuel" class="side"></select></label>
               </div>
+              <p id="dock-approach" class="callout"></p>
               <div class="fields">
-                <label class="field"><span>Travel height (Y)</span><input data-field="travelY" type="number" min="-60" max="255"></label>
+                <label class="field"><span>Waiting height (Y)</span><input data-field="travelY" type="number" min="-60" max="255"></label>
                 <label class="field"><span>Refuel up to</span><input data-field="refuelTo" type="number" min="100" step="100"></label>
               </div>
-              <p class="hint flush">Each turtle flies at its own height, starting at the travel height. Pick one above your builds and protected areas. The junk chest fills fast with a big fleet, so feed it into a trash can or hopper line.</p>
+              <p class="hint flush">Turtles waiting for the dock line up in the air beside it, one per block, starting at the waiting height. Otherwise they take the shortest open route and steer around each other. The junk chest fills fast with a big fleet, so feed it into a trash can or hopper line.</p>
               <div class="row"><button type="button" id="btn-release-dock" class="btn ghost sm">Release dock</button></div>
             </section>
 
