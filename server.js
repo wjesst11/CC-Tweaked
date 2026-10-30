@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
+import { DEFAULT_FLEET, planFleetJob, sanitizeFleet, validateFleet } from "./fleet.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8080;
@@ -22,7 +23,10 @@ const TURTLE_TIMEOUT_MS = 30_000;
 const MAX_LOGS = 200;
 const SNAPSHOT_LOGS = 50;
 // Actions the dashboard may send to every turtle at once.
-const BROADCAST_ACTIONS = new Set(["stop", "goHome", "update"]);
+const BROADCAST_ACTIONS = new Set(["stop", "pause", "resume", "goHome", "update"]);
+// After a restart, give turtles that held the dock time to reconnect and
+// reclaim it before anyone else gets a turn.
+const LEASE_GRACE_MS = 20_000;
 
 function secretFromEnv(name) {
   if (process.env[name]) return process.env[name];
@@ -63,8 +67,9 @@ function parse(raw) {
   }
 }
 
+// Offline turtles have no socket; sending to them is a no-op.
 function send(ws, msg) {
-  if (ws?.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +79,15 @@ function send(ws, msg) {
 /** id -> { id, label, online, lastSeen, version, status, logs, socket } */
 const turtles = new Map();
 const dashboards = new Set();
+
+// Fleet settings. Every turtle keeps a copy, so after a redeploy the newest
+// copy a reconnecting turtle reports is adopted again.
+let fleet = structuredClone(DEFAULT_FLEET);
+/** turtle id -> travel lane (blocks above fleet.travelY) */
+const lanes = new Map();
+// One turtle at a time may use the dock; the rest queue.
+const depot = { holder: null, queue: [], since: 0 };
+const startedAt = Date.now();
 
 function turtleView(t, withLogs = false) {
   const view = {
@@ -98,6 +112,103 @@ function addLog(t, level, msg) {
   t.logs.push(entry);
   if (t.logs.length > MAX_LOGS) t.logs.splice(0, t.logs.length - MAX_LOGS);
   broadcast({ type: "log", id: t.id, entry });
+}
+
+const nameOf = (t) => t.label || `Turtle #${t.id}`;
+
+// ---------------------------------------------------------------------------
+// Fleet: settings, lanes and the dock
+
+function setFleet(next) {
+  fleet = next;
+  broadcast({ type: "fleet", fleet });
+  for (const t of turtles.values()) send(t.socket, { type: "fleet", fleet });
+}
+
+function assignLane(id, claimed) {
+  const taken = new Set([...lanes].filter(([other]) => other !== id).map(([, lane]) => lane));
+  if (Number.isInteger(claimed) && claimed >= 0 && claimed < 64 && !taken.has(claimed)) {
+    lanes.set(id, claimed);
+    return null;
+  }
+  let lane = 0;
+  while (taken.has(lane)) lane++;
+  lanes.set(id, lane);
+  return lane;
+}
+
+function depotView() {
+  return { holder: depot.holder, queue: depot.queue, since: depot.since };
+}
+
+function grant(id) {
+  depot.holder = id;
+  depot.since = Date.now();
+  send(turtles.get(id)?.socket, { type: "lease", resource: "depot", granted: true });
+}
+
+function pumpDepot() {
+  if (depot.holder === null && Date.now() - startedAt >= LEASE_GRACE_MS) {
+    while (depot.queue.length) {
+      const id = depot.queue.shift();
+      if (turtles.get(id)?.socket) {
+        grant(id);
+        break;
+      }
+    }
+  }
+  broadcast({ type: "depot", depot: depotView() });
+}
+
+function releaseDepot(id) {
+  depot.queue = depot.queue.filter((q) => q !== id);
+  if (depot.holder === id) depot.holder = null;
+  pumpDepot();
+}
+
+function handleLease(turtle, msg) {
+  if (msg.resource !== "depot") return;
+  if (msg.op === "release") {
+    releaseDepot(turtle.id);
+  } else if (msg.op === "acquire") {
+    if (depot.holder === turtle.id) {
+      grant(turtle.id);
+    } else if (!depot.queue.includes(turtle.id)) {
+      depot.queue.push(turtle.id);
+    }
+    pumpDepot();
+  }
+}
+
+// Turtles that can take a fleet job right now.
+function readyTurtles(ids) {
+  const ready = [];
+  const skipped = [];
+  for (const id of ids) {
+    const t = turtles.get(Number(id));
+    if (!t) continue;
+    const s = t.status ?? {};
+    if (!t.socket) skipped.push(`${nameOf(t)} is offline`);
+    else if (!s.gpsTrusted) skipped.push(`${nameOf(t)} doesn't know its GPS facing yet`);
+    else if (!lanes.has(t.id)) skipped.push(`${nameOf(t)} has no travel lane yet`);
+    else if (s.job) skipped.push(`${nameOf(t)} is busy`);
+    else ready.push({ id: t.id, name: nameOf(t) });
+  }
+  return { ready: ready.sort((a, b) => a.id - b.id), skipped };
+}
+
+function startFleetJob(ws, { kind, ids, params }) {
+  if (!Array.isArray(ids) || typeof kind !== "string") return;
+  const { ready, skipped } = readyTurtles(ids);
+  const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.homeWorld }));
+  const plan = planFleetJob(fleet, kind, params ?? {}, ready, homes);
+  if (plan.error) {
+    send(ws, { type: "fleetJobResult", ok: false, msg: [plan.error, ...skipped].join(" ") });
+    return;
+  }
+  for (const { id, args } of plan.assignments) dispatch(turtles.get(id), "fleetJob", args);
+  const msg = `Started ${plan.assignments.length} turtle${plan.assignments.length === 1 ? "" : "s"}.`;
+  send(ws, { type: "fleetJobResult", ok: true, msg: [msg, ...skipped].join(" ") });
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +245,24 @@ function handleTurtle(ws) {
         lastSeen: Date.now(),
       });
       send(ws, { type: "welcome" });
+
+      // Keep whichever copy of the fleet settings is newest.
+      const theirs = msg.fleet && typeof msg.fleet === "object" ? Number(msg.fleet.updatedAt) || 0 : 0;
+      if (theirs > fleet.updatedAt) setFleet(sanitizeFleet(msg.fleet));
+      else if (theirs < fleet.updatedAt) send(ws, { type: "fleet", fleet });
+
+      const lane = assignLane(id, msg.lane);
+      if (lane !== null) send(ws, { type: "lane", lane });
+
+      // A turtle that was at the dock when the server restarted gets it back.
+      if (msg.holding && (depot.holder === null || depot.holder === id)) {
+        depot.holder = id;
+        depot.since = Date.now();
+      } else if (!msg.holding && depot.holder === id) {
+        depot.holder = null;
+      }
+      pumpDepot();
+
       addLog(turtle, "info", "Connected");
       broadcast({ type: "turtle", turtle: turtleView(turtle) });
       return;
@@ -160,6 +289,9 @@ function handleTurtle(ws) {
           addLog(turtle, msg.ok ? "info" : "error", `${msg.action}: ${msg.msg ?? "failed"}`);
         }
         break;
+      case "lease":
+        handleLease(turtle, msg);
+        break;
     }
   });
 
@@ -168,6 +300,10 @@ function handleTurtle(ws) {
     if (!turtle || turtle.socket !== ws) return;
     turtle.socket = null;
     turtle.online = false;
+    // It leaves the queue, but keeps the dock if it holds it: it's physically
+    // there. The dashboard can release the dock by hand.
+    depot.queue = depot.queue.filter((q) => q !== turtle.id);
+    pumpDepot();
     addLog(turtle, "warn", "Disconnected");
     broadcast({ type: "turtle", turtle: turtleView(turtle) });
   });
@@ -180,13 +316,21 @@ function dispatch(turtle, action, args) {
   send(turtle.socket, { type: "cmd", action, args });
 }
 
-function handleCommand(ws, { id, action, args }) {
+function handleCommand(ws, { id, ids, action, args }) {
   if (typeof action !== "string" || action.length > 32) return;
   args = args && typeof args === "object" ? args : {};
 
   if (id === "all") {
     if (!BROADCAST_ACTIONS.has(action)) return;
     for (const t of turtles.values()) if (t.socket) dispatch(t, action, args);
+    return;
+  }
+  // An explicit selection of turtles from the fleet page.
+  if (Array.isArray(ids)) {
+    for (const tid of ids.slice(0, 256)) {
+      const t = turtles.get(Number(tid));
+      if (t?.socket) dispatch(t, action, args);
+    }
     return;
   }
 
@@ -225,7 +369,12 @@ function handleDashboard(ws) {
       clearTimeout(authTimer);
       dashboards.add(ws);
       send(ws, { type: "authOk", session: issueSession() });
-      send(ws, { type: "snapshot", turtles: [...turtles.values()].map((t) => turtleView(t, true)) });
+      send(ws, {
+        type: "snapshot",
+        turtles: [...turtles.values()].map((t) => turtleView(t, true)),
+        fleet,
+        depot: depotView(),
+      });
       return;
     }
 
@@ -235,8 +384,23 @@ function handleDashboard(ws) {
       const turtle = turtles.get(Number(msg.id));
       if (turtle && !turtle.socket) {
         turtles.delete(turtle.id);
+        lanes.delete(turtle.id);
         broadcast({ type: "removed", id: turtle.id });
       }
+    } else if (msg.type === "saveFleet") {
+      const next = sanitizeFleet(msg.fleet);
+      const problem = validateFleet(next);
+      if (problem) {
+        send(ws, { type: "fleetSaved", ok: false, msg: problem });
+        return;
+      }
+      next.updatedAt = Math.max(Date.now(), fleet.updatedAt + 1);
+      setFleet(next);
+      send(ws, { type: "fleetSaved", ok: true });
+    } else if (msg.type === "fleetJob") {
+      startFleetJob(ws, msg);
+    } else if (msg.type === "releaseDepot") {
+      if (depot.holder !== null) releaseDepot(depot.holder);
     }
   });
 
@@ -254,21 +418,31 @@ app.disable("x-powered-by");
 
 app.get("/healthz", (_req, res) => res.send("ok"));
 
+function publicBase(req) {
+  const proto = String(req.headers["x-forwarded-proto"] ?? req.protocol).split(",")[0];
+  return PUBLIC_URL ?? `${proto}://${req.get("host")}`;
+}
+
+// Lua files are served with this server's address filled in.
+function serveLua(file) {
+  return async (req, res, next) => {
+    try {
+      const base = publicBase(req);
+      const script = await fs.readFile(path.join(ROOT, "turtle", file), "utf8");
+      res
+        .type("text/plain")
+        .set("Cache-Control", "no-store")
+        .send(script.replaceAll("__WS_URL__", `${base.replace(/^http/, "ws")}/ws/turtle`).replaceAll("__HTTP_URL__", base));
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
 // In game: wget https://<your-app>/turtle.lua startup.lua
-app.get("/turtle.lua", async (req, res, next) => {
-  try {
-    const proto = String(req.headers["x-forwarded-proto"] ?? req.protocol).split(",")[0];
-    const base = PUBLIC_URL ?? `${proto}://${req.get("host")}`;
-    const wsUrl = `${base.replace(/^http/, "ws")}/ws/turtle`;
-    const script = await fs.readFile(path.join(ROOT, "turtle", "minerdash.lua"), "utf8");
-    res
-      .type("text/plain")
-      .set("Cache-Control", "no-store")
-      .send(script.replaceAll("__WS_URL__", wsUrl));
-  } catch (err) {
-    next(err);
-  }
-});
+app.get("/turtle.lua", serveLua("minerdash.lua"));
+// Installer disk: wget https://<your-app>/install.lua disk/startup.lua
+app.get("/install.lua", serveLua("install.lua"));
 
 app.use(express.static(path.join(ROOT, "public")));
 
@@ -304,5 +478,10 @@ setInterval(() => {
     ws.ping();
   }
 }, 15_000);
+
+// Hands out dock turns that were held back during the post-restart grace period.
+setInterval(() => {
+  if (depot.holder === null && depot.queue.length) pumpDepot();
+}, 2_000);
 
 server.listen(PORT, () => console.log(`Turtle dashboard listening on :${PORT}`));

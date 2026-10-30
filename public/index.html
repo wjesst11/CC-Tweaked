@@ -30,12 +30,16 @@
     <header class="topbar">
       <div class="brand"><span class="logo" aria-hidden="true"></span>MinerDash</div>
       <span id="conn" class="conn" data-state="connecting">Connecting…</span>
+      <div class="tabs inline views" role="tablist" aria-label="View">
+        <button class="tab" role="tab" data-view="turtles">Turtles</button>
+        <button class="tab" role="tab" data-view="fleet">Fleet</button>
+      </div>
       <div class="spacer"></div>
       <div class="topbar-actions">
-        <button id="btn-install" class="btn">Add turtle</button>
-        <button id="btn-update-all" class="btn" title="Push the latest script to every idle turtle">Update all</button>
-        <button id="btn-recall-all" class="btn">Recall all</button>
-        <button id="btn-stop-all" class="btn danger">Stop all</button>
+        <button id="btn-install" class="btn">Add turtles</button>
+        <button id="btn-resume-all" class="btn" title="Resume every paused turtle">Resume all</button>
+        <button id="btn-recall-all" class="btn" title="Cancel every job and send every turtle home">Recall all</button>
+        <button id="btn-pause-all" class="btn danger" title="Freeze every turtle where it is">Pause all</button>
         <button id="btn-theme" class="btn icon" title="Toggle light/dark" aria-label="Toggle light/dark theme">
           <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
         </button>
@@ -53,6 +57,7 @@
         <div class="chips" role="group" aria-label="Filter turtles">
           <button class="chip" data-filter="all">All <span></span></button>
           <button class="chip" data-filter="working">Working <span></span></button>
+          <button class="chip" data-filter="paused">Paused <span></span></button>
           <button class="chip" data-filter="attention">Needs attention <span></span></button>
           <button class="chip" data-filter="idle">Idle <span></span></button>
           <button class="chip" data-filter="offline">Offline <span></span></button>
@@ -68,6 +73,7 @@
           <ol class="steps install-steps"></ol>
         </section>
 
+        <!-- One turtle ------------------------------------------------------ -->
         <section id="turtle" class="turtle" hidden>
           <div class="turtle-head">
             <div class="turtle-title">
@@ -99,7 +105,11 @@
             <section class="card stat stat-job">
               <div class="stat-head">
                 <div class="stat-label">Job</div>
-                <button id="btn-stop" class="btn danger sm needs-online" title="Stop (Esc)">Stop</button>
+                <div class="job-actions">
+                  <button id="btn-pause" class="btn sm needs-online" title="Freeze in place (Esc)">Pause</button>
+                  <button id="btn-resume" class="btn sm primary needs-online">Resume</button>
+                  <button id="btn-cancel" class="btn sm danger needs-online" title="Stop the job and go home">Cancel</button>
+                </div>
               </div>
               <div id="job-value" class="stat-value">Idle</div>
               <div id="job-meter" class="meter" hidden><div class="meter-fill"></div></div>
@@ -177,7 +187,7 @@
                     </tr>
                   </tbody>
                 </table>
-                <p class="hint">Keys: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move and turn, <kbd>E</kbd>/<kbd>Q</kbd> up and down, <kbd>Esc</kbd> stops. Place uses the selected slot.</p>
+                <p class="hint">Keys: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move and turn, <kbd>E</kbd>/<kbd>Q</kbd> up and down, <kbd>Esc</kbd> pauses. Protected blocks and areas are never dug or built in.</p>
               </section>
 
               <section class="card">
@@ -197,7 +207,7 @@
 
             <div class="col">
               <section class="card">
-                <div class="card-head"><h2>Start a job</h2></div>
+                <div class="card-head"><h2>Start a job here</h2></div>
                 <div class="tabs" role="tablist">
                   <button class="tab" role="tab" data-tab="quarry">Quarry</button>
                   <button class="tab" role="tab" data-tab="tunnel">Tunnel</button>
@@ -227,9 +237,9 @@
                   <button class="btn primary needs-idle" type="submit">Start tunnel</button>
                 </form>
                 <div class="callout">
-                  Jobs make the turtle's current spot <b>home</b>. Put a chest directly
-                  <b>behind</b> the turtle: it unloads there when full and when finished,
-                  and burns mined coal when fuel runs low.
+                  These jobs unload into a chest placed directly <b>behind</b> the turtle's
+                  starting spot. For the shared depot and many turtles at once, use the
+                  <b>Fleet</b> page.
                 </div>
               </section>
 
@@ -243,11 +253,27 @@
                 </div>
                 <svg id="map" class="map" viewBox="0 0 240 240" role="img" aria-label="Top-down map of turtles"></svg>
                 <ul id="map-legend" class="legend"></ul>
+                <p id="home-line" class="home-line"></p>
                 <div class="row">
-                  <button class="btn needs-online" data-cmd="goHome" title="Stops any running job">Go home</button>
+                  <button class="btn needs-online" data-cmd="goHome" title="Cancels any running job">Go home</button>
                   <button class="btn needs-idle" data-cmd="setHome">Set home here</button>
+                  <button id="btn-home-coords" class="btn ghost needs-idle">Set home to…</button>
                   <button id="btn-reset-pos" class="btn ghost needs-idle" title="Use after moving the turtle by hand">Reset position</button>
                 </div>
+                <form id="home-form" class="home-form" hidden>
+                  <div class="fields">
+                    <label class="field"><span>X</span><input name="x" type="number" required></label>
+                    <label class="field"><span>Y</span><input name="y" type="number" required></label>
+                    <label class="field"><span>Z</span><input name="z" type="number" required></label>
+                    <label class="field"><span>Facing</span>
+                      <select name="facing"><option>north</option><option>east</option><option>south</option><option>west</option></select>
+                    </label>
+                  </div>
+                  <div class="row">
+                    <button class="btn primary sm" type="submit">Set home</button>
+                    <button class="btn ghost sm" type="button" id="btn-home-cancel">Cancel</button>
+                  </div>
+                </form>
               </section>
 
               <section class="card">
@@ -257,27 +283,229 @@
             </div>
           </div>
         </section>
+
+        <!-- Fleet ------------------------------------------------------------- -->
+        <section id="fleet-view" class="turtle" hidden>
+          <div class="turtle-head">
+            <div class="turtle-title">
+              <h1>Fleet</h1>
+              <div id="fleet-summary" class="turtle-meta muted"></div>
+            </div>
+            <div class="head-actions">
+              <button id="btn-update-all" class="btn ghost" title="Download the latest script to every idle turtle and reboot it">Update all scripts</button>
+            </div>
+          </div>
+          <div id="fleet-warnings" class="callout warn" hidden></div>
+
+          <div class="panels">
+            <div class="col">
+              <section class="card">
+                <div class="card-head"><h2>Start a fleet job</h2></div>
+                <div class="tabs" role="tablist">
+                  <button class="tab" role="tab" data-fleet-tab="branchMine">Mine a level</button>
+                  <button class="tab" role="tab" data-fleet-tab="areaQuarry">Quarry an area</button>
+                </div>
+                <form id="fleet-job-form">
+                  <div data-kind="branchMine">
+                    <div class="fields">
+                      <label class="field"><span>Ore</span>
+                        <select name="preset">
+                          <option value="-59">Diamond (Y -59)</option>
+                          <option value="-58">Redstone (Y -58)</option>
+                          <option value="-16">Gold (Y -16)</option>
+                          <option value="0">Lapis (Y 0)</option>
+                          <option value="16">Iron (Y 16)</option>
+                          <option value="48">Copper (Y 48)</option>
+                          <option value="96">Coal (Y 96)</option>
+                          <option value="15">Ancient debris (Nether Y 15)</option>
+                          <option value="">Custom level</option>
+                        </select>
+                      </label>
+                      <label class="field"><span>Level (Y)</span><input name="y" type="number" min="-64" max="319" value="-59" required></label>
+                      <label class="field"><span>Direction</span>
+                        <select name="dir"><option>north</option><option selected>east</option><option>south</option><option>west</option></select>
+                      </label>
+                    </div>
+                    <div class="fields">
+                      <label class="field"><span>Start X</span><input name="x" type="number" required></label>
+                      <label class="field"><span>Start Z</span><input name="z" type="number" required></label>
+                      <label class="field"><span>Tunnel length</span><input name="length" type="number" min="1" max="1024" value="64" required></label>
+                      <label class="field"><span>Spacing</span><input name="spacing" type="number" min="2" max="16" value="3" required></label>
+                    </div>
+                    <div class="row between">
+                      <button type="button" class="btn sm" data-use-pos="x,z">Start at selected turtle</button>
+                      <label class="check"><input name="scan" type="checkbox" checked><span>Mine ore veins in the walls</span></label>
+                    </div>
+                  </div>
+                  <div data-kind="areaQuarry" hidden>
+                    <div class="fields">
+                      <label class="field"><span>Corner 1 X</span><input name="x1" type="number" required></label>
+                      <label class="field"><span>Corner 1 Z</span><input name="z1" type="number" required></label>
+                      <label class="field"><span>Corner 2 X</span><input name="x2" type="number" required></label>
+                      <label class="field"><span>Corner 2 Z</span><input name="z2" type="number" required></label>
+                    </div>
+                    <div class="fields">
+                      <label class="field"><span>Top Y</span><input name="yTop" type="number" min="-64" max="319" required></label>
+                      <label class="field"><span>Bottom Y</span><input name="yBottom" type="number" min="-64" max="319" required></label>
+                    </div>
+                    <div class="row">
+                      <button type="button" class="btn sm" data-use-pos="x1,z1">Corner 1 at selected turtle</button>
+                      <button type="button" class="btn sm" data-use-pos="x2,z2">Corner 2 at selected turtle</button>
+                    </div>
+                  </div>
+
+                  <div class="picker-head">
+                    <h3>Turtles <span id="picker-count" class="muted"></span></h3>
+                    <div class="row">
+                      <button type="button" id="pick-ready" class="btn ghost sm">All ready</button>
+                      <button type="button" id="pick-none" class="btn ghost sm">None</button>
+                    </div>
+                  </div>
+                  <div id="picker" class="picker"></div>
+                  <p id="fleet-job-preview" class="hint"></p>
+                  <p id="fleet-job-result" class="form-msg" role="status" hidden></p>
+                  <div class="row">
+                    <button class="btn primary" type="submit">Start fleet job</button>
+                    <button type="button" class="btn" data-bulk="pause">Pause</button>
+                    <button type="button" class="btn" data-bulk="resume">Resume</button>
+                    <button type="button" class="btn" data-bulk="goHome">Recall</button>
+                    <button type="button" class="btn ghost" data-bulk="setHome">Set homes here</button>
+                  </div>
+                  <p class="hint">The buttons next to Start act on the turtles picked above. Each turtle gets its own tunnel or strip, flies at its own height, and takes turns at the depot.</p>
+                </form>
+              </section>
+            </div>
+
+            <div class="col">
+              <section class="card">
+                <div class="card-head">
+                  <h2>Fleet map</h2>
+                  <span class="muted">North up · click a turtle to open it</span>
+                </div>
+                <svg id="fleet-map" class="map fleet-map" viewBox="0 0 400 400" role="img" aria-label="Map of the fleet, depot and protected areas"></svg>
+                <ul class="legend">
+                  <li><span class="key key-mark mark-working"></span>Working</li>
+                  <li><span class="key key-mark mark-paused"></span>Paused</li>
+                  <li><span class="key key-mark mark-attention"></span>Needs attention</li>
+                  <li><span class="key key-mark mark-idle"></span>Idle</li>
+                  <li><span class="key key-depot"></span>Depot</li>
+                  <li><span class="key key-area"></span>Protected</li>
+                  <li><span class="key key-job"></span>Job area</li>
+                </ul>
+              </section>
+            </div>
+          </div>
+
+          <div id="fleet-settings" class="settings">
+            <section class="card">
+              <div class="card-head"><h2>Depot</h2><span id="depot-status" class="muted"></span></div>
+              <p class="hint flush">Turtles take turns standing on the dock block to sort their items into three chests next to it and refuel. Keep the sky above the dock open.</p>
+              <div class="fields">
+                <label class="field"><span>Dock X</span><input data-field="depot.x" type="number"></label>
+                <label class="field"><span>Dock Y</span><input data-field="depot.y" type="number"></label>
+                <label class="field"><span>Dock Z</span><input data-field="depot.z" type="number"></label>
+              </div>
+              <button type="button" id="btn-dock-here" class="btn sm">Dock at selected turtle</button>
+              <div class="fields">
+                <label class="field"><span>Junk chest</span><select data-field="depot.junk" class="side"></select></label>
+                <label class="field"><span>Valuables chest</span><select data-field="depot.valuables" class="side"></select></label>
+                <label class="field"><span>Fuel chest</span><select data-field="depot.fuel" class="side"></select></label>
+              </div>
+              <div class="fields">
+                <label class="field"><span>Travel height (Y)</span><input data-field="travelY" type="number" min="-60" max="255"></label>
+                <label class="field"><span>Refuel up to</span><input data-field="refuelTo" type="number" min="100" step="100"></label>
+              </div>
+              <p class="hint flush">Each turtle flies at its own height, starting at the travel height. Pick one above your builds and protected areas. The junk chest fills fast with a big fleet, so feed it into a trash can or hopper line.</p>
+              <div class="row"><button type="button" id="btn-release-dock" class="btn ghost sm">Release dock</button></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head"><h2>Protection</h2></div>
+              <label class="field">
+                <span>Never dig these blocks (one per line, * matches anything)</span>
+                <textarea data-field="protect.blocks" rows="6" spellcheck="false"></textarea>
+              </label>
+              <p class="hint flush">Turtles, computers and other ComputerCraft blocks are always protected.</p>
+              <div class="areas-head">
+                <h3>Protected areas</h3>
+                <button type="button" id="btn-add-area" class="btn sm">Add area</button>
+              </div>
+              <p class="hint flush">Nothing inside these boxes is ever dug or built on. Corners are inclusive.</p>
+              <div id="areas" class="areas"></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head"><h2>Item sorting</h2></div>
+              <label class="field">
+                <span>Valuables (to the valuables chest)</span>
+                <textarea data-field="items.valuables" rows="6" spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span>Fuel (to the fuel chest)</span>
+                <textarea data-field="items.fuel" rows="3" spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span>Ore veins to follow when mining a level</span>
+                <textarea data-field="veinBlocks" rows="2" spellcheck="false"></textarea>
+              </label>
+              <p class="hint flush">Everything else goes to the junk chest.</p>
+            </section>
+          </div>
+          <div class="save-bar">
+            <span id="fleet-save-msg" class="muted"></span>
+            <button type="button" id="btn-revert-fleet" class="btn ghost">Revert</button>
+            <button type="button" id="btn-save-fleet" class="btn primary">Save fleet settings</button>
+          </div>
+        </section>
       </main>
     </div>
   </div>
 
+  <template id="area-row">
+    <div class="area">
+      <input class="area-name" placeholder="Name" aria-label="Area name">
+      <div class="area-corner">
+        <span>From</span>
+        <input type="number" data-k="x1" aria-label="From X" placeholder="X">
+        <input type="number" data-k="y1" aria-label="From Y" placeholder="Y">
+        <input type="number" data-k="z1" aria-label="From Z" placeholder="Z">
+      </div>
+      <div class="area-corner">
+        <span>To</span>
+        <input type="number" data-k="x2" aria-label="To X" placeholder="X">
+        <input type="number" data-k="y2" aria-label="To Y" placeholder="Y">
+        <input type="number" data-k="z2" aria-label="To Z" placeholder="Z">
+      </div>
+      <button type="button" class="btn ghost sm area-remove" aria-label="Remove area">Remove</button>
+    </div>
+  </template>
+
   <dialog id="install-dialog" class="dialog">
-    <h2>Add a turtle</h2>
+    <h2>Add turtles</h2>
     <ol class="steps install-steps"></ol>
     <form method="dialog" class="row end"><button class="btn primary">Done</button></form>
   </dialog>
 
   <template id="install-steps">
-    <li>Use a <b>mining turtle</b> (pickaxe equipped) with a little fuel. Name it with <code>label set Miner1</code>.</li>
+    <li>Use <b>mining turtles</b> (pickaxe equipped) with a wireless or ender modem in their inventory or already equipped.</li>
     <li>
-      On the turtle, run:
+      <b>Make an installer disk once.</b> Put a floppy in a disk drive, and on a computer next to it run:
+      <div class="code">
+        <code class="install-disk"></code>
+        <button class="btn sm copy" type="button" data-copy=".install-disk">Copy</button>
+      </div>
+      Then run <code>disk/startup.lua</code> and paste your <b>TURTLE_TOKEN</b>. It's saved on the disk.
+    </li>
+    <li><b>Place each turtle next to the drive and turn it on.</b> It equips its modem, names itself and installs MinerDash.</li>
+    <li><b>Pick it up, place it where it should live and turn it on.</b> That spot becomes its permanent <b>home</b> (keep the sky above it open), and it connects. You can change a home later from the dashboard.</li>
+    <li>
+      Or set up one turtle by hand:
       <div class="code">
         <code class="install-cmd"></code>
-        <button class="btn sm copy" type="button">Copy</button>
+        <button class="btn sm copy" type="button" data-copy=".install-cmd">Copy</button>
       </div>
+      then run <code>startup</code> and paste the token.
     </li>
-    <li>Run <code>startup</code> and paste your <b>TURTLE_TOKEN</b> when asked. It reconnects on its own after reboots and chunk reloads.</li>
-    <li>For jobs, place a chest directly behind the turtle.</li>
   </template>
 
   <div id="toasts" class="toasts" role="status" aria-live="polite"></div>

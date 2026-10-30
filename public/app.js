@@ -21,12 +21,15 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
+const SCRIPT_VERSION = "1.2.0"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
+const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
 const KEYS = { w: "forward", s: "back", a: "turnLeft", d: "turnRight", e: "up", q: "down" };
 const DIGGABLE = new Set(["forward", "up", "down"]);
 const JOB_NAMES = { quarry: "Quarry", tunnel: "Tunnel", goHome: "Going home" };
-const STATE_LABELS = { working: "Working", attention: "Needs attention", idle: "Idle", offline: "Offline" };
+const KIND_NAMES = { branchMine: "Mining a level", areaQuarry: "Quarrying an area" };
+const STATE_LABELS = { working: "Working", paused: "Paused", attention: "Needs attention", idle: "Idle", offline: "Offline" };
 
 // Swatches that make valuables easy to spot in the inventory grid.
 const ITEM_COLORS = [
@@ -47,6 +50,7 @@ const ICONS = {
   offline: '<svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="3.75" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
   idle: '<svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4" fill="currentColor"/></svg>',
   working: '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1l7 4-7 4z" fill="currentColor"/></svg>',
+  paused: '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1h2.5v8H1.5zM6 1h2.5v8H6z" fill="currentColor"/></svg>',
   attention: '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 .5l4.7 8.8H.3z" fill="currentColor"/></svg>',
 };
 
@@ -55,9 +59,14 @@ const state = {
   turtles: new Map(), // id -> turtle as sent by the server, plus logs
   trails: new Map(), // id -> { frame, points: [{x, z}] } for the map
   selected: savedSelection === null ? null : Number(savedSelection),
+  view: store.get("view") === "fleet" ? "fleet" : "turtles",
   filter: store.get("filter") ?? "all",
   search: "",
   mapMode: store.get("mapMode") === "fleet" ? "fleet" : "turtle",
+  fleet: null, // shared fleet settings from the server
+  fleetDirty: false, // the settings form has unsaved edits
+  depot: { holder: null, queue: [] },
+  picked: new Set(), // turtles picked for a fleet job
   ready: false, // received the first snapshot
   ws: null,
   loggedIn: false,
@@ -70,6 +79,7 @@ const state = {
 const nameOf = (t) => t.label || `Turtle #${t.id}`;
 const fmt = (n) => Math.round(n).toLocaleString();
 const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const escapeXml = (s) => String(s).replace(/[<>&"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function itemsOf(status) {
   const inv = status?.inventory;
@@ -103,17 +113,38 @@ function fuelInfo(status) {
   return { fuel: status.fuel, limit, frac, sev };
 }
 
+function jobName(status) {
+  const job = status?.job;
+  if (!job) return null;
+  if (job.name === "fleetJob" || job.name === "resume") return KIND_NAMES[status.fleetJob?.kind] ?? "Fleet job";
+  return JOB_NAMES[job.name] ?? prettyName(job.name);
+}
+
 function jobPercent(job) {
   return job.name === "goHome" ? "" : `${Math.round((job.progress ?? 0) * 100)}%`;
 }
 
 function turtleState(t) {
   if (!t.online) return { key: "offline", label: "Offline" };
-  const job = t.status?.job;
+  const s = t.status ?? {};
+  const job = s.job;
+  if (job?.paused) return { key: "paused", label: "Paused" };
   if (job && /waiting|full|low on fuel/i.test(job.detail ?? "")) return { key: "attention", label: "Needs attention" };
-  if (job) return { key: "working", label: `${JOB_NAMES[job.name] ?? prettyName(job.name)} ${jobPercent(job)}`.trim() };
-  if (fuelInfo(t.status)?.sev === "crit") return { key: "attention", label: "Low fuel" };
+  if (job) return { key: "working", label: `${jobName(s)} ${jobPercent(job)}`.trim() };
+  if (s.fleetJob?.failed) return { key: "attention", label: "Job failed" };
+  if (s.fleetJob?.paused) return { key: "paused", label: "Paused" };
+  if (fuelInfo(s)?.sev === "crit") return { key: "attention", label: "Low fuel" };
   return { key: "idle", label: "Idle" };
+}
+
+// Can this turtle take a fleet job? Returns null if so, else the reason.
+function notReady(t) {
+  const s = t.status ?? {};
+  if (!t.online) return "offline";
+  if (!s.gpsTrusted) return "no GPS facing yet";
+  if (s.lane == null) return "no travel lane yet";
+  if (s.job) return "busy";
+  return null;
 }
 
 // Where to draw a turtle: world coordinates once GPS knows its facing,
@@ -187,10 +218,12 @@ function handle(msg) {
     case "snapshot":
       state.turtles = new Map(msg.turtles.map((t) => [t.id, t]));
       for (const t of state.turtles.values()) recordTrail(t);
+      state.depot = msg.depot ?? state.depot;
+      setFleet(msg.fleet);
       state.ready = true;
       state.revealSelected = true;
       ensureSelection();
-      invalidate("list", "detail", "log");
+      invalidate("list", "detail", "log", "fleet");
       break;
 
     case "turtle": {
@@ -201,8 +234,8 @@ function handle(msg) {
         ensureSelection();
         invalidate("log");
       }
-      // Other turtles appear on the map, so the detail view can change too.
-      invalidate("list", "detail");
+      // Other turtles appear on the maps, so the detail view can change too.
+      invalidate("list", "detail", "fleet");
       break;
     }
 
@@ -219,9 +252,36 @@ function handle(msg) {
     case "removed":
       state.turtles.delete(msg.id);
       state.trails.delete(msg.id);
+      state.picked.delete(msg.id);
       ensureSelection();
-      invalidate("list", "detail", "log");
+      invalidate("list", "detail", "log", "fleet");
       break;
+
+    case "fleet":
+      setFleet(msg.fleet);
+      invalidate("fleet");
+      break;
+
+    case "depot":
+      state.depot = msg.depot;
+      invalidate("fleet");
+      break;
+
+    case "fleetSaved":
+      if (msg.ok) {
+        state.fleetDirty = false;
+        fillFleetForm();
+      }
+      setSaveMsg(msg.ok ? "Saved. Every turtle has the new settings." : msg.msg, !msg.ok);
+      break;
+
+    case "fleetJobResult": {
+      const el = $("#fleet-job-result");
+      el.hidden = false;
+      el.className = `form-msg ${msg.ok ? "ok" : "error"}`;
+      el.textContent = msg.msg;
+      break;
+    }
 
     case "error":
       toast(msg.msg, "error");
@@ -245,7 +305,7 @@ function command(action, args = {}, id = state.selected) {
 
 // Rendering is batched: with dozens of turtles streaming updates, draw at most
 // every RENDER_INTERVAL_MS rather than once per message.
-const dirty = { list: false, detail: false, log: false };
+const dirty = { list: false, detail: false, log: false, fleet: false };
 let renderTimer = 0;
 let lastRender = 0;
 
@@ -259,10 +319,16 @@ function invalidate(...parts) {
 function flush() {
   renderTimer = 0;
   lastRender = performance.now();
-  const { list, detail, log } = dirty;
-  dirty.list = dirty.detail = dirty.log = false;
+  const { list, detail, log, fleet } = dirty;
+  dirty.list = dirty.detail = dirty.log = dirty.fleet = false;
   if (list) renderList();
-  if (detail || log) renderDetail(log);
+  $("#fleet-view").hidden = state.view !== "fleet";
+  if (state.view === "fleet") {
+    $("#turtle").hidden = $("#empty").hidden = true;
+    if (fleet || list) renderFleet();
+  } else if (detail || log) {
+    renderDetail(log);
+  }
 }
 
 // Selection & views ------------------------------------------------------------
@@ -283,7 +349,14 @@ function select(id) {
   state.selected = id;
   state.revealSelected = true;
   store.set("selected", id);
-  invalidate("list", "detail", "log");
+  invalidate("list", "detail", "log", "fleet");
+}
+
+function setView(view) {
+  state.view = view;
+  store.set("view", view);
+  for (const tab of $$(".tab[data-view]")) tab.setAttribute("aria-selected", String(tab.dataset.view === view));
+  invalidate("list", "detail", "log", "fleet");
 }
 
 function showApp() {
@@ -316,6 +389,10 @@ function toast(text, level = "info") {
   setTimeout(() => el.remove(), level === "info" ? 3000 : 6000);
 }
 
+function currentTurtle() {
+  return state.turtles.get(state.selected);
+}
+
 // Turtle list --------------------------------------------------------------------
 
 function renderStatus(el, st) {
@@ -340,7 +417,7 @@ function renderList() {
   const turtles = sortedTurtles();
   const states = new Map(turtles.map((t) => [t.id, turtleState(t)]));
 
-  const counts = { all: turtles.length, working: 0, attention: 0, idle: 0, offline: 0 };
+  const counts = { all: turtles.length, working: 0, paused: 0, attention: 0, idle: 0, offline: 0 };
   for (const st of states.values()) counts[st.key]++;
   for (const chip of $$(".chip")) {
     chip.setAttribute("aria-pressed", String(chip.dataset.filter === state.filter));
@@ -362,7 +439,6 @@ function renderList() {
   });
   for (const li of existing.values()) li.remove();
 
-  // Selecting from the map or search can pick a turtle that's scrolled out of view.
   const selectedLi = state.revealSelected && list.querySelector(`li[data-id="${state.selected}"]`);
   state.revealSelected = false;
   if (selectedLi) {
@@ -406,6 +482,7 @@ function updateListItem(li, t, st) {
   let sub = "";
   if (!t.online) sub = `Last seen ${ago(t.lastSeen)}`;
   else if (t.status?.job) sub = t.status.job.detail ?? "";
+  else if (t.status?.fleetJob?.failed) sub = t.status.fleetJob.failed;
   else if (fuel) sub = fuel.unlimited ? "Unlimited fuel" : `${fmt(fuel.fuel)} fuel`;
   $(".ti-sub", btn).textContent = sub;
 }
@@ -436,17 +513,7 @@ function renderDetail(rebuildLog = false) {
 
   renderFuel(s);
   renderPosition(s);
-
-  // Job
-  $("#job-value").textContent = job ? (JOB_NAMES[job.name] ?? prettyName(job.name)) : t.online ? "Idle" : "–";
-  $("#btn-stop").hidden = !job && !s.queued;
-  $("#job-meter").hidden = !job || job.name === "goHome";
-  if (job) renderMeter($("#job-meter"), job.progress ?? 0);
-  $("#job-sub").textContent = job
-    ? [job.detail, jobPercent(job)].filter(Boolean).join(" · ")
-    : s.queued
-      ? `${s.queued} command${s.queued === 1 ? "" : "s"} queued`
-      : "";
+  renderJob(s);
 
   const direction = $("#job-direction");
   direction.hidden = !s.facing;
@@ -466,6 +533,7 @@ function renderDetail(rebuildLog = false) {
   }
 
   renderInventory(s, t.online && !busy);
+  renderHome(s);
   renderMap(t);
 
   for (const el of $$(".needs-online")) el.disabled = !t.online;
@@ -519,6 +587,41 @@ function renderPosition(s) {
     parts.push(dist === 0 ? "At home" : `${fmt(dist)} blocks from home`);
   }
   $("#pos-sub").textContent = parts.join(" · ");
+}
+
+function renderJob(s) {
+  const job = s.job;
+  const fj = s.fleetJob;
+  const waiting = !job && fj && (fj.paused || fj.failed); // a fleet job that stopped
+  $("#btn-pause").hidden = !(job && !job.paused);
+  $("#btn-resume").hidden = !(job?.paused || waiting);
+  $("#btn-cancel").hidden = !(job || fj);
+
+  let value = "Idle";
+  let sub = s.queued ? `${s.queued} command${s.queued === 1 ? "" : "s"} queued` : "";
+  if (job) {
+    value = job.paused ? `${jobName(s)} (paused)` : jobName(s);
+    sub = [job.detail, jobPercent(job)].filter(Boolean).join(" · ");
+  } else if (waiting) {
+    value = fj.failed ? "Fleet job stopped" : "Fleet job paused";
+    sub = fj.failed ?? `${KIND_NAMES[fj.kind] ?? "Fleet job"}, step ${fj.step} of ${fj.total}`;
+  }
+  $("#job-value").textContent = value;
+  $("#job-meter").hidden = !job || job.name === "goHome";
+  if (job) renderMeter($("#job-meter"), job.progress ?? 0);
+  $("#job-sub").textContent = sub;
+}
+
+function renderHome(s) {
+  const el = $("#home-line");
+  const w = s.homeWorld;
+  if (w) {
+    el.innerHTML = `Home <b>${[w.x, w.y, w.z].map(Number).join(", ")}</b>` + (s.homeFacing ? ` facing ${s.homeFacing}` : "");
+  } else if (s.home) {
+    el.innerHTML = `Home <b>${[s.home.x, s.home.y, s.home.z].map(Number).join(", ")}</b> (relative to start)`;
+  } else {
+    el.textContent = "";
+  }
 }
 
 // Inventory ----------------------------------------------------------------------
@@ -585,11 +688,52 @@ function recordTrail(t) {
   if (points.length > MAX_TRAIL) points.shift();
 }
 
-const escapeXml = (s) => String(s).replace(/[<>&"]/g, (c) => `&#${c.charCodeAt(0)};`);
-
 function arrow(cls, x, y, dir, size) {
   const k = size / 10;
   return `<path class="${cls}" transform="translate(${x} ${y}) rotate(${(Number(dir) || 0) * 90}) scale(${k})" d="M0 -10 L8 8 L0 4 L-8 8 Z"/>`;
+}
+
+// A square view fitted around the given points, with world (north-up) or
+// local (start-direction-up) orientation.
+function viewport(points, size, world, minSpan = 10) {
+  const xs = points.map((p) => p.x);
+  const zs = points.map((p) => p.z);
+  const [minX, maxX, minZ, maxZ] = [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
+  const span = Math.max(maxX - minX, maxZ - minZ, minSpan) * 1.15 + 4;
+  const scale = size / span;
+  const cx = (minX + maxX) / 2;
+  const cz = (minZ + maxZ) / 2;
+  const v = {
+    size, span, scale, cx, cz,
+    sx: (x) => +(size / 2 + (x - cx) * scale).toFixed(1),
+    sy: (z) => +(size / 2 + (world ? 1 : -1) * (z - cz) * scale).toFixed(1),
+    inView: (p) => Math.abs(p.x - cx) <= span / 2 && Math.abs(p.z - cz) <= span / 2,
+  };
+  v.step = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000].find((n) => n * scale >= 18) ?? 10000;
+  return v;
+}
+
+function gridLines(v) {
+  let out = "";
+  const { size, span, cx, cz, step } = v;
+  for (let x = Math.ceil((cx - span / 2) / step) * step; x <= cx + span / 2; x += step) {
+    out += `<line class="grid-line" x1="${v.sx(x)}" x2="${v.sx(x)}" y1="0" y2="${size}"/>`;
+  }
+  for (let z = Math.ceil((cz - span / 2) / step) * step; z <= cz + span / 2; z += step) {
+    out += `<line class="grid-line" y1="${v.sy(z)}" y2="${v.sy(z)}" x1="0" x2="${size}"/>`;
+  }
+  return out;
+}
+
+// World-space rectangle (inclusive block coordinates) as an SVG rect.
+function rect(v, x1, z1, x2, z2, cls, title) {
+  const [ax, bx] = [Math.min(x1, x2), Math.max(x1, x2) + 1];
+  const [az, bz] = [Math.min(z1, z2), Math.max(z1, z2) + 1];
+  const left = v.sx(ax - 0.5);
+  const top = v.sy(az - 0.5);
+  const w = Math.max(2, v.sx(bx - 0.5) - left);
+  const h = Math.max(2, v.sy(bz - 0.5) - top);
+  return `<rect class="${cls}" x="${left}" y="${top}" width="${w}" height="${h}"><title>${escapeXml(title)}</title></rect>`;
 }
 
 function renderMap(t) {
@@ -615,52 +759,33 @@ function renderMap(t) {
 
   const trail = mine ? (state.trails.get(t.id)?.points ?? []) : [];
   const fit = fleet ? [...others.map((o) => o.p), mine] : [...trail, mine, mine.home];
-  const pts = fit.filter(Boolean);
-  const xs = pts.map((p) => Number(p.x));
-  const zs = pts.map((p) => Number(p.z));
-  const [minX, maxX, minZ, maxZ] = [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
-  const span = Math.max(maxX - minX, maxZ - minZ, 10) * 1.15 + 4;
-  const scale = size / span;
-  const cx = (minX + maxX) / 2;
-  const cz = (minZ + maxZ) / 2;
-  const sx = (x) => +(size / 2 + (x - cx) * scale).toFixed(1);
-  // World maps put north (−Z) up; local maps put the start direction (+Z) up.
-  const sy = (z) => +(size / 2 + (world ? 1 : -1) * (z - cz) * scale).toFixed(1);
-  const inView = (p) => Math.abs(p.x - cx) <= span / 2 && Math.abs(p.z - cz) <= span / 2;
-
-  const step = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000].find((n) => n * scale >= 18) ?? 10000;
-  let out = "";
-  for (let x = Math.ceil((cx - span / 2) / step) * step; x <= cx + span / 2; x += step) {
-    out += `<line class="grid-line" x1="${sx(x)}" x2="${sx(x)}" y1="0" y2="${size}"/>`;
-  }
-  for (let z = Math.ceil((cz - span / 2) / step) * step; z <= cz + span / 2; z += step) {
-    out += `<line class="grid-line" y1="${sy(z)}" y2="${sy(z)}" x1="0" x2="${size}"/>`;
-  }
+  const v = viewport(fit.filter(Boolean), size, world);
+  let out = gridLines(v);
 
   if (trail.length > 1) {
-    out += `<polyline class="trail" points="${trail.map((p) => `${sx(p.x)},${sy(p.z)}`).join(" ")}"/>`;
+    out += `<polyline class="trail" points="${trail.map((p) => `${v.sx(p.x)},${v.sy(p.z)}`).join(" ")}"/>`;
   }
 
   if (mine?.home && !fleet) {
     const h = mine.home;
-    const r = Math.max(5, Math.min(9, scale * 0.45));
-    out += `<rect class="home" x="${sx(h.x) - r}" y="${sy(h.z) - r}" width="${2 * r}" height="${2 * r}" rx="2">
-      <title>Home: ${[h.x, h.y, h.z].map(Number).join(", ")}</title></rect>`;
+    const r = Math.max(5, Math.min(9, v.scale * 0.45));
+    out += `<rect class="home" x="${v.sx(h.x) - r}" y="${v.sy(h.z) - r}" width="${2 * r}" height="${2 * r}" rx="2">
+      <title>Home: ${[h.x, h.y, h.z].join(", ")}</title></rect>`;
   }
 
   // Other turtles: status-colored and clickable in fleet view, faint context otherwise.
   for (const { t: o, p } of others) {
-    if (!inView(p)) continue;
+    if (!v.inView(p)) continue;
     const st = turtleState(o);
     const title = `<title>${escapeXml(nameOf(o))} · ${st.label} · ${p.x}, ${p.y}, ${p.z}</title>`;
     out += fleet
-      ? `<g class="pick" data-id="${o.id}">${arrow(`mark mark-${st.key}`, sx(p.x), sy(p.z), p.dir, 7)}${title}</g>`
-      : `<g class="pick" data-id="${o.id}"><circle class="other" cx="${sx(p.x)}" cy="${sy(p.z)}" r="3.5"/>${title}</g>`;
+      ? `<g class="pick-mark" data-id="${o.id}">${arrow(`mark mark-${st.key}`, v.sx(p.x), v.sy(p.z), p.dir, 7)}${title}</g>`
+      : `<g class="pick-mark" data-id="${o.id}"><circle class="other" cx="${v.sx(p.x)}" cy="${v.sy(p.z)}" r="3.5"/>${title}</g>`;
   }
 
   if (mine) {
     const st = turtleState(t);
-    const [x, y] = [sx(mine.x), sy(mine.z)];
+    const [x, y] = [v.sx(mine.x), v.sy(mine.z)];
     const facing = mine.frame === "world" ? capital(COMPASS[mine.dir] ?? "?") : FACING[mine.dir];
     if (fleet) out += `<circle class="selected-ring" cx="${x}" cy="${y}" r="13"/>`;
     out += `<g>${arrow(fleet ? `mark mark-${st.key}` : "turtle-mark", x, y, mine.dir, 10)}
@@ -672,12 +797,12 @@ function renderMap(t) {
   }
 
   out += `<text class="compass" x="${size - 8}" y="16" text-anchor="end">${world ? "N ↑" : "↑ start direction"}</text>`;
-  out += `<text class="scale" x="8" y="${size - 8}">Grid: ${fmt(step)} block${step === 1 ? "" : "s"}</text>`;
+  out += `<text class="scale" x="8" y="${size - 8}">Grid: ${fmt(v.step)} block${v.step === 1 ? "" : "s"}</text>`;
   svg.innerHTML = out;
 }
 
 function renderLegend(fleet, world) {
-  const key = fleet ? `fleet` : world ? "world" : "local";
+  const key = fleet ? "fleet" : world ? "world" : "local";
   const legend = $("#map-legend");
   if (legend.dataset.key === key) return;
   legend.dataset.key = key;
@@ -725,12 +850,305 @@ function appendLog(entry) {
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
 
+// Fleet page --------------------------------------------------------------------
+
+function jobBox(args) {
+  if (args?.kind === "areaQuarry") return { x1: args.x1, z1: args.z1, x2: args.x2, z2: args.z2 };
+  if (args?.kind === "branchMine") {
+    const d = COMPASS.indexOf(args.dir);
+    const dir = d >= 0 ? d : Number(args.dir) || 0;
+    const ex = args.x + (args.length - 1) * [0, 1, 0, -1][dir];
+    const ez = args.z + (args.length - 1) * [-1, 0, 1, 0][dir];
+    return { x1: args.x, z1: args.z, x2: ex, z2: ez };
+  }
+  return null;
+}
+
+function renderFleet() {
+  const turtles = sortedTurtles();
+  const f = state.fleet ?? {};
+  const states = turtles.map(turtleState);
+  const count = (key) => states.filter((s) => s.key === key).length;
+  $("#fleet-summary").textContent = turtles.length
+    ? [
+        `${turtles.length} turtles`,
+        `${turtles.length - count("offline")} online`,
+        `${count("working")} working`,
+        count("paused") && `${count("paused")} paused`,
+        count("attention") && `${count("attention")} need attention`,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "No turtles yet";
+
+  renderFleetWarnings(turtles, f);
+  renderPicker(turtles);
+  renderFleetPreview();
+  renderDepotStatus();
+  renderFleetMap(turtles, f);
+
+  const sel = currentTurtle();
+  const selName = sel ? nameOf(sel) : null;
+  for (const btn of $$("[data-use-pos]")) {
+    btn.disabled = !sel?.status?.world;
+    btn.title = sel ? `Use ${selName}'s position` : "Select a turtle in the list first";
+  }
+  $("#btn-dock-here").disabled = !sel?.status?.world;
+  $("#btn-dock-here").textContent = selName ? `Dock at ${selName}'s position` : "Dock at selected turtle";
+  $("#btn-release-dock").disabled = state.depot.holder == null;
+}
+
+function renderFleetWarnings(turtles, f) {
+  const notes = [];
+  if (!f.depot) notes.push("Set up the depot below before starting fleet jobs.");
+  const old = turtles.filter((t) => t.online && t.version && t.version < SCRIPT_VERSION);
+  if (old.length) notes.push(`${old.length} turtle${old.length === 1 ? " runs" : "s run"} an older script. Use Update all scripts.`);
+  const byHome = new Map();
+  for (const t of turtles) {
+    const h = t.status?.homeWorld;
+    if (!h) continue;
+    const key = `${h.x},${h.y},${h.z}`;
+    byHome.set(key, [...(byHome.get(key) ?? []), nameOf(t)]);
+  }
+  for (const [key, names] of byHome) {
+    if (names.length > 1) notes.push(`${names.join(", ")} share a home at ${key.replaceAll(",", ", ")}. Give each its own with Set home.`);
+  }
+  const el = $("#fleet-warnings");
+  el.hidden = !notes.length;
+  el.replaceChildren(...notes.map((n) => Object.assign(document.createElement("div"), { textContent: n })));
+}
+
+function renderPicker(turtles) {
+  const box = $("#picker");
+  const existing = new Map([...box.children].map((el) => [Number(el.dataset.id), el]));
+  turtles.forEach((t, i) => {
+    let el = existing.get(t.id);
+    existing.delete(t.id);
+    if (!el) {
+      el = document.createElement("label");
+      el.className = "pick";
+      el.dataset.id = t.id;
+      el.innerHTML = `<input type="checkbox"><span class="status-dot"></span><span class="pick-name"></span>`;
+      $("input", el).addEventListener("change", (e) => {
+        if (e.target.checked) state.picked.add(t.id);
+        else state.picked.delete(t.id);
+        renderFleetPreview();
+      });
+    }
+    const st = turtleState(t);
+    const reason = notReady(t);
+    el.classList.toggle("unready", Boolean(reason));
+    el.style.setProperty("--tone", `var(--${{ working: "accent", paused: "ink-2", attention: "warning", idle: "good", offline: "muted" }[st.key]})`);
+    $(".status-dot", el).innerHTML = ICONS[st.key];
+    $(".pick-name", el).textContent = nameOf(t);
+    el.title = `${nameOf(t)}: ${st.label}${reason ? ` (${reason})` : ""}`;
+    $("input", el).checked = state.picked.has(t.id);
+    if (box.children[i] !== el) box.insertBefore(el, box.children[i] ?? null);
+  });
+  for (const el of existing.values()) el.remove();
+}
+
+function pickedTurtles() {
+  return [...state.picked].map((id) => state.turtles.get(id)).filter(Boolean);
+}
+
+function fleetTab() {
+  return $(".tab[data-fleet-tab][aria-selected=true]")?.dataset.fleetTab ?? "branchMine";
+}
+
+function fleetParams() {
+  const kind = fleetTab();
+  const form = $("#fleet-job-form");
+  const params = {};
+  for (const el of $$(`[data-kind="${kind}"] [name]`, form)) {
+    if (el.name === "preset") continue;
+    params[el.name] = el.type === "checkbox" ? el.checked : el.type === "number" ? (el.value === "" ? null : Number(el.value)) : el.value;
+  }
+  return { kind, params };
+}
+
+function renderFleetPreview() {
+  const picked = pickedTurtles();
+  const ready = picked.filter((t) => !notReady(t));
+  $("#picker-count").textContent = `${picked.length} picked${picked.length !== ready.length ? `, ${ready.length} ready` : ""}`;
+  const { kind, params: p } = fleetParams();
+  let text = "";
+  if (!ready.length) {
+    text = "Pick the turtles to send. Only online, idle turtles that know their GPS facing can start.";
+  } else if (kind === "branchMine") {
+    if (p.x != null && p.z != null && p.y != null && p.length) {
+      const n = ready.length;
+      text = `${n} tunnel${n === 1 ? "" : "s"}, ${p.length} blocks long at Y ${p.y}, heading ${p.dir} from ${p.x}, ${p.z}` +
+        (n > 1 ? `, ${p.spacing} apart going ${COMPASS[(COMPASS.indexOf(p.dir) + 1) % 4]}.` : ".");
+    } else {
+      text = "Fill in the start position and level.";
+    }
+  } else if ([p.x1, p.z1, p.x2, p.z2, p.yTop, p.yBottom].every((v) => v != null)) {
+    const w = Math.abs(p.x2 - p.x1) + 1;
+    const l = Math.abs(p.z2 - p.z1) + 1;
+    const h = Math.abs(p.yTop - p.yBottom) + 1;
+    const strips = Math.min(ready.length, Math.max(w, l));
+    text = `${w} × ${l} blocks, ${h} deep (${fmt(w * l * h)} blocks), split into ${strips} strip${strips === 1 ? "" : "s"}.`;
+  } else {
+    text = "Fill in both corners and the levels.";
+  }
+  $("#fleet-job-preview").textContent = text;
+}
+
+function renderDepotStatus() {
+  const { holder, queue = [] } = state.depot;
+  const name = (id) => {
+    const t = state.turtles.get(id);
+    return t ? nameOf(t) + (t.online ? "" : " (offline)") : `#${id}`;
+  };
+  $("#depot-status").textContent = !state.fleet?.depot
+    ? "Not set up"
+    : holder == null
+      ? queue.length ? `${queue.length} waiting` : "Dock free"
+      : `In use by ${name(holder)}` + (queue.length ? ` · ${queue.length} waiting` : "");
+}
+
+function renderFleetMap(turtles, f) {
+  const svg = $("#fleet-map");
+  const size = 400;
+  const items = turtles.map((t) => ({ t, p: mapPos(t) })).filter((o) => o.p?.frame === "world");
+  const jobs = turtles.map((t) => ({ t, box: jobBox(t.status?.fleetJob?.args) })).filter((j) => j.box);
+  const areas = f.protect?.areas ?? [];
+  const pts = [
+    ...items.map((o) => o.p),
+    ...jobs.flatMap(({ box }) => [{ x: box.x1, z: box.z1 }, { x: box.x2, z: box.z2 }]),
+    ...areas.flatMap((a) => [{ x: a.x1, z: a.z1 }, { x: a.x2, z: a.z2 }]),
+  ];
+  if (f.depot) pts.push(f.depot);
+  if (!pts.length) {
+    svg.innerHTML = `<text class="map-note" x="200" y="204" text-anchor="middle">Turtles appear here once GPS knows where they are</text>`;
+    return;
+  }
+  const v = viewport(pts, size, true, 16);
+  let out = gridLines(v);
+  for (const a of areas) {
+    out += rect(v, a.x1, a.z1, a.x2, a.z2, "area", `Protected: ${a.name || "unnamed"} (Y ${a.y1} to ${a.y2})`);
+    out += `<text class="area-label" x="${v.sx(Math.min(a.x1, a.x2) - 0.5)}" y="${v.sy(Math.min(a.z1, a.z2) - 0.5) - 4}">${escapeXml(a.name || "")}</text>`;
+  }
+  for (const { t, box } of jobs) {
+    const a = t.status.fleetJob.args;
+    out += rect(v, box.x1, box.z1, box.x2, box.z2, "job-area", `${nameOf(t)}: ${KIND_NAMES[a.kind]} (${a.kind === "branchMine" ? `Y ${a.y}` : `Y ${a.yTop} to ${a.yBottom}`})`);
+  }
+  if (f.depot) {
+    const [x, y] = [v.sx(f.depot.x), v.sy(f.depot.z)];
+    out += `<g><rect class="depot-mark" x="${x - 7}" y="${y - 7}" width="14" height="14" rx="2"/><text class="depot-label" x="${x}" y="${y + 3}" text-anchor="middle">D</text>
+      <title>Depot dock: ${f.depot.x}, ${f.depot.y}, ${f.depot.z}</title></g>`;
+  }
+  for (const { t, p } of items) {
+    const st = turtleState(t);
+    const selected = t.id === state.selected;
+    if (selected) out += `<circle class="selected-ring" cx="${v.sx(p.x)}" cy="${v.sy(p.z)}" r="11"/>`;
+    out += `<g class="pick-mark" data-id="${t.id}">${arrow(`mark mark-${st.key}`, v.sx(p.x), v.sy(p.z), p.dir, selected ? 9 : 7)}
+      <title>${escapeXml(nameOf(t))} · ${st.label} · ${p.x}, ${p.y}, ${p.z}</title></g>`;
+  }
+  out += `<text class="compass" x="${size - 8}" y="16" text-anchor="end">N ↑</text>`;
+  out += `<text class="scale" x="8" y="${size - 8}">Grid: ${fmt(v.step)} block${v.step === 1 ? "" : "s"}</text>`;
+  svg.innerHTML = out;
+}
+
+// Fleet settings form ------------------------------------------------------------
+
+function setFleet(fleet) {
+  if (!fleet) return;
+  state.fleet = fleet;
+  if (!state.fleetDirty) fillFleetForm();
+}
+
+function getPath(obj, path) {
+  return path.split(".").reduce((o, k) => o?.[k], obj);
+}
+
+function setPath(obj, path, value) {
+  const keys = path.split(".");
+  const last = keys.pop();
+  let o = obj;
+  for (const k of keys) o = o[k] ??= {};
+  o[last] = value;
+}
+
+function fillFleetForm() {
+  const f = state.fleet;
+  if (!f) return;
+  for (const el of $$("#fleet-settings [data-field]")) {
+    const v = getPath(f, el.dataset.field);
+    el.value = Array.isArray(v) ? v.join("\n") : v ?? (el.tagName === "SELECT" ? el.options[0].value : "");
+  }
+  if (!f.depot) {
+    $('[data-field="depot.junk"]').value = "down";
+    $('[data-field="depot.valuables"]').value = "north";
+    $('[data-field="depot.fuel"]').value = "west";
+  }
+  $("#areas").replaceChildren(...(f.protect?.areas ?? []).map(areaRow));
+  setSaveMsg("");
+}
+
+function areaRow(a = {}) {
+  const row = $("#area-row").content.firstElementChild.cloneNode(true);
+  $(".area-name", row).value = a.name ?? "";
+  for (const input of $$("[data-k]", row)) input.value = a[input.dataset.k] ?? "";
+  $(".area-remove", row).addEventListener("click", () => {
+    row.remove();
+    markFleetDirty();
+  });
+  return row;
+}
+
+function collectFleet() {
+  const out = structuredClone(state.fleet ?? {});
+  for (const el of $$("#fleet-settings [data-field]")) {
+    let v = el.value;
+    if (el.tagName === "TEXTAREA") v = v.split("\n").map((s) => s.trim()).filter(Boolean);
+    else if (el.type === "number") v = v === "" ? null : Number(v);
+    setPath(out, el.dataset.field, v);
+  }
+  const d = out.depot;
+  const filled = [d.x, d.y, d.z].filter((n) => n !== null).length;
+  if (filled === 0) out.depot = null;
+  else if (filled < 3) return { error: "Fill in all three dock coordinates, or clear them." };
+  out.protect.areas = $$("#areas .area").map((row) => {
+    const a = { name: $(".area-name", row).value.trim() };
+    for (const input of $$("[data-k]", row)) a[input.dataset.k] = input.value === "" ? null : Number(input.value);
+    return a;
+  });
+  if (out.protect.areas.some((a) => ["x1", "y1", "z1", "x2", "y2", "z2"].some((k) => a[k] === null))) {
+    return { error: "Every protected area needs both corners filled in." };
+  }
+  return { fleet: out };
+}
+
+function markFleetDirty() {
+  state.fleetDirty = true;
+  setSaveMsg("Unsaved changes");
+}
+
+function setSaveMsg(text, error = false) {
+  const el = $("#fleet-save-msg");
+  el.textContent = text;
+  el.style.color = error ? "var(--critical)" : "";
+}
+
 // Setup --------------------------------------------------------------------------
 
 function setTab(name) {
   for (const tab of $$(".tab[data-tab]")) tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
   for (const form of $$(".job-form")) form.hidden = form.dataset.job !== name;
   store.set("jobTab", name);
+}
+
+function setFleetTab(name) {
+  for (const tab of $$(".tab[data-fleet-tab]")) tab.setAttribute("aria-selected", String(tab.dataset.fleetTab === name));
+  for (const el of $$("#fleet-job-form [data-kind]")) {
+    el.hidden = el.dataset.kind !== name;
+    // Disabled fields skip validation, so the hidden tab can't block submitting.
+    for (const input of $$("input, select", el)) input.disabled = el.hidden;
+  }
+  store.set("fleetTab", name);
+  renderFleetPreview();
 }
 
 function setMapMode(mode) {
@@ -741,28 +1159,29 @@ function setMapMode(mode) {
 }
 
 function setupInstallSteps() {
-  const cmd = `wget ${location.origin}/turtle.lua startup.lua`;
+  const commands = {
+    ".install-cmd": `wget ${location.origin}/turtle.lua startup.lua`,
+    ".install-disk": `wget ${location.origin}/install.lua disk/startup.lua`,
+  };
   for (const list of $$(".install-steps")) {
     list.append($("#install-steps").content.cloneNode(true));
-    $(".install-cmd", list).textContent = cmd;
-    $(".copy", list).addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(cmd);
-        toast("Copied to clipboard");
-      } catch {
-        toast("Couldn't copy. Select the text instead.", "warn");
-      }
-    });
+    for (const [sel, cmd] of Object.entries(commands)) $(sel, list).textContent = cmd;
+    for (const btn of $$(".copy", list)) {
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(commands[btn.dataset.copy]);
+          toast("Copied to clipboard");
+        } catch {
+          toast("Couldn't copy. Select the text instead.", "warn");
+        }
+      });
+    }
   }
 }
 
 function applyTheme(theme) {
   if (theme) document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
-}
-
-function currentTurtle() {
-  return state.turtles.get(state.selected);
 }
 
 function bindEvents() {
@@ -792,16 +1211,19 @@ function bindEvents() {
     store.set("theme", next);
   });
 
+  // Fleet-wide controls
   $("#btn-install").addEventListener("click", () => $("#install-dialog").showModal());
-  $("#btn-stop-all").addEventListener("click", () => sendRaw({ type: "cmd", id: "all", action: "stop" }));
+  $("#btn-pause-all").addEventListener("click", () => sendRaw({ type: "cmd", id: "all", action: "pause" }));
+  $("#btn-resume-all").addEventListener("click", () => sendRaw({ type: "cmd", id: "all", action: "resume" }));
   $("#btn-recall-all").addEventListener("click", () => {
-    if (confirm("Stop every turtle's job and send it home?")) sendRaw({ type: "cmd", id: "all", action: "goHome" });
+    if (confirm("Cancel every turtle's job and send them all home?")) sendRaw({ type: "cmd", id: "all", action: "goHome" });
   });
   $("#btn-update-all").addEventListener("click", () => {
     if (confirm("Download the latest script to every idle turtle and reboot them? Busy turtles skip it.")) {
       sendRaw({ type: "cmd", id: "all", action: "update" });
     }
   });
+  for (const tab of $$(".tab[data-view]")) tab.addEventListener("click", () => setView(tab.dataset.view));
 
   $("#turtle-search").addEventListener("input", (event) => {
     state.search = event.target.value.trim();
@@ -815,7 +1237,12 @@ function bindEvents() {
     });
   }
 
-  $("#btn-stop").addEventListener("click", () => command("stop"));
+  // One turtle
+  $("#btn-pause").addEventListener("click", () => command("pause"));
+  $("#btn-resume").addEventListener("click", () => command("resume"));
+  $("#btn-cancel").addEventListener("click", () => {
+    if (confirm("Cancel this job and send the turtle home?")) command("goHome");
+  });
   $("#btn-rename").addEventListener("click", () => {
     const label = prompt("Name this turtle", currentTurtle()?.label ?? "");
     if (label !== null) command("setLabel", { label: label.trim() });
@@ -833,6 +1260,28 @@ function bindEvents() {
     if (confirm("Reset coordinates to 0, 0, 0 facing +Z and make this spot home? Do this after moving the turtle by hand.")) {
       command("resetPosition");
     }
+  });
+  $("#btn-home-coords").addEventListener("click", () => {
+    const form = $("#home-form");
+    const s = currentTurtle()?.status ?? {};
+    const w = s.homeWorld ?? s.world;
+    if (!s.world) {
+      toast("Setting home by coordinates needs GPS. Move the turtle a block first.", "warn");
+      return;
+    }
+    for (const k of ["x", "y", "z"]) form.elements[k].value = w?.[k] ?? "";
+    form.elements.facing.value = s.homeFacing ?? s.facing ?? "north";
+    form.hidden = false;
+  });
+  $("#btn-home-cancel").addEventListener("click", () => ($("#home-form").hidden = true));
+  $("#home-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = event.target;
+    command("setHome", {
+      x: Number(form.elements.x.value), y: Number(form.elements.y.value), z: Number(form.elements.z.value),
+      facing: form.elements.facing.value,
+    });
+    form.hidden = true;
   });
 
   for (const btn of $$("[data-cmd]")) btn.addEventListener("click", () => command(btn.dataset.cmd));
@@ -855,6 +1304,102 @@ function bindEvents() {
   $("#auto-dig").checked = store.get("autoDig") === "1";
   $("#auto-dig").addEventListener("change", (event) => store.set("autoDig", event.target.checked ? "1" : null));
 
+  // Fleet page
+  for (const tab of $$(".tab[data-fleet-tab]")) tab.addEventListener("click", () => setFleetTab(tab.dataset.fleetTab));
+  const jobForm = $("#fleet-job-form");
+  jobForm.addEventListener("input", (event) => {
+    if (event.target.name === "preset" && event.target.value !== "") jobForm.elements.y.value = event.target.value;
+    if (event.target.name === "y") jobForm.elements.preset.value = [...jobForm.elements.preset.options].some((o) => o.value === event.target.value) ? event.target.value : "";
+    renderFleetPreview();
+  });
+  jobForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const { kind, params } = fleetParams();
+    const ids = pickedTurtles().map((t) => t.id);
+    if (!ids.length) {
+      toast("Pick at least one turtle first.", "warn");
+      return;
+    }
+    $("#fleet-job-result").hidden = true;
+    sendRaw({ type: "fleetJob", kind, ids, params });
+  });
+  for (const btn of $$("[data-use-pos]")) {
+    btn.addEventListener("click", () => {
+      const w = currentTurtle()?.status?.world;
+      if (!w) return;
+      const [kx, kz] = btn.dataset.usePos.split(",");
+      jobForm.elements[kx].value = w.x;
+      jobForm.elements[kz].value = w.z;
+      renderFleetPreview();
+    });
+  }
+  $("#pick-ready").addEventListener("click", () => {
+    state.picked = new Set(sortedTurtles().filter((t) => !notReady(t)).map((t) => t.id));
+    invalidate("fleet");
+  });
+  $("#pick-none").addEventListener("click", () => {
+    state.picked.clear();
+    invalidate("fleet");
+  });
+  for (const btn of $$("[data-bulk]")) {
+    btn.addEventListener("click", () => {
+      const ids = pickedTurtles().map((t) => t.id);
+      if (!ids.length) {
+        toast("Pick some turtles first.", "warn");
+        return;
+      }
+      const action = btn.dataset.bulk;
+      const n = `${ids.length} turtle${ids.length === 1 ? "" : "s"}`;
+      if (action === "goHome" && !confirm(`Cancel the jobs of ${n} and send them home?`)) return;
+      if (action === "setHome" && !confirm(`Make the current spot of each of ${n} its new home?`)) return;
+      sendRaw({ type: "cmd", ids, action, args: {} });
+    });
+  }
+  $("#fleet-map").addEventListener("click", (event) => {
+    const pick = event.target.closest("[data-id]");
+    if (!pick) return;
+    select(Number(pick.dataset.id));
+    setView("turtles");
+  });
+
+  for (const sideSelect of $$("select.side")) {
+    sideSelect.innerHTML = Object.entries(SIDES).map(([v, label]) => `<option value="${v}">${label}</option>`).join("");
+  }
+  $("#fleet-settings").addEventListener("input", markFleetDirty);
+  $("#btn-add-area").addEventListener("click", () => {
+    const w = currentTurtle()?.status?.world;
+    // Start a new area as a 20x20 box around the selected turtle, if it has GPS.
+    const row = areaRow(w ? { x1: w.x - 10, y1: w.y - 10, z1: w.z - 10, x2: w.x + 10, y2: w.y + 20, z2: w.z + 10 } : {});
+    $("#areas").append(row);
+    $(".area-name", row).focus();
+    markFleetDirty();
+  });
+  $("#btn-dock-here").addEventListener("click", () => {
+    const w = currentTurtle()?.status?.world;
+    if (!w) return;
+    for (const k of ["x", "y", "z"]) $(`[data-field="depot.${k}"]`).value = w[k];
+    if (!$('[data-field="travelY"]').value) $('[data-field="travelY"]').value = w.y + 20;
+    markFleetDirty();
+  });
+  $("#btn-save-fleet").addEventListener("click", () => {
+    const { fleet, error } = collectFleet();
+    if (error) {
+      setSaveMsg(error, true);
+      return;
+    }
+    setSaveMsg("Saving…");
+    sendRaw({ type: "saveFleet", fleet });
+  });
+  $("#btn-revert-fleet").addEventListener("click", () => {
+    state.fleetDirty = false;
+    fillFleetForm();
+  });
+  $("#btn-release-dock").addEventListener("click", () => {
+    if (confirm("Release the dock? Only do this if the turtle using it is stuck or gone, or two turtles may meet in the depot column.")) {
+      sendRaw({ type: "releaseDepot" });
+    }
+  });
+
   document.addEventListener("keydown", (event) => {
     if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.target.closest?.("input:not([type=checkbox]), select, textarea")) return;
@@ -867,7 +1412,7 @@ function bindEvents() {
     }
     if ($("#turtle").hidden) return;
     if (event.key === "Escape") {
-      if (currentTurtle()?.online) command("stop");
+      if (currentTurtle()?.status?.job) command("pause");
       return;
     }
     const key = event.key.toLowerCase();
@@ -881,15 +1426,17 @@ function bindEvents() {
   });
 
   // Keep "last seen" times fresh.
-  setInterval(() => invalidate("list", "detail"), 15000);
+  setInterval(() => invalidate("list", "detail", "fleet"), 15000);
 }
 
 applyTheme(store.get("theme"));
 buildInventory();
 setupInstallSteps();
 setTab(store.get("jobTab") === "tunnel" ? "tunnel" : "quarry");
+setFleetTab(store.get("fleetTab") === "areaQuarry" ? "areaQuarry" : "branchMine");
 setMapMode(state.mapMode);
 bindEvents();
+setView(state.view);
 
 const session = store.get("session");
 if (session) {
