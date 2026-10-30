@@ -4,7 +4,8 @@
 export const COMPASS = ["north", "east", "south", "west"];
 const CX = [0, 1, 0, -1];
 const CZ = [-1, 0, 1, 0];
-const SIDES = ["north", "east", "south", "west", "up", "down"];
+// No "up": turtles reach the dock by flying straight down into it.
+const SIDES = ["north", "east", "south", "west", "down"];
 // Lanes sit above travelY, one per turtle; leave room for a big fleet.
 const MAX_LANES = 64;
 

@@ -47,6 +47,12 @@
       </div>
     </header>
 
+    <div id="server-warning" class="banner" role="alert" hidden>
+      <b>Your app is running more than one copy of the server.</b> Turtles and this dashboard can end up on
+      different copies, so turtles look offline or vanish when you reload. In DigitalOcean, open your app →
+      <b>Settings</b> → the <b>web</b> component, set <b>Containers</b> to <b>1</b> and turn off autoscaling.
+    </div>
+
     <div class="layout">
       <aside class="sidebar">
         <div class="sidebar-head">
@@ -77,14 +83,23 @@
         <section id="turtle" class="turtle" hidden>
           <div class="turtle-head">
             <div class="turtle-title">
-              <h1 id="t-name"></h1>
+              <div class="name-row">
+                <h1 id="t-name" title="Click to rename"></h1>
+                <button id="btn-rename" class="btn icon ghost sm needs-online" title="Rename" aria-label="Rename turtle">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11 2.5l2.5 2.5L6 12.5H3.5V10z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+              <form id="rename-form" class="rename-form" hidden>
+                <input id="rename-input" maxlength="32" required autocomplete="off" aria-label="New name">
+                <button class="btn primary sm" type="submit">Save</button>
+                <button class="btn ghost sm" type="button" id="rename-cancel">Cancel</button>
+              </form>
               <div class="turtle-meta">
                 <span id="t-status" class="status"></span>
                 <span id="t-meta" class="muted"></span>
               </div>
             </div>
             <div class="head-actions">
-              <button id="btn-rename" class="btn ghost needs-online">Rename</button>
               <button id="btn-update" class="btn ghost needs-idle" title="Download the latest script from this server and reboot">Update script</button>
               <button id="btn-forget" class="btn ghost" hidden>Forget</button>
             </div>
@@ -212,14 +227,13 @@
                   <button class="tab" role="tab" data-tab="quarry">Quarry</button>
                   <button class="tab" role="tab" data-tab="tunnel">Tunnel</button>
                 </div>
-                <p id="job-direction" class="direction" hidden></p>
                 <form class="job-form" data-job="quarry">
                   <div class="fields">
-                    <label class="field"><span>Length</span><input name="length" type="number" min="1" max="128" value="8" required></label>
-                    <label class="field"><span>Width</span><input name="width" type="number" min="1" max="128" value="8" required></label>
-                    <label class="field"><span>Depth</span><input name="depth" type="number" min="1" max="384" value="16" required></label>
+                    <label class="field"><span data-dir-label="forward">Forward</span><input name="length" type="number" min="1" max="128" value="8" required></label>
+                    <label class="field"><span data-dir-label="right">Right</span><input name="width" type="number" min="1" max="128" value="8" required></label>
+                    <label class="field"><span>Down</span><input name="depth" type="number" min="1" max="384" value="16" required></label>
                   </div>
-                  <p class="hint">Digs a box forward and to the right of the turtle, starting one block below it. Stops early at bedrock.</p>
+                  <p class="plan-line" data-plan></p>
                   <button class="btn primary needs-idle" type="submit">Start quarry</button>
                 </form>
                 <form class="job-form" data-job="tunnel" hidden>
@@ -233,14 +247,10 @@
                       </select>
                     </label>
                   </div>
-                  <p class="hint">Digs straight ahead. A 2-high tunnel is walkable.</p>
+                  <p class="plan-line" data-plan></p>
                   <button class="btn primary needs-idle" type="submit">Start tunnel</button>
                 </form>
-                <div class="callout">
-                  These jobs unload into a chest placed directly <b>behind</b> the turtle's
-                  starting spot. For the shared depot and many turtles at once, use the
-                  <b>Fleet</b> page.
-                </div>
+                <p class="hint">The dashed outline on the map shows exactly what will be dug. Put a chest directly <b>behind</b> the turtle: it unloads there. For the shared depot and many turtles, use the <b>Fleet</b> page.</p>
               </section>
 
               <section class="card">
@@ -336,22 +346,33 @@
                       <button type="button" class="btn sm" data-use-pos="x,z">Start at selected turtle</button>
                       <label class="check"><input name="scan" type="checkbox" checked><span>Mine ore veins in the walls</span></label>
                     </div>
+                    <p class="hint flush">Each turtle digs a 1×1 shaft straight down at its tunnel's start, so pick a start out in the open, away from builds.</p>
                   </div>
                   <div data-kind="areaQuarry" hidden>
-                    <div class="fields">
-                      <label class="field"><span>Corner 1 X</span><input name="x1" type="number" required></label>
-                      <label class="field"><span>Corner 1 Z</span><input name="z1" type="number" required></label>
-                      <label class="field"><span>Corner 2 X</span><input name="x2" type="number" required></label>
-                      <label class="field"><span>Corner 2 Z</span><input name="z2" type="number" required></label>
+                    <div class="corner-row">
+                      <span>Corner A</span>
+                      <input name="x1" type="number" placeholder="X" aria-label="Corner A X" required>
+                      <input name="z1" type="number" placeholder="Z" aria-label="Corner A Z" required>
+                      <button type="button" class="btn sm" data-use-pos="x1,z1">At turtle</button>
                     </div>
-                    <div class="fields">
-                      <label class="field"><span>Top Y</span><input name="yTop" type="number" min="-64" max="319" required></label>
-                      <label class="field"><span>Bottom Y</span><input name="yBottom" type="number" min="-64" max="319" required></label>
+                    <div class="corner-row">
+                      <span>Corner B</span>
+                      <input name="x2" type="number" placeholder="X" aria-label="Corner B X" required>
+                      <input name="z2" type="number" placeholder="Z" aria-label="Corner B Z" required>
+                      <button type="button" class="btn sm" data-use-pos="x2,z2">At turtle</button>
                     </div>
-                    <div class="row">
-                      <button type="button" class="btn sm" data-use-pos="x1,z1">Corner 1 at selected turtle</button>
-                      <button type="button" class="btn sm" data-use-pos="x2,z2">Corner 2 at selected turtle</button>
+                    <div class="corner-row">
+                      <span>Depth</span>
+                      <input name="yTop" type="number" min="-64" max="319" placeholder="Top Y" aria-label="Top Y" required>
+                      <input name="yBottom" type="number" min="-64" max="319" value="-59" placeholder="Bottom Y" aria-label="Bottom Y" required>
+                      <select name="bottomPreset" aria-label="Bottom level">
+                        <option value="-59">Diamonds</option>
+                        <option value="-60">Bedrock</option>
+                        <option value="0">Y 0</option>
+                        <option value="">Custom</option>
+                      </select>
                     </div>
+                    <p class="hint flush">Only blocks inside this box are dug. Turtles drop in from above, so set the top at ground level (anything above it, like trees, is left alone).</p>
                   </div>
 
                   <div class="picker-head">
@@ -370,8 +391,21 @@
                     <button type="button" class="btn" data-bulk="resume">Resume</button>
                     <button type="button" class="btn" data-bulk="goHome">Recall</button>
                     <button type="button" class="btn ghost" data-bulk="setHome">Set homes here</button>
+                    <button type="button" class="btn ghost" id="btn-bulk-rename">Rename…</button>
                   </div>
                   <p class="hint">The buttons next to Start act on the turtles picked above. Each turtle gets its own tunnel or strip, flies at its own height, and takes turns at the depot.</p>
+                </form>
+                <form id="bulk-rename" class="bulk-rename" hidden>
+                  <h3>Rename the picked turtles</h3>
+                  <div class="fields">
+                    <label class="field"><span>Name</span><input name="prefix" value="Miner" maxlength="28" required autocomplete="off"></label>
+                    <label class="field"><span>Number from</span><input name="start" type="number" min="0" max="9999" value="1" required></label>
+                  </div>
+                  <p id="bulk-rename-preview" class="hint flush"></p>
+                  <div class="row">
+                    <button class="btn primary sm" type="submit">Rename</button>
+                    <button class="btn ghost sm" type="button" id="bulk-rename-cancel">Cancel</button>
+                  </div>
                 </form>
               </section>
             </div>
@@ -391,6 +425,7 @@
                   <li><span class="key key-depot"></span>Depot</li>
                   <li><span class="key key-area"></span>Protected</li>
                   <li><span class="key key-job"></span>Job area</li>
+                  <li><span class="key key-plan"></span>Planned</li>
                 </ul>
               </section>
             </div>

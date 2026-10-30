@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -88,6 +89,28 @@ const lanes = new Map();
 // One turtle at a time may use the dock; the rest queue.
 const depot = { holder: null, queue: [], since: 0 };
 const startedAt = Date.now();
+// Identify this copy of the server and the code it runs, so the dashboard can
+// tell a redeploy apart from two copies running side by side (which splits
+// turtles and dashboards between them).
+const INSTANCE = crypto.randomBytes(4).toString("hex");
+const BUILD = crypto
+  .createHash("sha1")
+  .update(["server.js", "fleet.js", ...readdirSync(path.join(ROOT, "public")).map((f) => `public/${f}`)]
+    .map((f) => readFileSync(path.join(ROOT, f))).join("\0"))
+  .digest("hex")
+  .slice(0, 8);
+
+// One bad message must never take the whole server down, and every turtle's
+// connection with it.
+function safely(label, fn) {
+  return (...args) => {
+    try {
+      fn(...args);
+    } catch (err) {
+      console.error(`[error] ${label}:`, err);
+    }
+  };
+}
 
 function turtleView(t, withLogs = false) {
   const view = {
@@ -218,7 +241,7 @@ function handleTurtle(ws) {
   let turtle = null;
   const authTimer = setTimeout(() => turtle || ws.close(4000, "auth timeout"), AUTH_TIMEOUT_MS);
 
-  ws.on("message", (raw) => {
+  ws.on("message", safely("turtle message", (raw) => {
     const msg = parse(raw);
     if (!msg) return;
 
@@ -293,7 +316,7 @@ function handleTurtle(ws) {
         handleLease(turtle, msg);
         break;
     }
-  });
+  }));
 
   ws.on("close", () => {
     clearTimeout(authTimer);
@@ -348,7 +371,7 @@ function handleDashboard(ws) {
   ws.on("pong", () => (ws.isAlive = true));
   const authTimer = setTimeout(() => authed || ws.close(4000, "auth timeout"), AUTH_TIMEOUT_MS);
 
-  ws.on("message", (raw) => {
+  ws.on("message", safely("dashboard message", (raw) => {
     const msg = parse(raw);
     if (!msg) return;
 
@@ -374,6 +397,7 @@ function handleDashboard(ws) {
         turtles: [...turtles.values()].map((t) => turtleView(t, true)),
         fleet,
         depot: depotView(),
+        server: { instance: INSTANCE, build: BUILD, startedAt },
       });
       return;
     }
@@ -402,7 +426,7 @@ function handleDashboard(ws) {
     } else if (msg.type === "releaseDepot") {
       if (depot.holder !== null) releaseDepot(depot.holder);
     }
-  });
+  }));
 
   ws.on("close", () => {
     clearTimeout(authTimer);
@@ -417,6 +441,8 @@ const app = express();
 app.disable("x-powered-by");
 
 app.get("/healthz", (_req, res) => res.send("ok"));
+// Which copy answered: polling this shows whether more than one copy is running.
+app.get("/status", (_req, res) => res.json({ instance: INSTANCE, build: BUILD, startedAt }));
 
 function publicBase(req) {
   const proto = String(req.headers["x-forwarded-proto"] ?? req.protocol).split(",")[0];
@@ -444,7 +470,15 @@ app.get("/turtle.lua", serveLua("minerdash.lua"));
 // Installer disk: wget https://<your-app>/install.lua disk/startup.lua
 app.get("/install.lua", serveLua("install.lua"));
 
-app.use(express.static(path.join(ROOT, "public")));
+// The build stamps every file with the same 1980 date, so date/size-based cache
+// validation can serve stale files after an update. Always send fresh copies.
+app.use(
+  express.static(path.join(ROOT, "public"), {
+    etag: false,
+    lastModified: false,
+    setHeaders: (res) => res.set("Cache-Control", "no-cache"),
+  }),
+);
 
 const server = http.createServer(app);
 const turtleWss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
@@ -484,4 +518,7 @@ setInterval(() => {
   if (depot.holder === null && depot.queue.length) pumpDepot();
 }, 2_000);
 
-server.listen(PORT, () => console.log(`Turtle dashboard listening on :${PORT}`));
+process.on("uncaughtException", (err) => console.error("[error] uncaught:", err));
+process.on("unhandledRejection", (err) => console.error("[error] unhandled rejection:", err));
+
+server.listen(PORT, () => console.log(`Turtle dashboard listening on :${PORT} (copy ${INSTANCE}, build ${BUILD})`));

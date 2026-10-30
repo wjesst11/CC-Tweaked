@@ -21,10 +21,11 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "1.2.0"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "1.3.0"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
-const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
+// No "Above": turtles reach the dock by flying straight down into it.
+const SIDES = { north: "North", east: "East", south: "South", west: "West", down: "Below" };
 const KEYS = { w: "forward", s: "back", a: "turnLeft", d: "turnRight", e: "up", q: "down" };
 const DIGGABLE = new Set(["forward", "up", "down"]);
 const JOB_NAMES = { quarry: "Quarry", tunnel: "Tunnel", goHome: "Going home" };
@@ -176,11 +177,17 @@ function connect(auth) {
     } catch {
       return;
     }
-    handle(msg);
+    if (state.server) state.server.lastSeen = Date.now();
+    try {
+      handle(msg);
+    } catch (err) {
+      reportError(err);
+    }
   });
   ws.addEventListener("close", () => {
     if (state.ws !== ws) return;
     state.ws = null;
+    rememberServer();
     if (state.loginPending) {
       state.loginPending = false;
       showLogin("Can't reach the server. Try again.");
@@ -216,14 +223,15 @@ function handle(msg) {
     }
 
     case "snapshot":
+      noteServer(msg.server);
       state.turtles = new Map(msg.turtles.map((t) => [t.id, t]));
       for (const t of state.turtles.values()) recordTrail(t);
       state.depot = msg.depot ?? state.depot;
-      setFleet(msg.fleet);
       state.ready = true;
       state.revealSelected = true;
       ensureSelection();
       invalidate("list", "detail", "log", "fleet");
+      setFleet(msg.fleet);
       break;
 
     case "turtle": {
@@ -289,6 +297,36 @@ function handle(msg) {
   }
 }
 
+// Something went wrong in the dashboard itself: say so once instead of
+// silently showing stale or missing turtles.
+function reportError(err) {
+  console.error(err);
+  if (state.reportedError) return;
+  state.reportedError = true;
+  toast(`Dashboard error: ${err?.message ?? err}. Reload the page, and report it if it keeps happening.`, "error");
+}
+
+// Which copy of the server we talk to is remembered across page loads. A
+// different copy running the same code that was already up while we were
+// talking to the previous one means two copies are running side by side,
+// which splits turtles and dashboards between them.
+function noteServer(server) {
+  if (!server) return;
+  let prev = null;
+  try {
+    prev = JSON.parse(store.get("server") ?? "null");
+  } catch {}
+  const twoCopies =
+    prev && prev.instance !== server.instance && prev.build === server.build && server.startedAt < prev.lastSeen - 5000;
+  if (twoCopies) $("#server-warning").hidden = false;
+  state.server = { ...server, lastSeen: Date.now() };
+  rememberServer();
+}
+
+function rememberServer() {
+  if (state.server) store.set("server", JSON.stringify(state.server));
+}
+
 function sendRaw(msg) {
   if (state.ws?.readyState !== WebSocket.OPEN) {
     toast("Not connected to the server", "error");
@@ -321,14 +359,65 @@ function flush() {
   lastRender = performance.now();
   const { list, detail, log, fleet } = dirty;
   dirty.list = dirty.detail = dirty.log = dirty.fleet = false;
-  if (list) renderList();
-  $("#fleet-view").hidden = state.view !== "fleet";
-  if (state.view === "fleet") {
-    $("#turtle").hidden = $("#empty").hidden = true;
-    if (fleet || list) renderFleet();
-  } else if (detail || log) {
-    renderDetail(log);
+  try {
+    if (list) renderList();
+    $("#fleet-view").hidden = state.view !== "fleet";
+    if (state.view === "fleet") {
+      $("#turtle").hidden = $("#empty").hidden = true;
+      if (fleet || list) renderFleet();
+    } else if (detail || log) {
+      renderDetail(log);
+    }
+  } catch (err) {
+    reportError(err);
   }
+}
+
+// Renaming ------------------------------------------------------------------------
+// A turtle's name is its computer label, stored on the turtle. Names are never
+// cleared: an unlabeled turtle loses its files when it's picked up.
+
+function renameTurtle(t, label) {
+  const taken = [...state.turtles.values()].find((o) => o.id !== t.id && nameOf(o).toLowerCase() === label.toLowerCase());
+  if (taken) toast(`Turtle #${taken.id} is also called ${label}.`, "warn");
+  sendRaw({ type: "cmd", id: t.id, action: "setLabel", args: { label } });
+  t.label = label; // shown right away; the turtle's next status confirms it
+  invalidate("list", "detail", "fleet");
+}
+
+function startRename() {
+  const t = currentTurtle();
+  if (!t?.online) return;
+  $("#rename-input").value = t.label ?? "";
+  $(".name-row").hidden = true;
+  $("#rename-form").hidden = false;
+  $("#rename-input").focus();
+  $("#rename-input").select();
+}
+
+function endRename() {
+  $("#rename-form").hidden = true;
+  $(".name-row").hidden = false;
+}
+
+// Picked turtles in ID order, each with its new name.
+function bulkRenamePlan() {
+  const form = $("#bulk-rename");
+  const prefix = form.elements.prefix.value.trim();
+  const start = Math.max(0, Math.floor(Number(form.elements.start.value) || 0));
+  return pickedTurtles()
+    .sort((a, b) => a.id - b.id)
+    .map((t, i) => ({ t, label: `${prefix}${start + i}` }));
+}
+
+function renderBulkRenamePreview() {
+  const plan = bulkRenamePlan();
+  const offline = plan.filter((p) => !p.t.online).length;
+  const sample = plan.slice(0, 3).map((p) => `${nameOf(p.t)} → ${p.label}`).join(", ");
+  $("#bulk-rename-preview").textContent = plan.length
+    ? `${plan.length} turtle${plan.length === 1 ? "" : "s"} in ID order: ${sample}${plan.length > 3 ? ", …" : ""}.` +
+      (offline ? ` ${offline} offline turtle${offline === 1 ? "" : "s"} will be skipped.` : "")
+    : "Pick turtles above first.";
 }
 
 // Selection & views ------------------------------------------------------------
@@ -346,6 +435,7 @@ function ensureSelection() {
 }
 
 function select(id) {
+  endRename();
   state.selected = id;
   state.revealSelected = true;
   store.set("selected", id);
@@ -515,13 +605,7 @@ function renderDetail(rebuildLog = false) {
   renderPosition(s);
   renderJob(s);
 
-  const direction = $("#job-direction");
-  direction.hidden = !s.facing;
-  if (s.facing) {
-    const right = COMPASS[(COMPASS.indexOf(s.facing) + 1) % 4];
-    direction.innerHTML = `Facing <b></b>: a quarry extends ${s.facing} and ${right}, a tunnel heads ${s.facing}.`;
-    direction.firstElementChild.textContent = capital(s.facing);
-  }
+  renderLocalPlan(t);
 
   // Blocks around the turtle (only refreshed while idle)
   for (const side of ["up", "front", "down"]) {
@@ -672,6 +756,100 @@ function selectSlot(slot) {
   command("select", { slot });
 }
 
+// Planned jobs -----------------------------------------------------------------------
+// What a job would dig, worked out before it starts, so it can be shown in
+// words and outlined on the maps.
+
+const WORLD_STEP = { x: [0, 1, 0, -1], z: [-1, 0, 1, 0] }; // by compass direction
+const LOCAL_STEP = { x: [0, 1, 0, -1], z: [1, 0, -1, 0] }; // by local heading
+
+function localJobTab() {
+  return $(".tab[data-tab][aria-selected=true]")?.dataset.tab ?? "quarry";
+}
+
+// The box a local job started now would dig, in the map's frame (world when
+// GPS knows the facing, otherwise relative to where the turtle started).
+function plannedLocalJob(t) {
+  const me = mapPos(t);
+  if (!me) return null;
+  const tab = localJobTab();
+  const form = $(`.job-form[data-job="${tab}"]`);
+  // namedItem: a field called "length" would otherwise read the form's field count.
+  const value = (name) => Number(form.elements.namedItem(name)?.value);
+  const step = me.frame === "world" ? WORLD_STEP : LOCAL_STEP;
+  const f = { x: step.x[me.dir], z: step.z[me.dir] };
+  const r = { x: step.x[(me.dir + 1) % 4], z: step.z[(me.dir + 1) % 4] };
+  if (tab === "quarry") {
+    const [length, width, depth] = [value("length"), value("width"), value("depth")];
+    if (!(length > 0 && width > 0 && depth > 0)) return null;
+    return {
+      frame: me.frame, tab, length, width, depth,
+      x1: me.x, z1: me.z,
+      x2: me.x + (length - 1) * f.x + (width - 1) * r.x,
+      z2: me.z + (length - 1) * f.z + (width - 1) * r.z,
+      yTop: me.y - 1, yBottom: me.y - depth,
+    };
+  }
+  const length = value("length");
+  if (!(length > 0)) return null;
+  const height = value("height") || 2;
+  return {
+    frame: me.frame, tab, length, height,
+    x1: me.x + f.x, z1: me.z + f.z, x2: me.x + length * f.x, z2: me.z + length * f.z,
+    yTop: me.y + height - 1, yBottom: me.y,
+  };
+}
+
+const span = (a, b) => (a === b ? `${a}` : `${Math.min(a, b)} to ${Math.max(a, b)}`);
+
+function renderLocalPlan(t) {
+  const s = t.status ?? {};
+  const facing = s.facing;
+  const right = facing && COMPASS[(COMPASS.indexOf(facing) + 1) % 4];
+  for (const el of $$("[data-dir-label]")) {
+    const dir = el.dataset.dirLabel === "forward" ? facing : right;
+    el.textContent = capital(el.dataset.dirLabel) + (dir ? ` (${dir})` : "");
+  }
+  const plan = plannedLocalJob(t);
+  const line = $(`.job-form[data-job="${localJobTab()}"] [data-plan]`);
+  if (!plan) {
+    line.textContent = "";
+    return;
+  }
+  const where = plan.frame === "world"
+    ? `X <b>${span(plan.x1, plan.x2)}</b>, Z <b>${span(plan.z1, plan.z2)}</b>, ` +
+      (plan.yTop === plan.yBottom ? `Y <b>${plan.yTop}</b>` : `from Y <b>${plan.yTop}</b> down to <b>${plan.yBottom}</b>`)
+    : null;
+  line.innerHTML = plan.tab === "quarry"
+    ? (where
+      ? `Digs ${where}: ${plan.length} ${facing}, ${plan.width} ${right} and ${plan.depth} down, starting under the turtle. Stops early at bedrock.`
+      : `Digs ${plan.length} forward, ${plan.width} to the right and ${plan.depth} down, starting under the turtle. Stops early at bedrock.`)
+    : (where
+      ? `Digs ${where}: ${plan.length} blocks ${facing}, ${plan.height} high.`
+      : `Digs ${plan.length} blocks straight ahead, ${plan.height} high.`);
+}
+
+// The areas a fleet job started now would dig, in world coordinates.
+function plannedFleetJob() {
+  const { kind, params: p } = fleetParams();
+  if (kind === "areaQuarry") {
+    if ([p.x1, p.z1, p.x2, p.z2].some((v) => v == null)) return [];
+    return [{ x1: p.x1, z1: p.z1, x2: p.x2, z2: p.z2, label: `Planned quarry, Y ${span(p.yTop ?? "?", p.yBottom ?? "?")}` }];
+  }
+  if ([p.x, p.z, p.length, p.spacing].some((v) => v == null) || !(p.length > 0)) return [];
+  const dir = COMPASS.indexOf(p.dir);
+  const right = (dir + 1) % 4;
+  const n = Math.max(1, pickedTurtles().filter((t) => !notReady(t)).length);
+  return Array.from({ length: n }, (_, k) => {
+    const x = p.x + k * p.spacing * WORLD_STEP.x[right];
+    const z = p.z + k * p.spacing * WORLD_STEP.z[right];
+    return {
+      x1: x, z1: z, x2: x + (p.length - 1) * WORLD_STEP.x[dir], z2: z + (p.length - 1) * WORLD_STEP.z[dir],
+      label: `Planned tunnel ${k + 1} at Y ${p.y ?? "?"}`,
+    };
+  });
+}
+
 // Map ----------------------------------------------------------------------------
 
 function recordTrail(t) {
@@ -758,9 +936,12 @@ function renderMap(t) {
   }
 
   const trail = mine ? (state.trails.get(t.id)?.points ?? []) : [];
+  const plan = !fleet && t.online && !t.status?.job ? plannedLocalJob(t) : null;
   const fit = fleet ? [...others.map((o) => o.p), mine] : [...trail, mine, mine.home];
+  if (plan) fit.push({ x: plan.x1, z: plan.z1 }, { x: plan.x2, z: plan.z2 });
   const v = viewport(fit.filter(Boolean), size, world);
   let out = gridLines(v);
+  if (plan) out += rect(v, plan.x1, plan.z1, plan.x2, plan.z2, "plan", `Planned ${plan.tab}`);
 
   if (trail.length > 1) {
     out += `<polyline class="trail" points="${trail.map((p) => `${v.sx(p.x)},${v.sy(p.z)}`).join(" ")}"/>`;
@@ -933,6 +1114,7 @@ function renderPicker(turtles) {
         if (e.target.checked) state.picked.add(t.id);
         else state.picked.delete(t.id);
         renderFleetPreview();
+        invalidate("fleet");
       });
     }
     const st = turtleState(t);
@@ -961,7 +1143,7 @@ function fleetParams() {
   const form = $("#fleet-job-form");
   const params = {};
   for (const el of $$(`[data-kind="${kind}"] [name]`, form)) {
-    if (el.name === "preset") continue;
+    if (el.name === "preset" || el.name === "bottomPreset") continue;
     params[el.name] = el.type === "checkbox" ? el.checked : el.type === "number" ? (el.value === "" ? null : Number(el.value)) : el.value;
   }
   return { kind, params };
@@ -988,11 +1170,13 @@ function renderFleetPreview() {
     const l = Math.abs(p.z2 - p.z1) + 1;
     const h = Math.abs(p.yTop - p.yBottom) + 1;
     const strips = Math.min(ready.length, Math.max(w, l));
-    text = `${w} × ${l} blocks, ${h} deep (${fmt(w * l * h)} blocks), split into ${strips} strip${strips === 1 ? "" : "s"}.`;
+    text = `Digs X ${span(p.x1, p.x2)}, Z ${span(p.z1, p.z2)}, from Y ${Math.max(p.yTop, p.yBottom)} down to Y ${Math.min(p.yTop, p.yBottom)}: ` +
+      `${w} × ${l} × ${h} (${fmt(w * l * h)} blocks), split into ${strips} strip${strips === 1 ? "" : "s"}. Outlined on the map.`;
   } else {
-    text = "Fill in both corners and the levels.";
+    text = "Set both corners (stand a turtle on each and click At turtle) and the top and bottom Y.";
   }
   $("#fleet-job-preview").textContent = text;
+  if (!$("#bulk-rename").hidden) renderBulkRenamePreview();
 }
 
 function renderDepotStatus() {
@@ -1020,6 +1204,8 @@ function renderFleetMap(turtles, f) {
     ...areas.flatMap((a) => [{ x: a.x1, z: a.z1 }, { x: a.x2, z: a.z2 }]),
   ];
   if (f.depot) pts.push(f.depot);
+  const plans = state.view === "fleet" ? plannedFleetJob() : [];
+  for (const p of plans) pts.push({ x: p.x1, z: p.z1 }, { x: p.x2, z: p.z2 });
   if (!pts.length) {
     svg.innerHTML = `<text class="map-note" x="200" y="204" text-anchor="middle">Turtles appear here once GPS knows where they are</text>`;
     return;
@@ -1030,6 +1216,7 @@ function renderFleetMap(turtles, f) {
     out += rect(v, a.x1, a.z1, a.x2, a.z2, "area", `Protected: ${a.name || "unnamed"} (Y ${a.y1} to ${a.y2})`);
     out += `<text class="area-label" x="${v.sx(Math.min(a.x1, a.x2) - 0.5)}" y="${v.sy(Math.min(a.z1, a.z2) - 0.5) - 4}">${escapeXml(a.name || "")}</text>`;
   }
+  for (const p of plans) out += rect(v, p.x1, p.z1, p.x2, p.z2, "plan", p.label);
   for (const { t, box } of jobs) {
     const a = t.status.fleetJob.args;
     out += rect(v, box.x1, box.z1, box.x2, box.z2, "job-area", `${nameOf(t)}: ${KIND_NAMES[a.kind]} (${a.kind === "branchMine" ? `Y ${a.y}` : `Y ${a.yTop} to ${a.yBottom}`})`);
@@ -1243,9 +1430,18 @@ function bindEvents() {
   $("#btn-cancel").addEventListener("click", () => {
     if (confirm("Cancel this job and send the turtle home?")) command("goHome");
   });
-  $("#btn-rename").addEventListener("click", () => {
-    const label = prompt("Name this turtle", currentTurtle()?.label ?? "");
-    if (label !== null) command("setLabel", { label: label.trim() });
+  $("#btn-rename").addEventListener("click", startRename);
+  $("#t-name").addEventListener("click", startRename);
+  $("#rename-cancel").addEventListener("click", endRename);
+  $("#rename-input").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") endRename();
+  });
+  $("#rename-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const t = currentTurtle();
+    const label = $("#rename-input").value.trim();
+    if (t && label) renameTurtle(t, label);
+    endRename();
   });
   $("#btn-update").addEventListener("click", () => {
     if (confirm("Download the latest script from this server and reboot the turtle?")) command("update");
@@ -1285,7 +1481,12 @@ function bindEvents() {
   });
 
   for (const btn of $$("[data-cmd]")) btn.addEventListener("click", () => command(btn.dataset.cmd));
-  for (const tab of $$(".tab[data-tab]")) tab.addEventListener("click", () => setTab(tab.dataset.tab));
+  for (const tab of $$(".tab[data-tab]")) {
+    tab.addEventListener("click", () => {
+      setTab(tab.dataset.tab);
+      invalidate("detail");
+    });
+  }
   for (const tab of $$(".tab[data-map]")) tab.addEventListener("click", () => setMapMode(tab.dataset.map));
   $("#map").addEventListener("click", (event) => {
     const pick = event.target.closest("[data-id]");
@@ -1293,6 +1494,7 @@ function bindEvents() {
   });
 
   for (const form of $$(".job-form")) {
+    form.addEventListener("input", () => invalidate("detail"));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const args = {};
@@ -1308,9 +1510,17 @@ function bindEvents() {
   for (const tab of $$(".tab[data-fleet-tab]")) tab.addEventListener("click", () => setFleetTab(tab.dataset.fleetTab));
   const jobForm = $("#fleet-job-form");
   jobForm.addEventListener("input", (event) => {
-    if (event.target.name === "preset" && event.target.value !== "") jobForm.elements.y.value = event.target.value;
-    if (event.target.name === "y") jobForm.elements.preset.value = [...jobForm.elements.preset.options].some((o) => o.value === event.target.value) ? event.target.value : "";
+    const { name, value } = event.target;
+    const presets = { preset: "y", bottomPreset: "yBottom" };
+    if (presets[name] && value !== "") jobForm.elements[presets[name]].value = value;
+    for (const [preset, field] of Object.entries(presets)) {
+      if (name === field) {
+        const select = jobForm.elements[preset];
+        select.value = [...select.options].some((o) => o.value === value) ? value : "";
+      }
+    }
     renderFleetPreview();
+    invalidate("fleet");
   });
   jobForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1330,7 +1540,9 @@ function bindEvents() {
       const [kx, kz] = btn.dataset.usePos.split(",");
       jobForm.elements[kx].value = w.x;
       jobForm.elements[kz].value = w.z;
+      if (kx === "x1" && jobForm.elements.yTop.value === "") jobForm.elements.yTop.value = w.y - 1;
       renderFleetPreview();
+      invalidate("fleet");
     });
   }
   $("#pick-ready").addEventListener("click", () => {
@@ -1355,6 +1567,28 @@ function bindEvents() {
       sendRaw({ type: "cmd", ids, action, args: {} });
     });
   }
+  $("#btn-bulk-rename").addEventListener("click", () => {
+    $("#bulk-rename").hidden = false;
+    renderBulkRenamePreview();
+    $("#bulk-rename").elements.prefix.focus();
+  });
+  $("#bulk-rename-cancel").addEventListener("click", () => ($("#bulk-rename").hidden = true));
+  $("#bulk-rename").addEventListener("input", renderBulkRenamePreview);
+  $("#bulk-rename").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const plan = bulkRenamePlan().filter((p) => p.t.online);
+    if (!plan.length || !$("#bulk-rename").elements.prefix.value.trim()) {
+      toast("Pick some online turtles and enter a name first.", "warn");
+      return;
+    }
+    for (const { t, label } of plan) {
+      sendRaw({ type: "cmd", id: t.id, action: "setLabel", args: { label } });
+      t.label = label;
+    }
+    toast(`Renamed ${plan.length} turtle${plan.length === 1 ? "" : "s"}.`);
+    $("#bulk-rename").hidden = true;
+    invalidate("list", "detail", "fleet");
+  });
   $("#fleet-map").addEventListener("click", (event) => {
     const pick = event.target.closest("[data-id]");
     if (!pick) return;
@@ -1425,8 +1659,12 @@ function bindEvents() {
     command(KEYS[key]);
   });
 
-  // Keep "last seen" times fresh.
-  setInterval(() => invalidate("list", "detail", "fleet"), 15000);
+  // Keep "last seen" times fresh, and remember which server copy we're on.
+  setInterval(() => {
+    invalidate("list", "detail", "fleet");
+    rememberServer();
+  }, 15000);
+  addEventListener("pagehide", rememberServer);
 }
 
 applyTheme(store.get("theme"));

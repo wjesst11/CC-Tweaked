@@ -5,6 +5,7 @@ A web dashboard for running a fleet of CC:Tweaked mining turtles, deployed on Di
 - **Fleet jobs.** Send any group of turtles to mine a Y level (each turtle digs its own parallel tunnel and follows ore veins), or split a big quarry between them.
 - **A shared depot.** Every turtle unloads at the same dock with three chests: junk, valuables and fuel. Items are sorted by name patterns you choose. Turtles refuel from the fuel chest and deposit the coal they mine into it.
 - **No collisions.** Each turtle flies at its own height ("lane"), and the server gives the dock to one turtle at a time. A turtle that meets another waits instead of digging it.
+- **Travel never breaks blocks.** Going home, to the depot or to a job, a turtle plans a route through open air and goes around roofs, trees and hills. If there's no open way, it stops and says where it is instead of digging.
 - **Protection.** Turtles never dig chests, barrels, shulker boxes, hoppers, Create blocks, or any ComputerCraft block such as other turtles and your GPS computers. They never dig or build inside protected areas, like a friend's base. The rules live on every turtle, so they hold even if the server is down.
 - **Pause, Resume, Cancel.** Pause freezes a turtle in place. Cancel stops the job and sends it home. **Pause all**, **Resume all** and **Recall all** act on the whole fleet.
 - **Permanent homes.** A turtle's home is where it first runs the script. Change it from the dashboard any time.
@@ -52,7 +53,7 @@ startup
 ```
 Then paste the token. Run `startup setup` to change the address or token later.
 
-Keep the sky above each home open: turtles fly straight up from it to their lane.
+A home doesn't need open sky directly above it, but it does need some open way out, such as an open side, window or doorway. Turtles never dig their way out. A fully enclosed turtle stops and tells you.
 
 ## Set up the fleet (Fleet page)
 
@@ -66,10 +67,10 @@ Keep the sky above each home open: turtles fly straight up from it to their lane
 
 Pick turtles in the picker (**All ready** selects every online, idle turtle that knows its GPS facing), then:
 
-- **Mine a level.** Choose an ore preset or a Y level, a start point, a direction and a tunnel length. Each turtle digs its own 2-high tunnel, *spacing* blocks apart. It mines any ore veins it sees in the floor and walls, unless the vein runs into a protected area.
-- **Quarry an area.** Two corners plus top and bottom Y. The area is split into one strip per turtle.
+- **Mine a level.** Choose an ore preset or a Y level, a start point, a direction and a tunnel length. Each turtle digs its own 2-high tunnel, *spacing* blocks apart. It mines any ore veins it sees in the floor and walls, unless the vein runs into a protected area. To reach the level, each turtle digs a 1×1 shaft straight down at its tunnel's start, so pick a start out in the open, away from builds.
+- **Quarry an area.** Two corners plus top and bottom Y. The area is split into one strip per turtle. Only blocks inside the box are dug: turtles drop in from above through open air, so set the top at ground level. Anything above it, like trees, is left alone. A box whose top is buried is refused rather than dug down to.
 
-Each turtle flies to its spot, digs a shaft down, and works. When it's full or low on fuel, it flies to the depot, waits its turn, sorts its items into the chests, refuels, and goes back. When it's done it unloads one last time and flies home.
+The planned area is outlined on the fleet map before you start. Each turtle flies to its spot without digging, and then works. When it's full or low on fuel, it flies to the depot, waits its turn, sorts its items into the chests, refuels, and goes back. When it's done it unloads one last time and flies home.
 
 Before anything starts, the server checks that no job, and no shaft down to it, would dig into a protected area, the depot, or a turtle's home. If one would, it refuses and tells you why.
 
@@ -91,8 +92,10 @@ Turtles track their own movement and confirm it with GPS:
 
 The **Start a job here** card on a turtle's page runs single-turtle jobs that don't use the depot:
 
-- **Quarry:** a box forward and to the right.
+- **Quarry:** a box forward, to the right and down, starting under the turtle.
 - **Tunnel:** straight ahead.
+
+The form says exactly which coordinates will be dug, and the map outlines them.
 
 They unload into a chest placed directly behind the spot where the job started.
 

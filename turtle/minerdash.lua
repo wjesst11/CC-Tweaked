@@ -20,7 +20,7 @@
 --    a time use the dock, so turtles never run into each other.
 -- Protected blocks and areas are never dug or built in, by any job or command.
 
-local VERSION = "1.2.0"
+local VERSION = "1.3.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -112,6 +112,7 @@ local gpsChecked = false -- a GPS fix has been attempted since boot
 local lane        -- this turtle's travel lane: blocks above the fleet travel height
 local leases = {} -- resource -> "granted" | "waiting"
 local fleetJob    -- { kind, args, step, phase, paused, failed } for the current fleet job
+local blocked, blockedCount = {}, 0 -- blocks found in the way while travelling (local coords)
 
 -- Shared fleet settings from the dashboard. These defaults apply until the
 -- server sends its copy; the latest copy is kept on disk so protection still
@@ -292,8 +293,10 @@ local function onFix(l, w)
       end
       return
     end
-    -- Don't keep digging on a position that might be wrong.
+    -- Don't keep digging on a position that might be wrong, and forget
+    -- obstacles remembered relative to it.
     if job then stopRequested = true end
+    blocked, blockedCount = {}, 0
     if not slip then
       -- First assume only the position slipped (e.g. the server stopped mid-move).
       pos = fromWorld(w)
@@ -546,6 +549,193 @@ end
 
 local function faceCompass(c)
   face((c - calib.f0) % 4)
+end
+
+-- Navigation ----------------------------------------------------------------
+-- Getting somewhere (home, the depot, a job) never breaks blocks. The turtle
+-- plans a route through open space, treating blocks it hasn't seen as open,
+-- and re-plans around every block it bumps into. Only jobs dig, and only
+-- inside their own area. Routes are planned in local coordinates, so this
+-- works without GPS too.
+
+local function cellKey(x, y, z)
+  return x .. "," .. y .. "," .. z
+end
+
+local function markBlocked(c, untilTime)
+  local k = cellKey(c.x, c.y, c.z)
+  if blocked[k] == nil then
+    blockedCount = blockedCount + 1
+    if blockedCount > 50000 then blocked, blockedCount = {}, 1 end
+  end
+  blocked[k] = untilTime or true -- other turtles only block for a while
+end
+
+local function isOpen(x, y, z)
+  local b = blocked[cellKey(x, y, z)]
+  return b == nil or (b ~= true and b < os.clock())
+end
+
+local function heapPush(heap, node, f)
+  node.f = f
+  heap[#heap + 1] = node
+  local i = #heap
+  while i > 1 do
+    local p = math.floor(i / 2)
+    if heap[p].f <= heap[i].f then break end
+    heap[p], heap[i] = heap[i], heap[p]
+    i = p
+  end
+end
+
+local function heapPop(heap)
+  local top, last = heap[1], table.remove(heap)
+  if #heap > 0 then
+    heap[1] = last
+    local i = 1
+    while true do
+      local l, r, m = 2 * i, 2 * i + 1, i
+      if l <= #heap and heap[l].f < heap[m].f then m = l end
+      if r <= #heap and heap[r].f < heap[m].f then m = r end
+      if m == i then break end
+      heap[i], heap[m] = heap[m], heap[i]
+      i = m
+    end
+  end
+  return top
+end
+
+local NEIGHBOURS = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 0, 1 }, { 0, 0, -1 }, { 0, 1, 0 }, { 0, -1, 0 } }
+
+-- A goal for reaching one cell. With a cruising height, sideways moves
+-- anywhere else cost extra, so routes climb to it, cross at that height and
+-- drop at the end, detouring only around obstacles. The estimate is the exact
+-- cost through open air, which keeps the search tight.
+local function cellGoal(t, cruise)
+  return {
+    reached = function(x, y, z) return x == t.x and y == t.y and z == t.z end,
+    estimate = function(x, y, z)
+      local across, up = math.abs(x - t.x) + math.abs(z - t.z), math.abs(y - t.y)
+      if not cruise then return across + up end
+      return math.min(3 * across + up, across + math.abs(y - cruise) + math.abs(cruise - t.y))
+    end,
+    cost = function(dy, y) return (dy ~= 0 or not cruise or y == cruise) and 1 or 3 end,
+    centre = t,
+  }
+end
+
+-- Cheapest open route to the goal (A*), or nil. `goal.allowed` can confine
+-- the route; otherwise it stays within a box around the trip.
+local function findPath(goal)
+  local from, c = pos, goal.centre
+  local margin = 24
+  local lo = { x = math.min(from.x, c.x) - margin, y = math.min(from.y, c.y) - margin, z = math.min(from.z, c.z) - margin }
+  local hi = { x = math.max(from.x, c.x) + margin, y = math.max(from.y, c.y) + margin, z = math.max(from.z, c.z) + margin }
+  if goal.bounds then lo, hi = goal.bounds.lo, goal.bounds.hi end
+  local startKey = cellKey(from.x, from.y, from.z)
+  local g, came, closed, open = { [startKey] = 0 }, {}, {}, {}
+  heapPush(open, { x = from.x, y = from.y, z = from.z, k = startKey }, goal.estimate(from.x, from.y, from.z))
+  local expanded = 0
+  while #open > 0 do
+    local cur = heapPop(open)
+    if not closed[cur.k] then
+      if goal.reached(cur.x, cur.y, cur.z) then
+        local path, node = {}, cur
+        while node do
+          table.insert(path, 1, node)
+          node = came[node.k]
+        end
+        return path
+      end
+      closed[cur.k] = true
+      expanded = expanded + 1
+      if expanded > 8000 then return nil end
+      if expanded % 500 == 0 then
+        os.queueEvent("minerdash_yield") -- don't hog the computer
+        os.pullEvent("minerdash_yield")
+      end
+      for _, d in ipairs(NEIGHBOURS) do
+        local x, y, z = cur.x + d[1], cur.y + d[2], cur.z + d[3]
+        local k = cellKey(x, y, z)
+        if not closed[k] and isOpen(x, y, z)
+          and x >= lo.x and x <= hi.x and y >= lo.y and y <= hi.y and z >= lo.z and z <= hi.z
+          and (not goal.allowed or goal.allowed(x, y, z)) then
+          local ng = g[cur.k] + goal.cost(d[2], y)
+          if ng < (g[k] or math.huge) then
+            g[k], came[k] = ng, cur
+            heapPush(open, { x = x, y = y, z = z, k = k }, ng + goal.estimate(x, y, z))
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- One step to a neighbouring cell without digging: true, or false and why.
+local function stepTo(n)
+  local dir = n.y > pos.y and "up" or n.y < pos.y and "down" or "forward"
+  if dir == "forward" then
+    for h = 0, 3 do
+      if pos.x + DX[h] == n.x and pos.z + DZ[h] == n.z then face(h) end
+    end
+  end
+  for _ = 1, 10 do
+    local ok, err = move(dir)
+    if ok then return true end
+    if err == "Out of fuel" then error("Out of fuel", 0) end
+    local found, block = SIDES[dir].inspect()
+    if found and isTurtleBlock(block.name) then return false, "turtle" end
+    if found and not LIQUIDS[block.name] then return false, "block" end
+    if not SIDES[dir].attack() then sleep(0.2) end -- a mob in the way
+  end
+  return false, "block"
+end
+
+local function describe(p)
+  local w = toWorld(p) or p
+  return ("%d, %d, %d"):format(w.x, w.y, w.z)
+end
+
+-- Go somewhere through open space only. Raises an error, without digging, if
+-- there's no open way.
+local function navigate(goal)
+  local tries, waits = 0, 0
+  while not goal.reached(pos.x, pos.y, pos.z) do
+    checkStop()
+    local path = findPath(goal)
+    if not path then error(("Found no open way to %s without digging"):format(describe(goal.centre)), 0) end
+    for i = 2, #path do
+      local ok, why = stepTo(path[i])
+      if not ok then
+        if why == "turtle" then
+          -- Another turtle passing through: wait, then go around if it stays put.
+          waits = waits + 1
+          if waits % 10 == 0 then markBlocked(path[i], os.clock() + 20) end
+          sleep(0.5)
+        else
+          markBlocked(path[i])
+        end
+        break
+      end
+    end
+    tries = tries + 1
+    if tries > 400 then error(("Gave up finding an open way to %s"):format(describe(goal.centre)), 0) end
+  end
+end
+
+-- This turtle's lane height in local coordinates, if it has one.
+local function cruiseHeight()
+  if fleet.travelY and lane and gpsTrusted() then
+    return fleet.travelY + lane - calib.w.y + calib.l.y
+  end
+end
+
+-- Fly to a world position (or, without y, to this turtle's lane above it).
+local function flyTo(w)
+  local cruise = cruiseHeight()
+  local target = fromWorld({ x = w.x, y = w.y or (fleet.travelY + lane), z = w.z })
+  navigate(cellGoal(target, cruise))
 end
 
 -- Inventory & fuel ----------------------------------------------------------
@@ -820,12 +1010,12 @@ local function release(resource)
   saveState()
 end
 
--- Fly to a column: straight up or down to this turtle's lane, across, then
--- down to t.y if given. Lanes are unique per turtle, so flights never collide.
+-- Fly through open air to a world position (or, without y, to this turtle's
+-- lane above it), never digging. Each turtle cruises at its own lane height,
+-- so flights don't cross.
 local function travelTo(t)
-  goWorld({ y = laneY() }, "y")
-  goWorld(t, "xz")
-  if t.y then goWorld(t, "y") end
+  laneY() -- needs the travel height and a lane
+  flyTo(t)
 end
 
 -- Turtles queue beside the depot column, each at its own height.
@@ -941,6 +1131,19 @@ local function depotVisit(minFuel)
   local D = fleet.depot
   if not D then error("Set up the depot on the dashboard first", 0) end
   local spot = waitSpot()
+  local ly = laneY()
+  -- In and out of the dock only through its column (and this turtle's own
+  -- waiting spot beside it), never digging: the column must be kept open.
+  local function dockRoute(target)
+    local dock, queue = fromWorld({ x = D.x, y = D.y, z = D.z }), fromWorld({ x = spot.x, y = ly, z = spot.z })
+    local goal = cellGoal(fromWorld(target))
+    goal.allowed = function(x, y, z)
+      return (x == dock.x and z == dock.z) or (x == queue.x and y == queue.y and z == queue.z)
+    end
+    local ok, err = pcall(navigate, goal)
+    if not ok and err ~= STOP then error("The column above the dock is blocked. Keep the sky above the dock open.", 0) end
+    if not ok then error(err, 0) end
+  end
   while true do
     setDetail("Heading to the depot")
     travelTo(spot)
@@ -948,18 +1151,14 @@ local function depotVisit(minFuel)
     acquire("depot")
     local problem
     local ok, err = pcall(function()
-      goWorld({ x = D.x }, "x")
-      goWorld({ y = D.y }, "y")
+      dockRoute({ x = D.x, y = D.y, z = D.z })
       setDetail("Unloading at the depot")
       problem = dockWork()
     end)
     -- Whatever happened, get out of the column so the next turtle can use it.
     local stop = stopRequested
     stopRequested = false
-    local left = pcall(function()
-      goWorld({ y = laneY() }, "y")
-      goWorld(spot, "x")
-    end)
+    local left = pcall(dockRoute, { x = spot.x, y = ly, z = spot.z })
     stopRequested = stopRequested or stop
     if left then release("depot") end
     if not ok then error(err, 0) end
@@ -1035,7 +1234,41 @@ KINDS.branchMine = {
     end
   end,
   detail = function(a, i) return ("Tunnel at Y %d: %d of %d"):format(a.y, i, a.length) end,
+  -- Fly over without digging, then dig the 1x1 shaft down to the tunnel: the
+  -- only digging a level job does outside its tunnel.
+  enter = function(a)
+    local w = toWorld(pos)
+    if w.x ~= a.x or w.z ~= a.z then travelTo({ x = a.x, z = a.z }) end
+    goWorld({ y = a.y }, "y")
+  end,
+  -- Back along the tunnel to the shaft, then up the shaft.
+  exit = function(a)
+    if KINDS.branchMine.inside(a, toWorld(pos)) then KINDS.branchMine.walk(a, { x = a.x, y = a.y, z = a.z }) end
+    local w = toWorld(pos)
+    if w.x == a.x and w.z == a.z then goWorld({ y = laneY() }, "y") end
+  end,
 }
+
+-- A goal for reaching height y anywhere within some columns, moving only
+-- inside those columns between heights lo and hi (all local coordinates).
+local function layerGoal(y, cols, lo, hi)
+  return {
+    reached = function(_, yy) return yy == y end,
+    estimate = function(_, yy) return math.abs(yy - y) end,
+    cost = function() return 1 end,
+    allowed = function(x, yy, z)
+      return x >= cols.x1 and x <= cols.x2 and z >= cols.z1 and z <= cols.z2 and yy >= lo and yy <= hi
+    end,
+    bounds = { lo = { x = cols.x1, y = lo, z = cols.z1 }, hi = { x = cols.x2, y = hi, z = cols.z2 } },
+    centre = { x = cols.x1, y = y, z = cols.z1 },
+  }
+end
+
+-- The quarry's columns and top height in local coordinates.
+local function quarryColumns(a)
+  local p, q = fromWorld({ x = a.x1, y = a.yTop, z = a.z1 }), fromWorld({ x = a.x2, y = a.yTop, z = a.z2 })
+  return { x1 = math.min(p.x, q.x), x2 = math.max(p.x, q.x), z1 = math.min(p.z, q.z), z2 = math.max(p.z, q.z) }, p.y
+end
 
 -- A box from yTop down to yBottom, three layers per pass.
 local function quarryCell(a, i)
@@ -1060,10 +1293,29 @@ KINDS.areaQuarry = {
     return w.x >= a.x1 and w.x <= a.x2 and w.z >= a.z1 and w.z <= a.z2 and w.y <= a.yTop and w.y >= a.yBottom
   end,
   walk = function(a, t) goWorld(t, "xzy") end,
-  -- Up through dug layers to the top, then across the top layer to the entry.
-  toEntry = function(a)
-    goWorld({ y = a.yTop }, "y")
-    goWorld({ x = a.x1, z = a.z1 }, "xz")
+  -- Fly over the area without digging, come down any open column to just
+  -- above the box, then dig down into it. Nothing above the box is ever dug.
+  enter = function(a)
+    local cols, top = quarryColumns(a)
+    if pos.x < cols.x1 or pos.x > cols.x2 or pos.z < cols.z1 or pos.z > cols.z2 then
+      travelTo({ x = a.x1, z = a.z1 })
+    end
+    local ok, err = pcall(navigate, layerGoal(top + 1, cols, top + 1, math.max(cruiseHeight(), pos.y)))
+    if not ok then
+      if err == STOP then error(STOP, 0) end
+      error(("Can't get into the quarry from above without digging. Its top (Y %d) must be at or above the ground."):format(a.yTop), 0)
+    end
+    digMove("down")
+  end,
+  -- Up through the dug layers, then out through open air above the area.
+  exit = function(a)
+    local cols, top = quarryColumns(a)
+    if KINDS.areaQuarry.inside(a, toWorld(pos)) then goWorld({ y = a.yTop }, "y") end
+    local over = pos.x >= cols.x1 and pos.x <= cols.x2 and pos.z >= cols.z1 and pos.z <= cols.z2 and pos.y >= top
+    if over then
+      local cruise = cruiseHeight()
+      navigate(layerGoal(cruise, cols, top, math.max(cruise, pos.y)))
+    end
   end,
   work = function(a, i)
     local c = quarryCell(a, i)
@@ -1077,25 +1329,13 @@ KINDS.areaQuarry = {
 }
 
 local function moveToStep(k, a, i)
-  local w, e = toWorld(pos), k.entry(a)
-  if not k.inside(a, w) then
-    if w.x == e.x and w.z == e.z then
-      goWorld(e, "y") -- already in this job's shaft
-    else
-      travelTo(e)
-    end
-  end
+  if not k.inside(a, toWorld(pos)) then k.enter(a) end
   k.walk(a, k.cell(a, i))
 end
 
--- From anywhere in the job, back to the entry column and up to the lane.
+-- From anywhere in the job, out to this turtle's lane height.
 local function leaveWork(k, a)
-  local e = k.entry(a)
-  if k.inside(a, toWorld(pos)) then
-    if k.toEntry then k.toEntry(a) else k.walk(a, e) end
-  end
-  local w = toWorld(pos)
-  if w.x == e.x and w.z == e.z then goWorld({ y = laneY() }, "y") end
+  k.exit(a)
 end
 
 -- Fuel to get from here to the depot and back again, with a margin.
@@ -1218,7 +1458,7 @@ function jobs.goHome()
   if fleet.travelY and lane and gpsTrusted() then
     flyHome()
   else
-    goTo(home, "xzy")
+    navigate(cellGoal(home)) -- through open space, never digging
     face(home.heading)
   end
 end
@@ -1302,6 +1542,7 @@ end
 
 actions.resetPosition = function()
   pos, heading, calib = { x = 0, y = 0, z = 0 }, 0, nil
+  blocked, blockedCount = {}, 0
   setHome()
   return true, "Position reset to 0, 0, 0"
 end
