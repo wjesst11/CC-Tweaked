@@ -278,13 +278,15 @@ const turtleWss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 }
 const dashboardWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: true });
 
 server.on("upgrade", (req, socket, head) => {
-  const { pathname } = new URL(req.url, "http://localhost");
+  // Tolerate a trailing slash, a common typo when entering the URL on a turtle.
+  const pathname = new URL(req.url, "http://localhost").pathname.replace(/\/+$/, "");
   if (pathname === "/ws/turtle") {
     turtleWss.handleUpgrade(req, socket, head, handleTurtle);
   } else if (pathname === "/ws/dashboard") {
     dashboardWss.handleUpgrade(req, socket, head, handleDashboard);
   } else {
-    socket.destroy();
+    // Answer instead of dropping the socket, which the App Platform proxy turns into a slow 504.
+    socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nTurtles connect to /ws/turtle\n");
   }
 });
 

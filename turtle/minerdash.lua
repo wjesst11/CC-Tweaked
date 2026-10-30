@@ -9,7 +9,7 @@
 -- coordinates and compass facing. Jobs set "home" to where they start and
 -- unload into a chest placed directly behind home.
 
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local STOP = setmetatable({}, { __tostring = function() return "Stopped" end })
@@ -24,23 +24,54 @@ end
 settings.define("minerdash.url", { description = "Dashboard websocket URL", type = "string" })
 settings.define("minerdash.token", { description = "Turtle token (TURTLE_TOKEN on the server)", type = "string" })
 
-local function ask(label, current, secret)
-  while true do
-    write(label .. (current and " (enter = keep)" or "") .. ": ")
-    local value = read(secret and "*" or nil)
-    if value ~= "" then return value end
-    if current then return current end
-  end
+local function trim(s)
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Accept what people actually paste (https://my-app..., a bare host name, with
+-- or without /ws/turtle) and turn it into the websocket URL. nil if it isn't
+-- an address at all.
+local function toSocketUrl(input)
+  local s = trim(input)
+    :gsub("^(%a+)://", function(scheme) return scheme:lower() .. "://" end)
+    :gsub("^http", "ws")
+  if not s:match("^wss?://") then s = "wss://" .. s end
+  s = s:gsub("/+$", "")
+  local host = s:match("^wss?://([^/]+)")
+  if not host or not (host:find(".", 1, true) or host:match("^localhost")) then return nil end
+  if not s:match("/ws/turtle$") then s = s .. "/ws/turtle" end
+  return s
 end
 
 local url = settings.get("minerdash.url") or DEFAULT_URL
 local token = settings.get("minerdash.token")
-if ({ ... })[1] == "setup" or not url:match("^wss?://") or not token then
+local hasUrl = url:match("^wss?://") ~= nil
+local reconfigure = ({ ... })[1] == "setup"
+if reconfigure or not hasUrl or not token then
   print("MinerDash setup")
+  -- A copy downloaded from the dashboard already knows its address.
+  if reconfigure or not hasUrl then
+    if hasUrl then print("Server: " .. url .. "\nPress Enter to keep it.") end
+    while true do
+      write("Server address: ")
+      local input = trim(read())
+      if input == "" and hasUrl then break end
+      local candidate = toSocketUrl(input)
+      if candidate then
+        url = candidate
+        break
+      end
+      print("Type your app's address, like my-app.ondigitalocean.app")
+    end
+  end
+  print("Server: " .. url)
+  if token then print("Press Enter to keep the current token.") end
   repeat
-    url = ask("Server URL (wss://...)", url:match("^wss?://") and url or nil)
-  until url:match("^wss?://")
-  token = ask("Turtle token", token, true)
+    write("Turtle token: ")
+    local input = trim(read("*"))
+    if input ~= "" then token = input end
+    if not token then print("Paste TURTLE_TOKEN from DigitalOcean.") end
+  until token
   settings.set("minerdash.url", url)
   settings.set("minerdash.token", token)
   settings.save()
