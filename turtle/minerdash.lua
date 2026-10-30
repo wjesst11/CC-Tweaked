@@ -20,7 +20,7 @@
 --    a time use the dock, so turtles never run into each other.
 -- Protected blocks and areas are never dug or built in, by any job or command.
 
-local VERSION = "1.4.0"
+local VERSION = "1.5.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -118,6 +118,7 @@ local parked = {}                   -- blocks turtles are standing still in -> u
 local trail, trailSize = {}, 0      -- every block moved through since last home (local coords)
 local trailRoot, trailLo, trailHi   -- where the trail starts, and its bounding box
 local travelNext                    -- the block this turtle is about to move into
+local odometer = 0                  -- blocks moved, ever (to measure real trip lengths)
 
 -- Shared fleet settings from the dashboard. These defaults apply until the
 -- server sends its copy; the latest copy is kept on disk so protection still
@@ -144,6 +145,7 @@ local function loadState()
   if type(data) == "table" and data.pos then
     pos, heading, home, calib = data.pos, data.heading, data.home, data.calib
     lane, fleetJob = data.lane, data.fleetJob
+    odometer = tonumber(data.odometer) or 0
     if data.holding then leases.depot = "granted" end
   end
 end
@@ -152,7 +154,7 @@ local function saveState()
   local f = fs.open(STATE_FILE, "w")
   f.write(textutils.serialize({
     pos = pos, heading = heading, home = home, calib = calib,
-    lane = lane, fleetJob = fleetJob, holding = leases.depot == "granted",
+    lane = lane, fleetJob = fleetJob, holding = leases.depot == "granted", odometer = odometer,
   }))
   f.close()
 end
@@ -251,6 +253,10 @@ local CZ = { [0] = -1, [1] = 0, [2] = 1, [3] = 0 }
 
 local function samePos(a, b)
   return a.x == b.x and a.y == b.y and a.z == b.z
+end
+
+local function distance(a, b)
+  return math.abs(a.x - b.x) + math.abs(a.y - b.y) + math.abs(a.z - b.z)
 end
 
 -- World coordinates are only trusted once the facing is known and not in doubt.
@@ -406,6 +412,17 @@ local function neighbour(dir)
   return { x = pos.x + DX[heading], y = pos.y, z = pos.z + DZ[heading] }
 end
 
+-- Blocks dug, waiting to be reported for the dashboard's 3D map:
+-- { x, y, z, name } in world coordinates. Only recorded with GPS.
+local dugLog = {}
+
+local function noteDug(dir, name)
+  if not gpsTrusted() then return end
+  local w = toWorld(neighbour(dir))
+  if #dugLog >= 5000 then table.remove(dugLog, 1) end
+  dugLog[#dugLog + 1] = { w.x, w.y, w.z, name }
+end
+
 local function inBox(w, a)
   return w.x >= math.min(a.x1, a.x2) and w.x <= math.max(a.x1, a.x2)
     and w.y >= math.min(a.y1, a.y2) and w.y <= math.max(a.y1, a.y2)
@@ -475,6 +492,7 @@ local function move(dir)
       local s = dir == "back" and -1 or 1
       pos.x, pos.z = pos.x + DX[heading] * s, pos.z + DZ[heading] * s
     end
+    odometer = odometer + 1
     remember(pos)
     saveState()
     changed()
@@ -513,6 +531,7 @@ local function clear(dir)
     local reason = protection(dir, block)
     if reason then return false, reason end
     local ok, err = side.dig()
+    if ok then noteDug(dir, block.name) end
     -- "Nothing to dig here" means it's already gone (another turtle got it).
     if not ok and err ~= "Nothing to dig here" then return false, err end
     -- Let gravel/sand above us land so it gets dug on the next pass.
@@ -748,7 +767,7 @@ local function stepTo(n)
     if found and not LIQUIDS[block.name] then
       local fellIn = trail[cellKey(n.x, n.y, n.z)] and hasFallen(block.name) and not protection(dir, block)
       if not fellIn then return false, "block" end
-      SIDES[dir].dig()
+      if SIDES[dir].dig() then noteDug(dir, block.name) end
     elseif not SIDES[dir].attack() then
       sleep(0.2) -- a mob in the way
     end
@@ -932,6 +951,15 @@ local function unload(base, needChest)
   changed()
 end
 
+-- With a depot set up, every job unloads there: junk, valuables and fuel go
+-- in their chests and the turtle refuels. depotVisit and depotCost are
+-- defined with the fleet code below.
+local depotVisit, depotCost
+
+local function depotReady()
+  return fleet.depot ~= nil and fleet.travelY ~= nil and lane ~= nil and gpsTrusted()
+end
+
 -- A trip describes how a local job travels between its work area and its base
 -- (where it started): horizontally at corridorY (a level it has already dug),
 -- then vertically.
@@ -957,29 +985,56 @@ local function newTrip(corridorY, base)
   return trip
 end
 
-local function ensureFuel(trip)
-  if refuelFromInventory(trip.cost() + 64) then return end
+-- Fuel to get from `from` (default: here) back to where the job refuels:
+-- along its own corridor to the start, then on to the depot if there is one.
+-- trip.flown is the longest flight it has made between the start and the depot.
+local function refuelCost(trip, from)
+  local cost = trip.cost(from)
+  if depotReady() then cost = cost + depotCost(toWorld(trip.base), trip.flown) end
+  return cost
+end
+
+-- Unload from a local job: at the depot when there is one (sorting items and
+-- refuelling), otherwise into the chest behind the job's start. Either way it
+-- ends up back at the start.
+local function unloadAt(trip, needChest, minFuel)
+  if depotReady() then
+    local flown = depotVisit(minFuel or 0)
+    local start = odometer
+    navigate(cellGoal(trip.base))
+    trip.flown = math.max(trip.flown or 0, flown, odometer - start)
+    face(trip.base.heading)
+  else
+    unload(trip.base, needChest)
+  end
+end
+
+-- Back to the start to unload and refuel, then out to where it was. It leaves
+-- with enough fuel to get there, back again and on to where it refuels.
+local function serviceTrip(trip, needChest)
   local spot = here()
+  trip.toBase()
+  unloadAt(trip, needChest, 2 * refuelCost(trip, spot) + 64)
+  waitForFuel(trip.cost(spot) + refuelCost(trip, spot) + 64)
+  trip.back(spot)
+end
+
+-- Never go further than it has the fuel to come back from.
+local function ensureFuel(trip)
+  if refuelFromInventory(refuelCost(trip) + 64) then return end
   log("warn", "Low on fuel, heading back to the start")
   setDetail("Low on fuel, heading back")
-  trip.toBase()
-  unload(trip.base, false)
-  waitForFuel(trip.cost(spot) * 2 + 64)
-  trip.back(spot)
+  serviceTrip(trip, false)
 end
 
 local function ensureSpace(trip)
   if emptySlots() > 1 then return end
-  local spot = here()
   setDetail("Inventory full, unloading")
-  trip.toBase()
-  unload(trip.base, true)
-  waitForFuel(trip.cost(spot) * 2 + 64)
-  trip.back(spot)
+  serviceTrip(trip, true)
 end
 
--- Head back and unload after a job. A cancelled job leaves its trip for
--- goHome, which backs out the same way before going home.
+-- After a job: back out to the start, unload (and refuel at the depot), then
+-- go home. A cancelled job leaves its trip for goHome, which does the same.
 local function finishJob(trip, ok, err)
   if not ok and err == STOP then
     pendingTrip = trip
@@ -988,14 +1043,16 @@ local function finishJob(trip, ok, err)
   setDetail("Returning to the start")
   if ok then
     trip.toBase()
-    unload(trip.base, false)
+    unloadAt(trip, false)
+    retraceHome()
+    face(home.heading)
     return
   end
   -- Something stopped the job: unload if it can, then retrace its way home.
   log("warn", ("Stopped: %s. Heading home."):format(tostring(err)))
   pcall(function()
     trip.toBase()
-    unload(trip.base, false)
+    unloadAt(trip, false)
   end)
   pcall(retraceHome)
   error(err, 0)
@@ -1185,9 +1242,9 @@ end
 
 -- At the dock: sort the inventory into the three chests and top up fuel from
 -- the fuel chest. Returns a description of anything the player needs to fix.
-local function dockWork()
+local function dockWork(minFuel)
   local D = fleet.depot
-  local target = math.min(tonumber(fleet.refuelTo) or 10000, fuelLimit())
+  local target = math.min(math.max(tonumber(fleet.refuelTo) or 10000, minFuel), fuelLimit())
   local full = {}
   for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
@@ -1228,14 +1285,26 @@ local function dockWork()
   return #problems > 0 and table.concat(problems, ", ") or nil
 end
 
+-- Fuel to fly from world position w to the depot, down into the dock and back
+-- up: the longest flight from there it has actually made (`flown`), or until
+-- it has made one, the straight-line distance with room for detours.
+function depotCost(w, flown)
+  local D, ly, spot = fleet.depot, laneY(), waitSpot()
+  local direct = distance(w, { x = spot.x, y = ly, z = spot.z })
+  local fly = flown and math.max(flown, direct) or math.floor(direct * 1.5) + 16
+  return fly + 2 * math.abs(ly - D.y) + 4
+end
+
 -- Unload and refuel at the shared depot. Turtles wait their turn beside the
 -- depot column, each at its own height; only the turtle holding the dock uses
--- the column. Retries until the turtle has room and at least minFuel.
-local function depotVisit(minFuel)
+-- the column. Retries until the turtle has room and at least minFuel. Returns
+-- how many blocks it flew to get to the depot.
+function depotVisit(minFuel)
   local D = fleet.depot
   if not D then error("Set up the depot on the dashboard first", 0) end
   local spot = waitSpot()
   local ly = laneY()
+  local start, flown = odometer, nil
   -- In and out of the dock only through its column (or the approach column
   -- beside it when there's a chest above) and this turtle's own waiting spot,
   -- never digging: that column must be kept open.
@@ -1258,13 +1327,14 @@ local function depotVisit(minFuel)
   while true do
     setDetail("Heading to the depot")
     travelTo(spot)
+    flown = flown or odometer - start
     setDetail("Waiting for a turn at the depot")
     acquire("depot")
     local problem
     local ok, err = pcall(function()
       dockRoute({ x = D.x, y = D.y, z = D.z })
       setDetail("Unloading at the depot")
-      problem = dockWork()
+      problem = dockWork(minFuel)
     end)
     -- Whatever happened, get out of the column so the next turtle can use it.
     local stop = stopRequested
@@ -1276,7 +1346,7 @@ local function depotVisit(minFuel)
     if not left then error("Stuck in the depot column", 0) end
     checkStop()
     if problem then log("warn", "Depot: " .. problem) end
-    if emptySlots() >= 4 and fuelLevel() >= minFuel then return end
+    if emptySlots() >= 4 and fuelLevel() >= minFuel then return flown end
     setDetail("Waiting: " .. (problem or "not enough fuel at the depot"))
     waitSeconds(30)
   end
@@ -1287,21 +1357,84 @@ local function isVein(block)
 end
 
 -- Dig out a vein of ore starting at the block on side `dir`, then come back.
-local function mineVein(dir, budget, depth)
-  if budget.left <= 0 or depth > 10 then return end
+-- veins.left caps how many blocks; veins.allowed(w), if set, says which world
+-- blocks it may dig. veins.path is the way in from where it started. If
+-- veins.full(depth) says it needs the depot before going deeper, it stops and
+-- sets veins.cut to that way in, so it can come back and finish the vein.
+local exploreHere
+
+local function mineVein(dir, veins, depth)
+  if veins.left <= 0 or depth > 10 or veins.cut then return end
   local found, block = SIDES[dir].inspect()
   if not (found and isVein(block)) or protection(dir, block) then return end
-  budget.left = budget.left - 1
+  if veins.allowed and not veins.allowed(toWorld(neighbour(dir))) then return end
+  if veins.full and veins.full(depth + 1) then
+    veins.cut = { table.unpack(veins.path) }
+    return
+  end
+  veins.left = veins.left - 1
   local back = here()
   digMove(dir)
-  mineVein("up", budget, depth + 1)
-  mineVein("down", budget, depth + 1)
-  for _ = 1, 4 do
-    turn(true)
-    mineVein("forward", budget, depth + 1)
-  end
+  veins.path[#veins.path + 1] = toWorld(pos)
+  exploreHere(veins, depth + 1)
+  table.remove(veins.path)
   goTo(back, "xyz")
   face(back.heading)
+end
+
+-- Follow the vein from every side of the block it's in.
+function exploreHere(veins, depth)
+  if veins.cut then return end
+  mineVein("up", veins, depth)
+  mineVein("down", veins, depth)
+  for _ = 1, 4 do
+    turn(true)
+    mineVein("forward", veins, depth)
+  end
+end
+
+-- Finish a vein it left for the depot: back in along the way it dug, then
+-- look around every block of that way again on the way out.
+local function resumeVein(veins, path)
+  local start = here()
+  veins.path = {}
+  for i, w in ipairs(path) do
+    goWorld(w, "xyz")
+    veins.path[i] = w
+  end
+  for i = #path, 1, -1 do
+    exploreHere(veins, i)
+    table.remove(veins.path)
+    if i > 1 then goWorld(path[i - 1], "xyz") end
+  end
+  goTo(start, "xyz")
+  face(start.heading)
+end
+
+-- What a level job can be told to collect (by the dashboard's names), counted
+-- as items it brings back. "valuables" is everything on the valuables list.
+local GOAL_ITEMS = {
+  diamond = { name = "diamonds", match = { "*diamond*" } },
+  redstone = { name = "redstone", match = { "*redstone*" } },
+  gold = { name = "gold", match = { "*gold*" } },
+  lapis = { name = "lapis", match = { "*lapis*" } },
+  iron = { name = "iron", match = { "*iron*" } },
+  copper = { name = "copper", match = { "*copper*" } },
+  coal = { name = "coal", match = { "*coal*" } },
+  emerald = { name = "emeralds", match = { "*emerald*" } },
+  debris = { name = "ancient debris", match = { "*ancient_debris*" } },
+  valuables = { name = "valuables" },
+}
+
+local function countItems(patterns)
+  local n = 0
+  for slot = 1, 16 do
+    if turtle.getItemCount(slot) > 0 then
+      local item = turtle.getItemDetail(slot)
+      if item and matches(item.name, patterns) then n = n + item.count end
+    end
+  end
+  return n
 end
 
 -- A goal for reaching any of some columns (local x1..x2, z1..z2) at height y,
@@ -1328,44 +1461,102 @@ end
 -- at any step and pick up where it left off.
 local KINDS = {}
 
--- One 2-high tunnel at level y, starting at x/z and heading `dir`, mining any
--- ore veins it finds in the floor and walls.
+-- Mine a level: 2-high tunnels from x/z heading `dir`, at most `length`
+-- blocks out, mining ore veins in the floor and walls. With a height band it
+-- then works back and forth through more tunnels 3 blocks above and below
+-- (a.levels), each linked to the last at one end, all in this turtle's own
+-- slice of rock. With a goal it stops as soon as it has collected that many.
+
+-- How far along the tunnels, and how far to their right, world block w is.
+local function along(a, w) return (w.x - a.x) * CX[a.dir] + (w.z - a.z) * CZ[a.dir] end
+local function across(a, w)
+  local r = (a.dir + 1) % 4
+  return (w.x - a.x) * CX[r] + (w.z - a.z) * CZ[r]
+end
+
+-- Tunnel heights: its own level, then every 3 blocks up, then down, while the
+-- tunnel stays within `band` blocks of it and above the bedrock layers.
+local function levelOffsets(y, band)
+  local list = { 0 }
+  for off = 3, band, 3 do
+    if y + off <= 318 then list[#list + 1] = off end
+  end
+  for off = 3, band, 3 do
+    if y - off >= -59 then list[#list + 1] = -off end
+  end
+  return list
+end
+
+local function levelsOf(a) return a.levels or { 0 } end
+
+-- Step i: tunnel n = i / length, every other one running back towards the start.
+local function tunnelCell(a, i)
+  local n, j = math.floor(i / a.length), i % a.length
+  if n % 2 == 1 then j = a.length - 1 - j end
+  return { x = a.x + j * CX[a.dir], y = a.y + levelsOf(a)[n + 1], z = a.z + j * CZ[a.dir] }
+end
+
+local function goalOf(a)
+  return GOAL_ITEMS[a.goalItem] or GOAL_ITEMS.valuables
+end
+
 KINDS.branchMine = {
-  total = function(a) return a.length end,
+  total = function(a) return a.length * #levelsOf(a) end,
   entry = function(a) return { x = a.x, y = a.y, z = a.z } end,
-  cell = function(a, i) return { x = a.x + i * CX[a.dir], y = a.y, z = a.z + i * CZ[a.dir] } end,
-  -- On the tunnel itself. (Vein detours always return to the tunnel before a
-  -- step ends, so between steps the turtle is on the line.)
+  cell = tunnelCell,
+  -- On the tunnels' line within the height band: in a tunnel, or in a link
+  -- between two. (Vein detours always come back to the tunnel before a step
+  -- ends, so between steps the turtle is on the line.)
   inside = function(a, w)
-    local ex, ez = a.x + (a.length - 1) * CX[a.dir], a.z + (a.length - 1) * CZ[a.dir]
-    return (w.y == a.y or w.y == a.y + 1)
-      and w.x >= math.min(a.x, ex) and w.x <= math.max(a.x, ex)
-      and w.z >= math.min(a.z, ez) and w.z <= math.max(a.z, ez)
+    local band, d = a.band or 0, along(a, w)
+    return across(a, w) == 0 and d >= 0 and d < a.length and w.y >= a.y - band and w.y <= a.y + 1 + band
   end,
-  -- Back to tunnel level, onto the tunnel line, then along it.
+  -- Veins stay within the band and this turtle's slice: up to halfway to the
+  -- next turtle's tunnel on either side.
+  mayDig = function(a, w)
+    if a.band == nil then return true end -- a job from before height bands
+    local s, x, d = a.spacing or 3, across(a, w), along(a, w)
+    return w.y >= a.y - a.band and w.y <= a.y + 1 + a.band and d >= 0 and d < a.length
+      and x >= -math.floor((s - 1) / 2) and x <= math.ceil((s - 1) / 2)
+  end,
+  -- Along the tunnel it's in, then up or down to the target's tunnel. From a
+  -- tunnel above or below, it goes up or down first and comes back along the
+  -- main level, which is always finished first, so it never digs through a
+  -- tunnel before mining it.
   walk = function(a, t)
-    local along = CX[a.dir] ~= 0 and "x" or "z"
-    goWorld(t, "y")
-    goWorld(t, along == "x" and "z" or "x")
-    goWorld(t, along)
+    local ax = CX[a.dir] ~= 0 and "x" or "z"
+    goWorld(t, toWorld(pos).y == a.y and ax .. "y" or "y" .. ax)
   end,
-  work = function(a)
+  work = function(a, i, veins)
     faceCompass(a.dir)
     clear("up")
-    if a.scan then
-      local budget = { left = 32 }
-      mineVein("down", budget, 0)
-      turn(false)
-      mineVein("forward", budget, 0)
-      turn(true)
-      turn(true)
-      mineVein("forward", budget, 0)
-      turn(false)
-    end
+    if not a.scan then return true end
+    if veins.resume then resumeVein(veins, veins.resume) end
+    faceCompass(a.dir)
+    mineVein("down", veins, 0)
+    turn(false)
+    mineVein("forward", veins, 0)
+    turn(true)
+    turn(true)
+    mineVein("forward", veins, 0)
+    turn(false)
+    return not veins.cut
   end,
-  detail = function(a, i) return ("Tunnel at Y %d: %d of %d"):format(a.y, i, a.length) end,
-  -- Fly without digging to open air above the tunnel's start, then dig the
-  -- 1x1 shaft down: the only digging a level job does outside its tunnel.
+  goal = function(a)
+    if (a.goal or 0) <= 0 then return nil end
+    local g = goalOf(a)
+    return { count = a.goal, name = g.name, patterns = g.match and compileList(g.match) or compiled.valuables }
+  end,
+  detail = function(a, i, fj)
+    local c = tunnelCell(a, math.min(i, a.length * #levelsOf(a) - 1))
+    local where = ("Y %d, %d of %d blocks out"):format(c.y, along(a, c) + 1, a.length)
+    if (a.goal or 0) > 0 then
+      return ("Found %d of %d %s (%s)"):format(fj.found or 0, a.goal, goalOf(a).name, where)
+    end
+    return "Tunnel at " .. where
+  end,
+  -- Fly without digging to open air above the tunnels' start, then dig the
+  -- 1x1 shaft down: the only digging a level job does outside its slice.
   enter = function(a)
     local w = toWorld(pos)
     if w.x ~= a.x or w.z ~= a.z then
@@ -1374,7 +1565,7 @@ KINDS.branchMine = {
     end
     goWorld({ y = a.y }, "y")
   end,
-  -- Back along the tunnel to the bottom of the shaft; the way up is open.
+  -- Back through the tunnels to the bottom of the shaft; the way up is open.
   exit = function(a)
     if KINDS.branchMine.inside(a, toWorld(pos)) then KINDS.branchMine.walk(a, { x = a.x, y = a.y, z = a.z }) end
   end,
@@ -1435,23 +1626,34 @@ KINDS.areaQuarry = {
   end,
 }
 
+-- Fuel to get from here to the depot and back again: out of the job the way
+-- it really goes (back through its own tunnels to where it came in, plus
+-- `extra` for a detour it's on), the flight from there, and the same back,
+-- with a margin.
+local function roundTrip(k, a, extra)
+  local e = k.entry(a)
+  return 2 * (distance(toWorld(pos), e) + (extra or 0) + depotCost(e, fleetJob.route)) + 100
+end
+
+-- Remember the longest real flight between the depot and the job, from one of
+-- `flown` blocks that started or ended at world position w.
+local function noteRoute(k, a, flown, w)
+  fleetJob.route = math.max(fleetJob.route or 0, flown + distance(w, k.entry(a)))
+end
+
+-- From anywhere to step i. Coming in from the depot, it measures the flight.
 local function moveToStep(k, a, i)
-  if not k.inside(a, toWorld(pos)) then k.enter(a) end
+  if not k.inside(a, toWorld(pos)) then
+    local from, start, spot = toWorld(pos), odometer, waitSpot()
+    k.enter(a)
+    if from.x == spot.x and from.z == spot.z and from.y == laneY() then noteRoute(k, a, odometer - start, toWorld(pos)) end
+  end
   k.walk(a, k.cell(a, i))
 end
 
--- From anywhere in the job, out to this turtle's lane height.
+-- From anywhere in the job, out to where it can fly from.
 local function leaveWork(k, a)
   k.exit(a)
-end
-
--- Fuel to get from here to the depot and back again, with a margin.
-local function roundTrip(k, a)
-  local w, e, D = toWorld(pos), k.entry(a), fleet.depot
-  local ly = laneY()
-  local oneWay = math.abs(w.x - e.x) + math.abs(w.z - e.z) + math.abs(w.y - e.y)
-    + math.abs(ly - e.y) + math.abs(e.x - D.x) + math.abs(e.z - D.z) + 2 * math.abs(ly - D.y) + 2
-  return 2 * oneWay + 100
 end
 
 local function fleetWork()
@@ -1462,31 +1664,68 @@ local function fleetWork()
   laneY()
   local a = fleetJob.args
   local total = k.total(a)
+  local goal = k.goal and k.goal(a)
+
+  -- Count goal items as they turn up in the inventory: not ones it started
+  -- with, and not ones it has since dropped off or burnt.
+  local function tally()
+    if not goal then return end
+    local now = countItems(goal.patterns)
+    fleetJob.found = (fleetJob.found or 0) + math.max(0, now - (fleetJob.held or now))
+    fleetJob.held = now
+  end
+
+  local function done()
+    return fleetJob.step >= total or (goal ~= nil and (fleetJob.found or 0) >= goal.count)
+  end
 
   local function visit()
+    tally()
     local need = roundTrip(k, a)
     fleetJob.phase = "depot"
     saveState()
     leaveWork(k, a)
-    depotVisit(need)
+    local from = toWorld(pos)
+    noteRoute(k, a, depotVisit(need + 200), from)
     fleetJob.phase = "work"
     saveState()
+    tally()
   end
+
+  -- Before each step: burn fuel it's carrying, and go to the depot if it's
+  -- nearly full or hasn't the fuel to get there and back. After a step cut
+  -- short (a vein it had no room or fuel to finish), it wants a bit more.
+  local function service(cut)
+    local need = roundTrip(k, a) + (cut and 64 or 0)
+    if emptySlots() > 2 and fuelLevel() >= need then return end
+    tally()
+    refuelFromInventory(need + 200)
+    tally()
+    if emptySlots() <= 2 or fuelLevel() < need then visit() end
+  end
+
+  local veins = { left = 0 }
+  if k.mayDig then veins.allowed = function(w) return k.mayDig(a, w) end end
+  veins.full = function(depth) return emptySlots() <= 1 or fuelLevel() < roundTrip(k, a, depth) end
 
   local ok, err = pcall(function()
     if fleetJob.phase == "depot" then visit() end
-    while fleetJob.step < total do
+    tally()
+    local cut = false
+    while not done() do
       checkStop()
-      local need = roundTrip(k, a)
-      if emptySlots() <= 2 or fuelLevel() < need then
-        refuelFromInventory(need + 200)
-        if emptySlots() <= 2 or fuelLevel() < need then visit() end
-      end
+      service(cut)
       moveToStep(k, a, fleetJob.step)
-      k.work(a, fleetJob.step)
-      fleetJob.step = fleetJob.step + 1
+      veins.left, veins.path, veins.cut, veins.resume = 32, {}, nil, fleetJob.vein
+      cut = k.work(a, fleetJob.step, veins) == false
+      -- A vein it had to leave is finished from where it left off.
+      fleetJob.vein = cut and veins.cut or nil
+      if not cut then fleetJob.step = fleetJob.step + 1 end
+      tally()
       saveState()
-      setDetail(k.detail(a, fleetJob.step), fleetJob.step / total)
+      local progress = fleetJob.step / total
+      if goal then progress = math.max(progress, math.min(1, (fleetJob.found or 0) / goal.count)) end
+      setDetail(k.detail(a, fleetJob.step, fleetJob), progress)
     end
   end)
   if not ok and err ~= STOP and tostring(err):find("bedrock") then
@@ -1497,15 +1736,26 @@ local function fleetWork()
     if err == STOP then
       fleetJob.paused = true
     else
-      -- Something stopped the job: note why (it can be resumed later), then
-      -- retrace the way home rather than sit in the mine.
+      -- Something stopped the job: note why (it can be resumed later), drop
+      -- off what it mined at the depot, and go home rather than sit in the mine.
       fleetJob.failed = tostring(err)
       saveState()
       log("warn", ("Stopped: %s. Heading home."):format(tostring(err)))
+      pcall(function()
+        if depotReady() then
+          leaveWork(k, a)
+          depotVisit(0)
+        end
+      end)
       pcall(comeHome)
     end
     saveState()
     error(err, 0)
+  end
+  if goal then
+    local found = fleetJob.found or 0
+    log("info", found >= goal.count and ("Goal reached: %d %s"):format(found, goal.name)
+      or ("Mined its whole area: found %d of %d %s"):format(found, goal.count, goal.name))
   end
   setDetail("Job done, unloading")
   visit()
@@ -1525,7 +1775,10 @@ function jobs.fleetJob(a)
       kind = a.kind, x = clampInt(a.x, -3e7, 3e7, 0), z = clampInt(a.z, -3e7, 3e7, 0),
       y = clampInt(a.y, -64, 320, -58), dir = toCompass(a.dir),
       length = clampInt(a.length, 1, 1024, 64), scan = a.scan ~= false,
+      spacing = clampInt(a.spacing, 2, 16, 3), band = a.band ~= nil and clampInt(a.band, 0, 16, 0) or nil,
+      goal = clampInt(a.goal, 0, 100000, 0), goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
     }
+    args.levels = levelOffsets(args.y, args.band or 0)
   elseif a.kind == "areaQuarry" then
     local x1, x2 = clampInt(a.x1, -3e7, 3e7, 0), clampInt(a.x2, -3e7, 3e7, 0)
     local z1, z2 = clampInt(a.z1, -3e7, 3e7, 0), clampInt(a.z2, -3e7, 3e7, 0)
@@ -1558,11 +1811,17 @@ function jobs.goHome()
     local trip = pendingTrip
     pendingTrip = nil
     trip.toBase()
-    unload(trip.base, false)
+    if emptySlots() < 16 then unloadAt(trip, false) end
   end
   if fleetJob then
+    local k, a = KINDS[fleetJob.kind], fleetJob.args
     fleetJob = nil
     saveState()
+    -- Drop off what it mined (and refuel) on the way home.
+    if k and depotReady() and emptySlots() < 16 then
+      leaveWork(k, a)
+      depotVisit(0)
+    end
   end
   comeHome()
 end
@@ -1577,7 +1836,9 @@ local function guardedDig(dir)
   if not found then return false, "Nothing to dig here" end
   local reason = protection(dir, block)
   if reason then return false, "Won't dig: " .. reason end
-  return SIDES[dir].dig()
+  local ok, err = SIDES[dir].dig()
+  if ok then noteDug(dir, block.name) end
+  return ok, err
 end
 
 local function guardedPlace(dir, place)
@@ -1757,7 +2018,7 @@ local function status()
     local k = KINDS[fleetJob.kind]
     fj = {
       kind = fleetJob.kind, step = fleetJob.step, total = k and k.total(fleetJob.args),
-      paused = fleetJob.paused, failed = fleetJob.failed, args = fleetJob.args,
+      paused = fleetJob.paused, failed = fleetJob.failed, args = fleetJob.args, found = fleetJob.found,
     }
   end
   return {
@@ -1902,6 +2163,27 @@ local function gpsLoop()
   end
 end
 
+-- Report dug blocks a batch at a time: a table of block names, and four
+-- numbers per block (x, y, z and the name's index).
+local function sendDug()
+  if #dugLog == 0 then return true end
+  local count = math.min(#dugLog, 400)
+  local names, index, flat = {}, {}, {}
+  for i = 1, count do
+    local d = dugLog[i]
+    if not index[d[4]] then
+      names[#names + 1] = d[4]
+      index[d[4]] = #names - 1
+    end
+    flat[#flat + 1], flat[#flat + 2], flat[#flat + 3], flat[#flat + 4] = d[1], d[2], d[3], index[d[4]]
+  end
+  if not send({ type = "dug", names = names, blocks = flat }) then return false end
+  local rest = {}
+  for i = count + 1, #dugLog do rest[#rest + 1] = dugLog[i] end
+  dugLog = rest
+  return true
+end
+
 local function heartbeat()
   local lastSent = -math.huge
   while true do
@@ -1911,6 +2193,7 @@ local function heartbeat()
       lastSent = now
       if not send(status()) then return end
     end
+    if not sendDug() then return end
     sleep(0.5)
   end
 end

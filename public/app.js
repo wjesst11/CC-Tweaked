@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "1.4.0"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "1.5.0"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
 const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
@@ -59,7 +59,7 @@ const state = {
   turtles: new Map(), // id -> turtle as sent by the server, plus logs
   trails: new Map(), // id -> { frame, points: [{x, z}] } for the map
   selected: savedSelection === null ? null : Number(savedSelection),
-  view: store.get("view") === "fleet" ? "fleet" : "turtles",
+  view: ["fleet", "map"].includes(store.get("view")) ? store.get("view") : "turtles",
   filter: store.get("filter") ?? "all",
   search: "",
   mapMode: store.get("mapMode") === "fleet" ? "fleet" : "turtle",
@@ -229,8 +229,9 @@ function handle(msg) {
       state.ready = true;
       state.revealSelected = true;
       ensureSelection();
-      invalidate("list", "detail", "log", "fleet");
+      invalidate("list", "detail", "log", "fleet", "map");
       setFleet(msg.fleet);
+      if (world) sendRaw({ type: "mined" }); // reconnected: fetch the history again
       break;
 
     case "turtle": {
@@ -266,7 +267,28 @@ function handle(msg) {
 
     case "fleet":
       setFleet(msg.fleet);
-      invalidate("fleet");
+      invalidate("fleet", "map");
+      break;
+
+    case "mined":
+      world?.clearMined();
+      world?.addMined(msg.names, msg.blocks);
+      invalidate("map");
+      break;
+
+    case "dug":
+      world?.addMined(msg.names, msg.blocks);
+      // The server keeps the latest 250,000; past that, start again from its copy.
+      if (world?.stats().mined > 275_000) {
+        world.clearMined();
+        sendRaw({ type: "mined" });
+      }
+      invalidate("map");
+      break;
+
+    case "minedCleared":
+      world?.clearMined();
+      invalidate("map");
       break;
 
     case "depot":
@@ -342,7 +364,7 @@ function command(action, args = {}, id = state.selected) {
 
 // Rendering is batched: with dozens of turtles streaming updates, draw at most
 // every RENDER_INTERVAL_MS rather than once per message.
-const dirty = { list: false, detail: false, log: false, fleet: false };
+const dirty = { list: false, detail: false, log: false, fleet: false, map: false };
 let renderTimer = 0;
 let lastRender = 0;
 
@@ -356,14 +378,19 @@ function invalidate(...parts) {
 function flush() {
   renderTimer = 0;
   lastRender = performance.now();
-  const { list, detail, log, fleet } = dirty;
-  dirty.list = dirty.detail = dirty.log = dirty.fleet = false;
+  const { list, detail, log, fleet, map } = dirty;
+  dirty.list = dirty.detail = dirty.log = dirty.fleet = dirty.map = false;
   try {
     if (list) renderList();
     $("#fleet-view").hidden = state.view !== "fleet";
+    $("#map-view").hidden = state.view !== "map";
     if (state.view === "fleet") {
       $("#turtle").hidden = $("#empty").hidden = true;
       if (fleet || list) renderFleet();
+    } else if (state.view === "map") {
+      $("#turtle").hidden = $("#empty").hidden = true;
+      ensureWorld();
+      if (map || list || fleet || detail) renderWorld();
     } else if (detail || log) {
       renderDetail(log);
     }
@@ -687,7 +714,8 @@ function renderJob(s) {
     sub = [job.detail, jobPercent(job)].filter(Boolean).join(" · ");
   } else if (waiting) {
     value = fj.failed ? "Fleet job stopped" : "Fleet job paused";
-    sub = fj.failed ?? `${KIND_NAMES[fj.kind] ?? "Fleet job"}, step ${fj.step} of ${fj.total}`;
+    const done = fj.args?.goal > 0 ? `found ${fj.found ?? 0} of ${fj.args.goal}` : `step ${fj.step} of ${fj.total}`;
+    sub = fj.failed ?? `${KIND_NAMES[fj.kind] ?? "Fleet job"}, ${done}`;
   }
   $("#job-value").textContent = value;
   $("#job-meter").hidden = !job || job.name === "goHome";
@@ -829,6 +857,15 @@ function renderLocalPlan(t) {
 }
 
 // The areas a fleet job started now would dig, in world coordinates.
+// The tunnel heights a level job works through (mirrors levelOffsets in the
+// turtle script): its level, then every 3 blocks up and down within the band.
+function levelOffsets(y, band) {
+  const list = [0];
+  for (let off = 3; off <= band; off += 3) if (y + off <= 318) list.push(off);
+  for (let off = 3; off <= band; off += 3) if (y - off >= -59) list.push(-off);
+  return list;
+}
+
 function plannedFleetJob() {
   const { kind, params: p } = fleetParams();
   if (kind === "areaQuarry") {
@@ -847,6 +884,67 @@ function plannedFleetJob() {
       label: `Planned tunnel ${k + 1} at Y ${p.y ?? "?"}`,
     };
   });
+}
+
+// 3D map ---------------------------------------------------------------------------
+// three.js is only loaded the first time the 3D map is opened.
+
+let world = null;
+let worldLoading = null;
+
+function ensureWorld() {
+  if (worldLoading) return;
+  worldLoading = import("./world.js")
+    .then(({ createWorld }) => {
+      world = createWorld($("#map3d"), {
+        onSelect: (id) => select(id),
+        onOpen: (id) => {
+          select(id);
+          setView("turtles");
+        },
+        nameOf: (id) => {
+          const t = state.turtles.get(id);
+          return t ? nameOf(t) : `turtle #${id}`;
+        },
+      });
+      $("#map3d-note").hidden = true;
+      applyMapOptions();
+      sendRaw({ type: "mined" });
+      invalidate("map");
+    })
+    .catch((err) => {
+      console.error(err);
+      $("#map3d-note").textContent =
+        "The 3D map couldn't load. It needs WebGL, and access to cdn.jsdelivr.net for its 3D library.";
+    });
+}
+
+function applyMapOptions() {
+  world?.setOptions({
+    oresOnly: $("#map3d-ores").checked,
+    areas: $("#map3d-areas").checked,
+    jobs: $("#map3d-jobs").checked,
+    names: $("#map3d-names").checked,
+  });
+}
+
+function renderWorld() {
+  if (!world) return;
+  const list = sortedTurtles().map((t) => {
+    const st = turtleState(t);
+    const s = t.status ?? {};
+    return {
+      id: t.id, name: nameOf(t), state: st.key, stateLabel: st.label,
+      world: s.world ?? null, facing: s.facing, home: s.homeWorld, job: s.fleetJob?.args,
+    };
+  });
+  world.update(list, state.fleet, state.selected);
+  const { mined, ores } = world.stats();
+  const unplaced = list.filter((t) => !t.world).length;
+  $("#map3d-stats").textContent =
+    `${fmt(mined)} blocks mined, ${fmt(ores)} of them ores.` +
+    (unplaced ? ` ${unplaced} turtle${unplaced === 1 ? " isn't" : "s aren't"} shown: GPS doesn't know where yet.` : "") +
+    " ";
 }
 
 // Map ----------------------------------------------------------------------------
@@ -1159,8 +1257,12 @@ function renderFleetPreview() {
   } else if (kind === "branchMine") {
     if (p.x != null && p.z != null && p.y != null && p.length) {
       const n = ready.length;
-      text = `${n} tunnel${n === 1 ? "" : "s"}, ${p.length} blocks long at Y ${p.y}, heading ${p.dir} from ${p.x}, ${p.z}` +
-        (n > 1 ? `, ${p.spacing} apart going ${COMPASS[(COMPASS.indexOf(p.dir) + 1) % 4]}.` : ".");
+      const levels = levelOffsets(p.y, p.band ?? 0).map((off) => p.y + off);
+      const item = $("#fleet-job-form").elements.namedItem("goalItem").selectedOptions[0]?.textContent.toLowerCase();
+      text = `${n} turtle${n === 1 ? "" : "s"} heading ${p.dir} from ${p.x}, ${p.z}` +
+        (n > 1 ? `, ${p.spacing} apart going ${COMPASS[(COMPASS.indexOf(p.dir) + 1) % 4]}` : "") +
+        `, tunnelling at Y ${levels.join(", ")} up to ${p.length} blocks out. ` +
+        (p.goal > 0 ? `Each comes back once it has ${p.goal} ${item}.` : "Each mines its whole area.");
     } else {
       text = "Fill in the start position and level.";
     }
@@ -1529,6 +1631,8 @@ function bindEvents() {
     const { name, value } = event.target;
     const presets = { preset: "y", bottomPreset: "yBottom" };
     if (presets[name] && value !== "") jobForm.elements[presets[name]].value = value;
+    const goal = name === "preset" && event.target.selectedOptions[0]?.dataset.goal;
+    if (goal) jobForm.elements.namedItem("goalItem").value = goal;
     for (const [preset, field] of Object.entries(presets)) {
       if (name === field) {
         const select = jobForm.elements[preset];
@@ -1604,6 +1708,19 @@ function bindEvents() {
     toast(`Renamed ${plan.length} turtle${plan.length === 1 ? "" : "s"}.`);
     $("#bulk-rename").hidden = true;
     invalidate("list", "detail", "fleet");
+  });
+  $("#map3d-fit").addEventListener("click", () => world?.fit());
+  $("#map3d-follow").addEventListener("click", (event) => {
+    const on = event.currentTarget.getAttribute("aria-pressed") !== "true";
+    event.currentTarget.setAttribute("aria-pressed", String(on));
+    world?.setFollow(on);
+  });
+  $("#map3d-full").addEventListener("click", () => $("#map3d").requestFullscreen?.());
+  for (const id of ["#map3d-ores", "#map3d-areas", "#map3d-jobs", "#map3d-names"]) {
+    $(id).addEventListener("change", applyMapOptions);
+  }
+  $("#map3d-clear").addEventListener("click", () => {
+    if (confirm("Clear the mined-block history for everyone? Turtles keep reporting new digs.")) sendRaw({ type: "clearMined" });
   });
   $("#fleet-map").addEventListener("click", (event) => {
     const pick = event.target.closest("[data-id]");

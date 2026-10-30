@@ -7,6 +7,14 @@
   <meta name="description" content="Control your CC:Tweaked mining turtles from the browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Crect x='4' y='4' width='8' height='8' fill='%23fff'/%3E%3Crect x='6' y='6' width='4' height='2' fill='%232a78d6'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -33,6 +41,7 @@
       <div class="tabs inline views" role="tablist" aria-label="View">
         <button class="tab" role="tab" data-view="turtles">Turtles</button>
         <button class="tab" role="tab" data-view="fleet">Fleet</button>
+        <button class="tab" role="tab" data-view="map">3D map</button>
       </div>
       <div class="spacer"></div>
       <div class="topbar-actions">
@@ -294,6 +303,52 @@
           </div>
         </section>
 
+        <!-- 3D map ------------------------------------------------------------- -->
+        <section id="map-view" class="map-view" hidden>
+          <div class="map3d-toolbar">
+            <div class="row">
+              <button id="map3d-fit" class="btn sm">Fit everything</button>
+              <button id="map3d-follow" class="btn sm" aria-pressed="false">Follow selected turtle</button>
+              <button id="map3d-full" class="btn sm">Full screen</button>
+            </div>
+            <div class="row">
+              <label class="check"><input type="checkbox" id="map3d-ores"><span>Ores only</span></label>
+              <label class="check"><input type="checkbox" id="map3d-areas" checked><span>Protected areas</span></label>
+              <label class="check"><input type="checkbox" id="map3d-jobs" checked><span>Job areas</span></label>
+              <label class="check"><input type="checkbox" id="map3d-names" checked><span>Names</span></label>
+            </div>
+          </div>
+          <div id="map3d" class="map3d">
+            <div class="map3d-info" hidden></div>
+            <p id="map3d-note" class="map3d-note">Loading the 3D map…</p>
+          </div>
+          <div class="map3d-foot">
+            <ul class="legend map3d-legend">
+              <li><span class="key key-mark mark-working"></span>Working</li>
+              <li><span class="key key-mark mark-paused"></span>Paused</li>
+              <li><span class="key key-mark mark-attention"></span>Needs attention</li>
+              <li><span class="key key-mark mark-idle"></span>Idle</li>
+              <li><span class="swatch" style="--c:#8a8a8a"></span>Stone</li>
+              <li><span class="swatch" style="--c:#55555d"></span>Deepslate</li>
+              <li><span class="swatch" style="--c:#7a5534"></span>Dirt</li>
+              <li><span class="swatch" style="--c:#2b2b2b"></span>Coal</li>
+              <li><span class="swatch" style="--c:#d8af93"></span>Iron</li>
+              <li><span class="swatch" style="--c:#e07a4f"></span>Copper</li>
+              <li><span class="swatch" style="--c:#f5c542"></span>Gold</li>
+              <li><span class="swatch" style="--c:#e02a2a"></span>Redstone</li>
+              <li><span class="swatch" style="--c:#2f5bd3"></span>Lapis</li>
+              <li><span class="swatch" style="--c:#4ee2e0"></span>Diamond</li>
+              <li><span class="swatch" style="--c:#17dd62"></span>Emerald</li>
+            </ul>
+            <p class="hint flush">
+              <span id="map3d-stats"></span>
+              Drag to turn, right-drag to move, scroll to zoom. Click a turtle to select it, double-click to open it.
+              The mined-block history starts again when the app is redeployed.
+              <button id="map3d-clear" class="btn ghost sm">Clear history</button>
+            </p>
+          </div>
+        </section>
+
         <!-- Fleet ------------------------------------------------------------- -->
         <section id="fleet-view" class="turtle" hidden>
           <div class="turtle-head">
@@ -320,14 +375,14 @@
                     <div class="fields">
                       <label class="field"><span>Ore</span>
                         <select name="preset">
-                          <option value="-59">Diamond (Y -59)</option>
-                          <option value="-58">Redstone (Y -58)</option>
-                          <option value="-16">Gold (Y -16)</option>
-                          <option value="0">Lapis (Y 0)</option>
-                          <option value="16">Iron (Y 16)</option>
-                          <option value="48">Copper (Y 48)</option>
-                          <option value="96">Coal (Y 96)</option>
-                          <option value="15">Ancient debris (Nether Y 15)</option>
+                          <option value="-59" data-goal="diamond">Diamond (Y -59)</option>
+                          <option value="-58" data-goal="redstone">Redstone (Y -58)</option>
+                          <option value="-16" data-goal="gold">Gold (Y -16)</option>
+                          <option value="0" data-goal="lapis">Lapis (Y 0)</option>
+                          <option value="16" data-goal="iron">Iron (Y 16)</option>
+                          <option value="48" data-goal="copper">Copper (Y 48)</option>
+                          <option value="96" data-goal="coal">Coal (Y 96)</option>
+                          <option value="15" data-goal="debris">Ancient debris (Nether Y 15)</option>
                           <option value="">Custom level</option>
                         </select>
                       </label>
@@ -339,14 +394,32 @@
                     <div class="fields">
                       <label class="field"><span>Start X</span><input name="x" type="number" required></label>
                       <label class="field"><span>Start Z</span><input name="z" type="number" required></label>
-                      <label class="field"><span>Tunnel length</span><input name="length" type="number" min="1" max="1024" value="64" required></label>
                       <label class="field"><span>Spacing</span><input name="spacing" type="number" min="2" max="16" value="3" required></label>
+                    </div>
+                    <div class="fields">
+                      <label class="field"><span>Each brings back</span><input name="goal" type="number" min="0" max="100000" value="64" required></label>
+                      <label class="field"><span>Of</span>
+                        <select name="goalItem">
+                          <option value="diamond">Diamonds</option>
+                          <option value="redstone">Redstone</option>
+                          <option value="gold">Gold</option>
+                          <option value="lapis">Lapis</option>
+                          <option value="iron">Iron</option>
+                          <option value="copper">Copper</option>
+                          <option value="coal">Coal</option>
+                          <option value="emerald">Emeralds</option>
+                          <option value="debris">Ancient debris</option>
+                          <option value="valuables">Any valuables</option>
+                        </select>
+                      </label>
+                      <label class="field"><span>Stay within (± Y)</span><input name="band" type="number" min="0" max="16" value="4" required></label>
+                      <label class="field"><span>Go at most (blocks)</span><input name="length" type="number" min="1" max="1024" value="128" required></label>
                     </div>
                     <div class="row between">
                       <button type="button" class="btn sm" data-use-pos="x,z">Start at selected turtle</button>
                       <label class="check"><input name="scan" type="checkbox" checked><span>Mine ore veins in the walls</span></label>
                     </div>
-                    <p class="hint flush">Each turtle digs a 1×1 shaft straight down at its tunnel's start, so pick a start out in the open, away from builds.</p>
+                    <p class="hint flush">Each turtle keeps mining until it has brought back its goal (0 means no goal), adding tunnels 3 blocks above and below its level while they stay within the height you set. When it's low on fuel or space, even partway through a vein, it goes to the depot and comes back to where it left off. It digs a 1×1 shaft straight down at its start, so pick a start out in the open, away from builds.</p>
                   </div>
                   <div data-kind="areaQuarry" hidden>
                     <div class="corner-row">

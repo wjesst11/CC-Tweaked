@@ -673,6 +673,55 @@ textarea {
 .toast-error { --tone: var(--critical); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 
+/* 3D map --------------------------------------------------------------------- */
+
+.map-view { display: grid; gap: 12px; }
+.map3d-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.map3d-toolbar .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.map3d {
+  position: relative;
+  height: max(520px, calc(100vh - 250px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--page);
+}
+.map3d:fullscreen { height: 100vh; border-radius: 0; }
+.map3d canvas { display: block; touch-action: none; }
+/* z-index makes a stacking context, so the tags' own z-indexes stay under the hover box. */
+.map3d-labels { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.map3d-label {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  color: var(--ink);
+  font: 600 11px var(--font);
+  white-space: nowrap;
+}
+.map3d-label.turtle { pointer-events: auto; cursor: pointer; }
+.map3d-label.selected { outline: 2px solid var(--accent); }
+.map3d-label.small { font-size: 10px; font-weight: 500; color: var(--ink-2); }
+.map3d-label.strong { font-size: 12px; }
+.map3d-label.danger { color: var(--critical); }
+.map3d-compass { color: var(--ink-2); font: 700 14px var(--font); }
+.map3d-info {
+  position: absolute;
+  z-index: 2;
+  max-width: 240px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  font-size: 12px;
+  white-space: pre-line;
+  pointer-events: none;
+}
+.map3d-note { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); pointer-events: none; }
+.map3d-foot { display: grid; gap: 6px; }
+.map3d-legend { justify-content: flex-start; margin: 0; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--c); box-shadow: 0 0 0 1px var(--border); }
+
 /* Responsive ---------------------------------------------------------------- */
 
 @media (max-width: 1100px) {

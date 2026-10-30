@@ -86,6 +86,57 @@ const dashboards = new Set();
 let fleet = structuredClone(DEFAULT_FLEET);
 /** turtle id -> travel lane (blocks above fleet.travelY) */
 const lanes = new Map();
+// Blocks turtles have dug, for the dashboard's 3D map: "x,y,z" ->
+// name code + turtle id * 65536. The oldest are dropped past MAX_MINED, and
+// the history starts again after a redeploy.
+const MAX_MINED = 250_000;
+const mined = new Map();
+const minedNames = [];
+const minedNameCodes = new Map();
+let pendingMined = []; // [x, y, z, code, turtle id, ...] not yet sent to dashboards
+
+function nameCode(name) {
+  let code = minedNameCodes.get(name);
+  if (code === undefined) {
+    code = minedNames.push(name) - 1;
+    minedNameCodes.set(name, code);
+  }
+  return code;
+}
+
+function recordDug(turtle, { names, blocks }) {
+  if (!Array.isArray(names) || !Array.isArray(blocks)) return;
+  const codes = names.slice(0, 400).map((n) => nameCode(String(n).slice(0, 64)));
+  for (let i = 0; i + 3 < blocks.length && i < 4 * 1000; i += 4) {
+    const [x, y, z] = [blocks[i], blocks[i + 1], blocks[i + 2]];
+    const code = codes[blocks[i + 3]];
+    if (![x, y, z].every(Number.isInteger) || code === undefined) continue;
+    const key = `${x},${y},${z}`;
+    mined.delete(key); // re-insert so a re-dug block counts as newest
+    mined.set(key, code + turtle.id * 65536);
+    pendingMined.push(x, y, z, code, turtle.id);
+  }
+  for (const key of mined.keys()) {
+    if (mined.size <= MAX_MINED) break;
+    mined.delete(key);
+  }
+}
+
+function minedSnapshot() {
+  const blocks = [];
+  for (const [key, value] of mined) {
+    const [x, y, z] = key.split(",").map(Number);
+    blocks.push(x, y, z, value % 65536, Math.floor(value / 65536));
+  }
+  return { type: "mined", names: minedNames, blocks };
+}
+
+// Only dashboards that have the 3D map open get the stream of dug blocks.
+function broadcastMap(msg) {
+  const data = JSON.stringify(msg);
+  for (const ws of dashboards) if (ws.wantsMap && ws.readyState === ws.OPEN) ws.send(data);
+}
+
 // One turtle at a time may use the dock; the rest queue.
 const depot = { holder: null, queue: [], since: 0 };
 const startedAt = Date.now();
@@ -315,6 +366,9 @@ function handleTurtle(ws) {
       case "lease":
         handleLease(turtle, msg);
         break;
+      case "dug":
+        recordDug(turtle, msg);
+        break;
     }
   }));
 
@@ -425,6 +479,13 @@ function handleDashboard(ws) {
       startFleetJob(ws, msg);
     } else if (msg.type === "releaseDepot") {
       if (depot.holder !== null) releaseDepot(depot.holder);
+    } else if (msg.type === "mined") {
+      ws.wantsMap = true;
+      send(ws, minedSnapshot());
+    } else if (msg.type === "clearMined") {
+      mined.clear();
+      pendingMined = [];
+      broadcast({ type: "minedCleared" });
     }
   }));
 
@@ -539,6 +600,13 @@ setInterval(() => {
     if (cells.length || parked.length) send(r.socket, { type: "traffic", cells, parked });
   }
 }, 1_000);
+
+// Stream newly dug blocks to open 3D maps a couple of times a second.
+setInterval(() => {
+  if (!pendingMined.length) return;
+  broadcastMap({ type: "dug", names: minedNames, blocks: pendingMined });
+  pendingMined = [];
+}, 500);
 
 // Hands out dock turns that were held back during the post-restart grace period.
 setInterval(() => {

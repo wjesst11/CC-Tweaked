@@ -8,6 +8,8 @@ const SIDES = ["north", "east", "south", "west", "up", "down"];
 // Turtles waiting for the dock stack above travelY, one block each; leave
 // room for a big fleet.
 const MAX_LANES = 64;
+// What a level job can be told to collect (the turtle script has the same list).
+export const GOAL_ITEMS = ["diamond", "redstone", "gold", "lapis", "iron", "copper", "coal", "emerald", "debris", "valuables"];
 
 export const DEFAULT_FLEET = {
   updatedAt: 0,
@@ -153,16 +155,28 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     const [x, z, y] = [coord(params.x), coord(params.z), height(params.y)];
     const length = int(params.length, 1, 1024);
     const spacing = int(params.spacing ?? 3, 2, 16);
-    if (dir < 0 || [x, z, y, length, spacing].includes(null)) return { error: "Check the tunnel settings." };
+    const band = int(params.band ?? 0, 0, 16);
+    const goal = int(params.goal ?? 0, 0, 100_000);
+    const goalItem = params.goalItem ?? "valuables";
+    if (dir < 0 || [x, z, y, length, spacing, band, goal].includes(null) || !GOAL_ITEMS.includes(goalItem)) {
+      return { error: "Check the tunnel settings." };
+    }
     const right = (dir + 1) % 4;
+    // Each turtle owns a slice of rock: its tunnel line, half the spacing to
+    // either side (for veins) and the height band above and below.
+    const [left, rightSide] = [Math.floor((spacing - 1) / 2), Math.ceil((spacing - 1) / 2)];
+    const [y1, y2] = [Math.max(-64, y - band), Math.min(319, y + 1 + band)];
     jobs = ready.map((_, k) => {
       const sx = x + k * spacing * CX[right];
       const sz = z + k * spacing * CZ[right];
       const ex = sx + (length - 1) * CX[dir];
       const ez = sz + (length - 1) * CZ[dir];
       return {
-        args: { kind, x: sx, z: sz, y, dir: COMPASS[dir], length, scan: params.scan !== false },
-        volume: box(sx, y, sz, ex, y + 1, ez),
+        args: { kind, x: sx, z: sz, y, dir: COMPASS[dir], length, scan: params.scan !== false, spacing, band, goal, goalItem },
+        volume: box(
+          sx - left * CX[right], y1, sz - left * CZ[right],
+          ex + rightSide * CX[right], y2, ez + rightSide * CZ[right],
+        ),
         shaft: box(sx, y + 2, sz, sx, top, sz),
       };
     });
