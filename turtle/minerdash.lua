@@ -15,12 +15,12 @@
 --  * Local jobs (quarry, tunnel) unload into a chest placed directly behind
 --    the spot where the job started.
 --  * Fleet jobs (branchMine, areaQuarry) work in world coordinates and share one
---    depot: a dock block with junk, valuables and fuel chests next to it. Each
---    turtle flies at its own height (its lane) and the server lets one turtle at
---    a time use the dock, so turtles never run into each other.
+--    depot: a dock block with junk, valuables and fuel chests next to it. The
+--    server gives turtles turns at the dock; the others wait a few blocks away.
+--    Turtles share where they are, so they steer around each other.
 -- Protected blocks and areas are never dug or built in, by any job or command.
 
-local VERSION = "1.5.0"
+local VERSION = "1.6.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -109,12 +109,12 @@ local around      -- block names next to the turtle (refreshed when idle)
 local calib       -- GPS anchor { l = local pos, w = world pos, f0 = compass of heading 0 }
 local gpsState = "none" -- "none" (no wireless modem), "nofix" or "ok"
 local gpsChecked = false -- a GPS fix has been attempted since boot
-local lane        -- this turtle's travel lane: blocks above the fleet travel height
 local leases = {} -- resource -> "granted" | "waiting"
 local fleetJob    -- { kind, args, step, phase, paused, failed } for the current fleet job
 local blocked, blockedCount = {}, 0 -- blocks found in the way while travelling (local coords)
 local traffic, trafficCount = {}, 0 -- blocks moving turtles are in or about to enter -> until when
 local parked = {}                   -- blocks turtles are standing still in -> until when
+local homesNear = {}                -- other turtles' homes nearby -> until when
 local trail, trailSize = {}, 0      -- every block moved through since last home (local coords)
 local trailRoot, trailLo, trailHi   -- where the trail starts, and its bounding box
 local travelNext                    -- the block this turtle is about to move into
@@ -144,7 +144,7 @@ local function loadState()
   f.close()
   if type(data) == "table" and data.pos then
     pos, heading, home, calib = data.pos, data.heading, data.home, data.calib
-    lane, fleetJob = data.lane, data.fleetJob
+    fleetJob = data.fleetJob
     odometer = tonumber(data.odometer) or 0
     if data.holding then leases.depot = "granted" end
   end
@@ -154,7 +154,7 @@ local function saveState()
   local f = fs.open(STATE_FILE, "w")
   f.write(textutils.serialize({
     pos = pos, heading = heading, home = home, calib = calib,
-    lane = lane, fleetJob = fleetJob, holding = leases.depot == "granted", odometer = odometer,
+    fleetJob = fleetJob, holding = leases.depot == "granted", odometer = odometer,
   }))
   f.close()
 end
@@ -660,7 +660,14 @@ local function heapPop(heap)
   return top
 end
 
-local NEIGHBOURS = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 0, 1 }, { 0, 0, -1 }, { 0, 1, 0 }, { 0, -1, 0 } }
+-- Each step with the heading it needs (nil for up and down, which need none).
+local NEIGHBOURS = { { 1, 0, 0, 1 }, { -1, 0, 0, 3 }, { 0, 0, 1, 0 }, { 0, 0, -1, 2 }, { 0, 1, 0 }, { 0, -1, 0 } }
+
+-- Turns needed to face local heading h from heading `from` (default: now).
+local function turnsTo(h, from)
+  local d = (h - (from or heading)) % 4
+  return d == 3 and 1 or d
+end
 
 -- A goal for reaching one cell.
 local function cellGoal(t)
@@ -671,38 +678,34 @@ local function cellGoal(t)
   }
 end
 
--- Turtles come down into the dock from above, unless a chest is above it:
--- then down the open column beside it (never east, where turtles queue) and
--- in from the side. Returns that column in world coordinates, or nil.
-local function dockApproach()
-  local D = fleet.depot
-  local used = { [D.junk] = true, [D.valuables] = true, [D.fuel] = true }
-  if not used.up then return nil end
-  for _, side in ipairs({ "south", "north", "west" }) do
-    if not used[side] then
-      local c = COMPASS_INDEX[side]
-      return { x = D.x + CX[c], z = D.z + CZ[c] }
-    end
-  end
+-- Turtles take turns at the dock. Only the turtle whose turn it is goes within
+-- DOCK_ROOM blocks of it; the others wait just outside, so the depot works
+-- anywhere with a little open space around the dock, even in a low room.
+local DOCK_ROOM = 2
+
+local function inDockRoom(dock, x, y, z)
+  return math.abs(x - dock.x) <= DOCK_ROOM and math.abs(z - dock.z) <= DOCK_ROOM and math.abs(y - dock.y) <= DOCK_ROOM
 end
 
--- Shortest open route to the goal (A*), or nil. `goal.allowed` can confine
--- the route, and `goal.bounds` the search; otherwise it stays near the trip.
+-- Quickest open route to the goal (A*), or nil. A turn takes as long as a
+-- move, so it counts as one: routes run straight rather than zig-zag.
+-- `goal.allowed` can confine the route, and `goal.bounds` the search;
+-- otherwise it stays near the trip.
 local function findPath(goal, lenient)
   local from, c = pos, goal.centre
   local lo = { x = math.min(from.x, c.x) - 24, y = math.min(from.y, c.y) - 24, z = math.min(from.z, c.z) - 24 }
   local hi = { x = math.max(from.x, c.x) + 24, y = math.max(from.y, c.y) + 32, z = math.max(from.z, c.z) + 24 }
   if goal.bounds then lo, hi = goal.bounds.lo, goal.bounds.hi end
-  -- The dock's columns are only for the turtle whose turn it is.
-  local dock, side
-  if fleet.depot and leases.depot ~= "granted" and gpsTrusted() then
-    dock = fromWorld(fleet.depot)
-    local approach = dockApproach()
-    side = approach and fromWorld({ x = approach.x, y = fleet.depot.y, z = approach.z })
-  end
+  -- The dock is only for the turtle whose turn it is, and the others keep out
+  -- of the space around it unless there's no other way.
+  local dock
+  if fleet.depot and leases.depot ~= "granted" and gpsTrusted() then dock = fromWorld(fleet.depot) end
+  -- Routes kept to blocks it knows keep out of it altogether: they'd often go
+  -- back through it the way they came. (Without one, it's still avoided.)
+  local keepOut = dock and goal.keepOut and not inDockRoom(dock, c.x, c.y, c.z)
   local startKey = cellKey(from.x, from.y, from.z)
   local g, came, closed, open = { [startKey] = 0 }, {}, {}, {}
-  heapPush(open, { x = from.x, y = from.y, z = from.z, k = startKey }, goal.estimate(from.x, from.y, from.z))
+  heapPush(open, { x = from.x, y = from.y, z = from.z, k = startKey, h = heading }, goal.estimate(from.x, from.y, from.z))
   local expanded, limit = 0, goal.limit or 8000
   while #open > 0 do
     local cur = heapPop(open)
@@ -729,11 +732,13 @@ local function findPath(goal, lenient)
         if not closed[k] and (isOpen(x, y, z, lenient) or (goal.reached(x, y, z) and blocked[k] == nil))
           and x >= lo.x and x <= hi.x and y >= lo.y and y <= hi.y and z >= lo.z and z <= hi.z
           and (not goal.allowed or goal.allowed(x, y, z))
-          and not (dock and x == dock.x and z == dock.z) and not (side and x == side.x and z == side.z) then
-          local ng = g[cur.k] + 1
+          and not (dock and x == dock.x and y == dock.y and z == dock.z)
+          and not (keepOut and inDockRoom(dock, x, y, z)) then
+          local h = d[4] or cur.h
+          local ng = g[cur.k] + 1 + turnsTo(h, cur.h) + ((dock and inDockRoom(dock, x, y, z)) and 4 or 0)
           if ng < (g[k] or math.huge) then
             g[k], came[k] = ng, cur
-            heapPush(open, { x = x, y = y, z = z, k = k }, ng + goal.estimate(x, y, z))
+            heapPush(open, { x = x, y = y, z = z, k = k, h = h }, ng + goal.estimate(x, y, z))
           end
         end
       end
@@ -775,6 +780,26 @@ local function stepTo(n)
   return false, "block"
 end
 
+-- The way it already knows: blocks it has moved through since it was last
+-- home, plus the space right around the goal. The turtle treats blocks it
+-- hasn't seen as open, so without this it can spend a long time feeling its
+-- way along solid rock.
+local function knownGoal(goal)
+  local c, known = goal.centre, {}
+  for key, v in pairs(goal) do known[key] = v end
+  known.allowed = function(x, y, z)
+    local near = math.abs(x - c.x) <= 6 and math.abs(z - c.z) <= 6 and math.abs(y - c.y) <= 3
+    return (near or trail[cellKey(x, y, z)]) and (not goal.allowed or goal.allowed(x, y, z))
+  end
+  known.bounds = {
+    lo = { x = math.min(trailLo.x, c.x - 6), y = math.min(trailLo.y, c.y - 3), z = math.min(trailLo.z, c.z - 6) },
+    hi = { x = math.max(trailHi.x, c.x + 6), y = math.max(trailHi.y, c.y + 3), z = math.max(trailHi.z, c.z + 6) },
+  }
+  known.limit = 20000
+  known.keepOut = true
+  return known
+end
+
 local function describe(p)
   local w = toWorld(p) or p
   return ("%d, %d, %d"):format(w.x, w.y, w.z)
@@ -784,11 +809,16 @@ end
 -- there's no open way.
 local function navigate(goal)
   local tries, waits = 0, 0
+  local tryKnown = trailSize > 0 and not goal.onTrail
   while not goal.reached(pos.x, pos.y, pos.z) do
     checkStop()
+    -- The way it knows, unless that's a long way round.
+    local path = tryKnown and findPath(knownGoal(goal))
+    if path and #path - 1 > 2 * goal.estimate(pos.x, pos.y, pos.z) + 16 then path = nil end
+    tryKnown = path ~= nil
     -- If other turtles leave no way through, plan as if they weren't there:
     -- they move on, and bumping into one just means waiting.
-    local path = findPath(goal) or findPath(goal, true)
+    path = path or findPath(goal) or findPath(goal, true)
     if not path then
       travelNext = nil
       error(("Found no open way to %s without digging"):format(describe(goal.centre)), 0)
@@ -833,6 +863,7 @@ local function trailGoal(t)
     hi = { x = math.max(trailHi.x, t.x), y = math.max(trailHi.y, t.y), z = math.max(trailHi.z, t.z) },
   }
   goal.limit = 200000
+  goal.onTrail, goal.keepOut = true, true
   return goal
 end
 
@@ -957,7 +988,7 @@ end
 local depotVisit, depotCost
 
 local function depotReady()
-  return fleet.depot ~= nil and fleet.travelY ~= nil and lane ~= nil and gpsTrusted()
+  return fleet.depot ~= nil and gpsTrusted()
 end
 
 -- A trip describes how a local job travels between its work area and its base
@@ -1136,13 +1167,7 @@ function jobs.quarry(a)
   finishJob(trip, ok, err)
 end
 
--- Fleet: lanes, the shared depot and fleet jobs ----------------------------------
-
-local function laneY()
-  if not fleet.travelY then error("Set the travel height on the dashboard first", 0) end
-  if not lane then error("Waiting for the server to assign a travel lane", 0) end
-  return fleet.travelY + lane
-end
+-- Fleet: the shared depot and fleet jobs ------------------------------------------
 
 -- The dock is shared, so ask the server for a turn and wait for it.
 local function acquire(resource)
@@ -1173,16 +1198,31 @@ local function release(resource)
   saveState()
 end
 
--- Fly by the shortest open route to a world position, never digging. Without
--- y it goes to this turtle's waiting height, which is only used to queue at
--- the depot.
-local function travelTo(t)
-  flyTo({ x = t.x, y = t.y or laneY(), z = t.z })
+-- Where to wait for a turn at the dock, and to step out to after one: any open
+-- block just outside the space around the dock, within 2 of its height, that
+-- isn't another turtle or another turtle's home.
+local function aroundDock()
+  local dock, now = fromWorld(fleet.depot), os.clock()
+  local function off(x, z) return math.max(math.abs(x - dock.x), math.abs(z - dock.z)) end
+  return {
+    reached = function(x, y, z)
+      local d, k = off(x, z), cellKey(x, y, z)
+      return d > DOCK_ROOM and d <= DOCK_ROOM + 3 and math.abs(y - dock.y) <= 2
+        and not (homesNear[k] and homesNear[k] > now)
+        and ((x == pos.x and y == pos.y and z == pos.z) or isOpen(x, y, z))
+    end,
+    estimate = function(x, y, z)
+      local d = off(x, z)
+      return math.max(0, DOCK_ROOM + 1 - d, d - DOCK_ROOM - 3) + math.max(0, math.abs(y - dock.y) - 2)
+    end,
+    centre = dock,
+  }
 end
 
--- Turtles queue beside the depot column, each at its own height.
-local function waitSpot()
-  return { x = fleet.depot.x + 1, z = fleet.depot.z }
+-- Whether world position w is where turtles wait for the dock, or closer.
+local function atDepot(w)
+  local D = fleet.depot
+  return D ~= nil and math.max(math.abs(w.x - D.x), math.abs(w.z - D.z)) <= DOCK_ROOM + 3 and math.abs(w.y - D.y) <= 2
 end
 
 -- Retrace the way home and settle facing the way home was set.
@@ -1241,23 +1281,28 @@ local function category(name)
 end
 
 -- At the dock: sort the inventory into the three chests and top up fuel from
--- the fuel chest. Returns a description of anything the player needs to fix.
+-- the fuel chest. One chest at a time, fuel last, so it turns as little as it
+-- can. Returns a description of anything the player needs to fix.
 local function dockWork(minFuel)
   local D = fleet.depot
   local target = math.min(math.max(tonumber(fleet.refuelTo) or 10000, minFuel), fuelLimit())
-  local full = {}
+  local full, slots = {}, { junk = {}, valuables = {}, fuel = {} }
   for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
     if item then
-      turtle.select(slot)
       local cat = category(item.name)
       if cat == "fuel" then
+        turtle.select(slot)
         while fuelLevel() < target and turtle.refuel(1) do end
       end
-      if turtle.getItemCount(slot) > 0 then
-        dockDrop(D[cat])
-        if turtle.getItemCount(slot) > 0 then full[cat] = true end
-      end
+      if turtle.getItemCount(slot) > 0 then table.insert(slots[cat], slot) end
+    end
+  end
+  for _, cat in ipairs({ "junk", "valuables", "fuel" }) do
+    for _, slot in ipairs(slots[cat]) do
+      turtle.select(slot)
+      dockDrop(D[cat])
+      if turtle.getItemCount(slot) > 0 then full[cat] = true end
     end
   end
   local outOfFuel = false
@@ -1285,65 +1330,60 @@ local function dockWork(minFuel)
   return #problems > 0 and table.concat(problems, ", ") or nil
 end
 
--- Fuel to fly from world position w to the depot, down into the dock and back
--- up: the longest flight from there it has actually made (`flown`), or until
--- it has made one, the straight-line distance with room for detours.
+-- Fuel to fly from world position w to the depot, into the dock and back out:
+-- the longest flight from there it has actually made (`flown`), or until it
+-- has made one, the straight-line distance with room for detours.
 function depotCost(w, flown)
-  local D, ly, spot = fleet.depot, laneY(), waitSpot()
-  local direct = distance(w, { x = spot.x, y = ly, z = spot.z })
+  local direct = distance(w, fleet.depot)
   local fly = flown and math.max(flown, direct) or math.floor(direct * 1.5) + 16
-  return fly + 2 * math.abs(ly - D.y) + 4
+  return fly + 4 * (DOCK_ROOM + 3)
 end
 
--- Unload and refuel at the shared depot. Turtles wait their turn beside the
--- depot column, each at its own height; only the turtle holding the dock uses
--- the column. Retries until the turtle has room and at least minFuel. Returns
--- how many blocks it flew to get to the depot.
+-- Unload and refuel at the shared depot. The turtle waits just outside the
+-- space around the dock until it's its turn, goes in by any open way, and
+-- steps back out before the next turtle's turn. Retries until it has room and
+-- at least minFuel. Returns how many blocks it flew to get to the depot.
 function depotVisit(minFuel)
   local D = fleet.depot
   if not D then error("Set up the depot on the dashboard first", 0) end
-  local spot = waitSpot()
-  local ly = laneY()
   local start, flown = odometer, nil
-  -- In and out of the dock only through its column (or the approach column
-  -- beside it when there's a chest above) and this turtle's own waiting spot,
-  -- never digging: that column must be kept open.
-  local function dockRoute(target)
-    local dock, queue = fromWorld({ x = D.x, y = D.y, z = D.z }), fromWorld({ x = spot.x, y = ly, z = spot.z })
-    local approach = dockApproach()
-    local side = approach and fromWorld({ x = approach.x, y = D.y, z = approach.z })
-    if side then markBlocked(fromWorld({ x = D.x, y = D.y + 1, z = D.z })) end -- the chest above the dock
-    local goal = cellGoal(fromWorld(target))
-    goal.allowed = function(x, y, z)
-      return (x == dock.x and z == dock.z) or (side and x == side.x and z == side.z)
-        or (x == queue.x and y == queue.y and z == queue.z)
-    end
+  -- The chests are solid, so don't plan a way through them.
+  for _, kind in ipairs({ "junk", "valuables", "fuel" }) do
+    local side = D[kind]
+    local c = COMPASS_INDEX[side]
+    local dy = side == "up" and 1 or side == "down" and -1 or 0
+    markBlocked(fromWorld({ x = D.x + (c and CX[c] or 0), y = D.y + dy, z = D.z + (c and CZ[c] or 0) }))
+  end
+  -- Never digging: if there's no open way, say so.
+  local function go(goal, where)
     local ok, err = pcall(navigate, goal)
     if ok then return end
     if err == STOP then error(STOP, 0) end
-    error(side and "The column beside the dock that turtles come down is blocked. Keep it open to the sky."
-      or "The column above the dock is blocked. Keep the sky above the dock open.", 0)
+    error(("Can't get %s without digging (%s). Leave some open space around the dock."):format(where, tostring(err)), 0)
   end
   while true do
-    setDetail("Heading to the depot")
-    travelTo(spot)
+    if leases.depot ~= "granted" then
+      setDetail("Heading to the depot")
+      go(aroundDock(), "near the depot")
+      flown = flown or odometer - start
+      setDetail("Waiting for a turn at the depot")
+      acquire("depot")
+    end
     flown = flown or odometer - start
-    setDetail("Waiting for a turn at the depot")
-    acquire("depot")
     local problem
     local ok, err = pcall(function()
-      dockRoute({ x = D.x, y = D.y, z = D.z })
+      go(cellGoal(fromWorld(D)), "into the dock")
       setDetail("Unloading at the depot")
       problem = dockWork(minFuel)
     end)
-    -- Whatever happened, get out of the column so the next turtle can use it.
+    -- Whatever happened, step back out so the next turtle can come in.
     local stop = stopRequested
     stopRequested = false
-    local left = pcall(dockRoute, { x = spot.x, y = ly, z = spot.z })
+    local left = pcall(navigate, aroundDock())
     stopRequested = stopRequested or stop
     if left then release("depot") end
     if not ok then error(err, 0) end
-    if not left then error("Stuck in the depot column", 0) end
+    if not left then error("Stuck at the dock: no open way back out of the space around it", 0) end
     checkStop()
     if problem then log("warn", "Depot: " .. problem) end
     if emptySlots() >= 4 and fuelLevel() >= minFuel then return flown end
@@ -1363,6 +1403,22 @@ end
 -- sets veins.cut to that way in, so it can come back and finish the vein.
 local exploreHere
 
+-- Back into the neighbouring block p it came from, turning as little as it
+-- can: if it's facing away from p, it just backs up.
+local function stepBack(p)
+  if p.y ~= pos.y then return goTo(p, "y") end
+  local toward = 0
+  for h = 0, 3 do
+    if pos.x + DX[h] == p.x and pos.z + DZ[h] == p.z then toward = h end
+  end
+  local away = (toward + 2) % 4
+  if turnsTo(away) < turnsTo(toward) then
+    face(away)
+    if move("back") then return end
+  end
+  goTo(p, "xyz")
+end
+
 local function mineVein(dir, veins, depth)
   if veins.left <= 0 or depth > 10 or veins.cut then return end
   local found, block = SIDES[dir].inspect()
@@ -1376,19 +1432,28 @@ local function mineVein(dir, veins, depth)
   local back = here()
   digMove(dir)
   veins.path[#veins.path + 1] = toWorld(pos)
-  exploreHere(veins, depth + 1)
+  -- Coming in sideways, the block behind is the one it came from.
+  exploreHere(veins, depth + 1, dir == "forward" and (back.heading + 2) % 4 or nil)
   table.remove(veins.path)
-  goTo(back, "xyz")
-  face(back.heading)
+  stepBack(back)
 end
 
--- Follow the vein from every side of the block it's in.
-function exploreHere(veins, depth)
+-- Follow the vein from every side of the block it's in (except `behind`, a
+-- heading), looking at the nearest side next so it turns as little as it can.
+function exploreHere(veins, depth, behind)
   if veins.cut then return end
   mineVein("up", veins, depth)
   mineVein("down", veins, depth)
-  for _ = 1, 4 do
-    turn(true)
+  local sides = {}
+  for h = 0, 3 do
+    if h ~= behind then sides[#sides + 1] = h end
+  end
+  while #sides > 0 and not veins.cut do
+    local best = 1
+    for n = 2, #sides do
+      if turnsTo(sides[n]) < turnsTo(sides[best]) then best = n end
+    end
+    face(table.remove(sides, best))
     mineVein("forward", veins, depth)
   end
 end
@@ -1527,19 +1592,20 @@ KINDS.branchMine = {
     local ax = CX[a.dir] ~= 0 and "x" or "z"
     goWorld(t, toWorld(pos).y == a.y and ax .. "y" or "y" .. ax)
   end,
+  -- Both walls, the nearer first: four turns a block, whichever way along the
+  -- tunnel it's going.
   work = function(a, i, veins)
-    faceCompass(a.dir)
     clear("up")
     if not a.scan then return true end
     if veins.resume then resumeVein(veins, veins.resume) end
-    faceCompass(a.dir)
     mineVein("down", veins, 0)
-    turn(false)
-    mineVein("forward", veins, 0)
-    turn(true)
-    turn(true)
-    mineVein("forward", veins, 0)
-    turn(false)
+    local along = (a.dir - calib.f0) % 4
+    local walls = { (along + 1) % 4, (along + 3) % 4 }
+    if turnsTo(walls[2]) < turnsTo(walls[1]) then walls[1], walls[2] = walls[2], walls[1] end
+    for _, h in ipairs(walls) do
+      face(h)
+      mineVein("forward", veins, 0)
+    end
     return not veins.cut
   end,
   goal = function(a)
@@ -1644,9 +1710,9 @@ end
 -- From anywhere to step i. Coming in from the depot, it measures the flight.
 local function moveToStep(k, a, i)
   if not k.inside(a, toWorld(pos)) then
-    local from, start, spot = toWorld(pos), odometer, waitSpot()
+    local from, start = toWorld(pos), odometer
     k.enter(a)
-    if from.x == spot.x and from.z == spot.z and from.y == laneY() then noteRoute(k, a, odometer - start, toWorld(pos)) end
+    if atDepot(from) then noteRoute(k, a, odometer - start, toWorld(pos)) end
   end
   k.walk(a, k.cell(a, i))
 end
@@ -1661,7 +1727,6 @@ local function fleetWork()
   if not k then error("Unknown fleet job " .. tostring(fleetJob.kind), 0) end
   if not fleet.depot then error("Set up the depot on the dashboard first", 0) end
   ensureCalibrated()
-  laneY()
   local a = fleetJob.args
   local total = k.total(a)
   local goal = k.goal and k.goal(a)
@@ -1804,7 +1869,7 @@ function jobs.resume()
 end
 
 -- Cancel and come home. A cancelled job backs out the way it came in first:
--- a local job through its own dug corridor, a fleet job up its shaft to its lane.
+-- a local job through its own dug corridor, a fleet job out through its shaft.
 function jobs.goHome()
   setDetail("Returning home")
   if pendingTrip then
@@ -2041,7 +2106,6 @@ local function status()
     inventory = inventory,
     job = job,
     fleetJob = fj,
-    lane = lane,
     holding = leases.depot == "granted",
     fleetAt = fleet.updatedAt,
     around = around,
@@ -2059,9 +2123,11 @@ local function handleMessage(msg)
     adoptFleet(msg.fleet)
   elseif msg.type == "traffic" then
     if gpsTrusted() then
-      if trafficCount > 4000 then traffic, parked, trafficCount = {}, {}, 0 end
-      local untilTime = os.clock() + 2.5
-      for list, cells in pairs({ [traffic] = msg.cells, [parked] = msg.parked }) do
+      if trafficCount > 4000 then traffic, parked, homesNear, trafficCount = {}, {}, {}, 0 end
+      local now = os.clock()
+      -- Homes stay put, so they're remembered for longer.
+      for list, cells in pairs({ [traffic] = msg.cells, [parked] = msg.parked, [homesNear] = msg.homes }) do
+        local untilTime = now + (list == homesNear and 300 or 2.5)
         for _, w in ipairs(type(cells) == "table" and cells or {}) do
           local c = fromWorld(w)
           list[cellKey(c.x, c.y, c.z)] = untilTime
@@ -2069,10 +2135,6 @@ local function handleMessage(msg)
         end
       end
     end
-  elseif msg.type == "lane" then
-    lane = tonumber(msg.lane)
-    saveState()
-    changed()
   elseif msg.type == "lease" then
     if msg.granted then
       leases[msg.resource] = "granted"
@@ -2208,7 +2270,7 @@ local function connection()
       ws = sock
       send({
         type = "hello", token = token, id = os.getComputerID(), label = os.getComputerLabel(), version = VERSION,
-        lane = lane, holding = leases.depot == "granted", fleet = (fleet.updatedAt or 0) > 0 and fleet or nil,
+        holding = leases.depot == "granted", fleet = (fleet.updatedAt or 0) > 0 and fleet or nil,
       })
       changed()
       parallel.waitForAny(function() receiver(sock) end, heartbeat)

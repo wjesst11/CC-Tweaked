@@ -521,10 +521,9 @@
               </div>
               <p id="dock-approach" class="callout"></p>
               <div class="fields">
-                <label class="field"><span>Waiting height (Y)</span><input data-field="travelY" type="number" min="-60" max="255"></label>
                 <label class="field"><span>Refuel up to</span><input data-field="refuelTo" type="number" min="100" step="100"></label>
               </div>
-              <p class="hint flush">Turtles waiting for the dock line up in the air beside it, one per block, starting at the waiting height. Otherwise they take the shortest open route and steer around each other. The junk chest fills fast with a big fleet, so feed it into a trash can or hopper line.</p>
+              <p class="hint flush">The junk chest fills fast with a big fleet, so feed it into a trash can or hopper line.</p>
               <div class="row"><button type="button" id="btn-release-dock" class="btn ghost sm">Release dock</button></div>
             </section>
 
@@ -606,7 +605,7 @@
       Then run <code>disk/startup.lua</code> and paste your <b>TURTLE_TOKEN</b>. It's saved on the disk.
     </li>
     <li><b>Place each turtle next to the drive and turn it on.</b> It equips its modem, names itself and installs MinerDash.</li>
-    <li><b>Pick it up, place it where it should live and turn it on.</b> That spot becomes its permanent <b>home</b> (keep the sky above it open), and it connects. You can change a home later from the dashboard.</li>
+    <li><b>Pick it up, place it where it should live and turn it on.</b> That spot becomes its permanent <b>home</b> (keep some open space around it), and it connects. You can change a home later from the dashboard.</li>
     <li>
       Or set up one turtle by hand:
       <div class="code">

@@ -5,16 +5,12 @@ export const COMPASS = ["north", "east", "south", "west"];
 const CX = [0, 1, 0, -1];
 const CZ = [-1, 0, 1, 0];
 const SIDES = ["north", "east", "south", "west", "up", "down"];
-// Turtles waiting for the dock stack above travelY, one block each; leave
-// room for a big fleet.
-const MAX_LANES = 64;
 // What a level job can be told to collect (the turtle script has the same list).
 export const GOAL_ITEMS = ["diamond", "redstone", "gold", "lapis", "iron", "copper", "coal", "emerald", "debris", "valuables"];
 
 export const DEFAULT_FLEET = {
   updatedAt: 0,
   depot: null, // { x, y, z, junk, valuables, fuel } with each chest's side of the dock
-  travelY: null,
   refuelTo: 10000,
   protect: {
     blocks: ["*chest*", "*barrel*", "*shulker_box*", "*hopper*", "create:*"],
@@ -72,7 +68,6 @@ export function sanitizeFleet(input = {}) {
   return {
     updatedAt: Number(input.updatedAt) || 0,
     depot,
-    travelY: height(input.travelY),
     refuelTo: int(input.refuelTo, 100, 1_000_000) ?? DEFAULT_FLEET.refuelTo,
     protect: { blocks: patterns(input.protect?.blocks, DEFAULT_FLEET.protect.blocks), areas },
     items: {
@@ -99,33 +94,11 @@ function intersects(a, b) {
 
 const contains = (b, p) => intersects(b, box(p.x, p.y, p.z, p.x, p.y, p.z));
 
-// Turtles come down into the dock from above, unless a chest is above it:
-// then down the open column beside it (never east, where turtles queue) and in
-// from the side. Returns that column, or null.
-export function dockApproach(depot) {
-  const used = new Set([depot.junk, depot.valuables, depot.fuel]);
-  if (!used.has("up")) return null;
-  const side = ["south", "north", "west"].find((s) => !used.has(s));
-  const i = COMPASS.indexOf(side);
-  return { side, x: depot.x + CX[i], z: depot.z + CZ[i] };
-}
-
-export function laneTop(fleet) {
-  return fleet.travelY + MAX_LANES;
-}
-
-// The blocks that must stay clear: the dock with its chests, the column the
-// turtles fly down to reach it, and the column they queue in.
-function depotBoxes(fleet) {
-  const D = fleet.depot;
-  const boxes = [
-    box(D.x - 1, D.y - 1, D.z - 1, D.x + 1, D.y + 1, D.z + 1),
-    box(D.x, D.y, D.z, D.x, laneTop(fleet), D.z),
-    box(D.x + 1, fleet.travelY, D.z, D.x + 1, laneTop(fleet), D.z),
-  ];
-  const approach = dockApproach(D);
-  if (approach) boxes.push(box(approach.x, D.y, approach.z, approach.x, laneTop(fleet), approach.z));
-  return boxes;
+// The dock, its chests and the space around it where turtles wait their turn
+// (5 blocks out sideways, 2 up and down, as the turtle script uses): no job
+// digs there, and no shaft comes up where a turtle might be waiting.
+function depotBox(D) {
+  return box(D.x - 5, D.y - 2, D.z - 5, D.x + 5, D.y + 2, D.z + 5);
 }
 
 // Returns an error message, or null if the settings are usable.
@@ -133,9 +106,6 @@ export function validateFleet(fleet) {
   if (!fleet.depot) return null;
   const { junk, valuables, fuel } = fleet.depot;
   if (new Set([junk, valuables, fuel]).size < 3) return "Each depot chest needs its own side of the dock.";
-  if (fleet.travelY === null) return "Set a waiting height.";
-  if (fleet.travelY < fleet.depot.y + 3) return "The waiting height must be at least 3 blocks above the dock.";
-  if (laneTop(fleet) > 319) return `The waiting height can be at most ${319 - MAX_LANES} (the queue stacks above it).`;
   return null;
 }
 
@@ -145,9 +115,7 @@ export function validateFleet(fleet) {
 // { assignments: [{ id, args, volume }] } or { error }.
 export function planFleetJob(fleet, kind, params, ready, homes) {
   if (!fleet.depot) return { error: "Set up the depot first (Fleet settings)." };
-  if (fleet.travelY === null) return { error: "Set the waiting height first (Fleet settings)." };
   if (!ready.length) return { error: "No turtles are ready." };
-  const top = laneTop(fleet);
   let jobs;
 
   if (kind === "branchMine") {
@@ -177,7 +145,8 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
           sx - left * CX[right], y1, sz - left * CZ[right],
           ex + rightSide * CX[right], y2, ez + rightSide * CZ[right],
         ),
-        shaft: box(sx, y + 2, sz, sx, top, sz),
+        // The 1x1 shaft down from wherever the column is open above.
+        shaft: box(sx, y + 2, sz, sx, 319, sz),
       };
     });
   } else if (kind === "areaQuarry") {
@@ -196,23 +165,22 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
       const [a1, a2] = [start, start + size - 1];
       start += size;
       const s = alongX ? box(a1, b.y1, b.z1, a2, b.y2, b.z2) : box(b.x1, b.y1, a1, b.x2, b.y2, a2);
-      jobs.push({
-        args: { kind, x1: s.x1, x2: s.x2, z1: s.z1, z2: s.z2, yTop: s.y2, yBottom: s.y1 },
-        volume: s,
-        shaft: box(s.x1, s.y2 + 1, s.z1, s.x1, top, s.z1),
-      });
+      jobs.push({ args: { kind, x1: s.x1, x2: s.x2, z1: s.z1, z2: s.z2, yTop: s.y2, yBottom: s.y1 }, volume: s });
     }
   } else {
     return { error: `Unknown job type ${kind}.` };
   }
 
-  const depot = depotBoxes(fleet);
+  // Where a shaft starts depends on where its column is open (it may be a
+  // cave or room under a base), so only the job itself is checked against
+  // protected areas. Turtles never dig inside one anyway.
+  const depot = depotBox(fleet.depot);
   for (const job of jobs) {
-    for (const part of [job.volume, job.shaft]) {
-      for (const area of fleet.protect.areas) {
-        if (intersects(part, area)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };
-      }
-      if (depot.some((d) => intersects(part, d))) return { error: "The job would dig through the depot or its columns." };
+    for (const area of fleet.protect.areas) {
+      if (intersects(job.volume, area)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };
+    }
+    for (const part of [job.volume, job.shaft].filter(Boolean)) {
+      if (intersects(part, depot)) return { error: "The job would dig at the depot, or where turtles wait for it (within 5 blocks)." };
       for (const { name, home } of homes) {
         if (home && contains(part, home)) return { error: `The job would dig out ${name}'s home.` };
       }

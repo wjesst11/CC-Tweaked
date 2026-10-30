@@ -84,8 +84,6 @@ const dashboards = new Set();
 // Fleet settings. Every turtle keeps a copy, so after a redeploy the newest
 // copy a reconnecting turtle reports is adopted again.
 let fleet = structuredClone(DEFAULT_FLEET);
-/** turtle id -> travel lane (blocks above fleet.travelY) */
-const lanes = new Map();
 // Blocks turtles have dug, for the dashboard's 3D map: "x,y,z" ->
 // name code + turtle id * 65536. The oldest are dropped past MAX_MINED, and
 // the history starts again after a redeploy.
@@ -191,24 +189,12 @@ function addLog(t, level, msg) {
 const nameOf = (t) => t.label || `Turtle #${t.id}`;
 
 // ---------------------------------------------------------------------------
-// Fleet: settings, lanes and the dock
+// Fleet: settings and the dock
 
 function setFleet(next) {
   fleet = next;
   broadcast({ type: "fleet", fleet });
   for (const t of turtles.values()) send(t.socket, { type: "fleet", fleet });
-}
-
-function assignLane(id, claimed) {
-  const taken = new Set([...lanes].filter(([other]) => other !== id).map(([, lane]) => lane));
-  if (Number.isInteger(claimed) && claimed >= 0 && claimed < 64 && !taken.has(claimed)) {
-    lanes.set(id, claimed);
-    return null;
-  }
-  let lane = 0;
-  while (taken.has(lane)) lane++;
-  lanes.set(id, lane);
-  return lane;
 }
 
 function depotView() {
@@ -264,7 +250,6 @@ function readyTurtles(ids) {
     const s = t.status ?? {};
     if (!t.socket) skipped.push(`${nameOf(t)} is offline`);
     else if (!s.gpsTrusted) skipped.push(`${nameOf(t)} doesn't know its GPS facing yet`);
-    else if (!lanes.has(t.id)) skipped.push(`${nameOf(t)} has no travel lane yet`);
     else if (s.job) skipped.push(`${nameOf(t)} is busy`);
     else ready.push({ id: t.id, name: nameOf(t) });
   }
@@ -324,9 +309,6 @@ function handleTurtle(ws) {
       const theirs = msg.fleet && typeof msg.fleet === "object" ? Number(msg.fleet.updatedAt) || 0 : 0;
       if (theirs > fleet.updatedAt) setFleet(sanitizeFleet(msg.fleet));
       else if (theirs < fleet.updatedAt) send(ws, { type: "fleet", fleet });
-
-      const lane = assignLane(id, msg.lane);
-      if (lane !== null) send(ws, { type: "lane", lane });
 
       // A turtle that was at the dock when the server restarted gets it back.
       if (msg.holding && (depot.holder === null || depot.holder === id)) {
@@ -462,7 +444,6 @@ function handleDashboard(ws) {
       const turtle = turtles.get(Number(msg.id));
       if (turtle && !turtle.socket) {
         turtles.delete(turtle.id);
-        lanes.delete(turtle.id);
         broadcast({ type: "removed", id: turtle.id });
       }
     } else if (msg.type === "saveFleet") {
@@ -579,25 +560,28 @@ setInterval(() => {
 // offline, which are still physically there) are sent as "parked", since they
 // won't move out of the way.
 const TRAFFIC_RANGE = 24;
+const near = (a, b) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.z - b.z)) <= TRAFFIC_RANGE;
 setInterval(() => {
   const located = [...turtles.values()].filter((t) => t.status?.world && t.status.gpsTrusted);
   for (const r of located) {
     if (!r.socket || !r.status.moving) continue;
+    const here = r.status.world;
     const cells = [];
     const parked = [];
     for (const o of located) {
-      if (o === r) continue;
-      const a = o.status.world;
-      const b = r.status.world;
-      if (Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.z - b.z)) > TRAFFIC_RANGE) continue;
+      if (o === r || !near(o.status.world, here)) continue;
       if (!o.socket || !o.status.moving) {
-        parked.push(a);
+        parked.push(o.status.world);
       } else if (o.id < r.id) {
-        cells.push(a);
+        cells.push(o.status.world);
         if (o.status.next) cells.push(o.status.next);
       }
     }
-    if (cells.length || parked.length) send(r.socket, { type: "traffic", cells, parked });
+    // Other turtles' homes, so nobody waits in one (homes are often in a row).
+    const homes = [...turtles.values()]
+      .filter((o) => o !== r && o.status?.homeWorld && near(o.status.homeWorld, here))
+      .map((o) => o.status.homeWorld);
+    if (cells.length || parked.length || homes.length) send(r.socket, { type: "traffic", cells, parked, homes });
   }
 }, 1_000);
 

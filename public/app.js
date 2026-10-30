@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "1.5.0"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "1.6.0"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
 const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
@@ -142,7 +142,6 @@ function notReady(t) {
   const s = t.status ?? {};
   if (!t.online) return "offline";
   if (!s.gpsTrusted) return "no GPS facing yet";
-  if (s.lane == null) return "no travel lane yet";
   if (s.job) return "busy";
   return null;
 }
@@ -596,7 +595,11 @@ function updateListItem(li, t, st) {
   if (!meter.hidden) renderMeter(meter, fuel.frac, fuel.sev);
 
   let sub = "";
-  if (!t.online) sub = `Last seen ${ago(t.lastSeen)}`;
+  if (!t.online) {
+    // Usually its chunk unloaded: this is where to find it.
+    const w = t.status?.world;
+    sub = `Last seen ${ago(t.lastSeen)}` + (w ? ` at ${w.x}, ${w.y}, ${w.z}` : "");
+  }
   else if (t.status?.job) sub = t.status.job.detail ?? "";
   else if (t.status?.fleetJob?.failed) sub = t.status.fleetJob.failed;
   else if (fuel) sub = fuel.unlimited ? "Unlimited fuel" : `${fmt(fuel.fuel)} fuel`;
@@ -1280,20 +1283,14 @@ function renderFleetPreview() {
   if (!$("#bulk-rename").hidden) renderBulkRenamePreview();
 }
 
-// Which way turtles get into the dock, from the sides picked in the form (it
-// mirrors dockApproach in fleet.js).
+// How turtles get into the dock, from the sides picked in the form.
 function renderDockApproach() {
   const side = (field) => $(`[data-field="depot.${field}"]`).value;
   const used = new Set([side("junk"), side("valuables"), side("fuel")]);
-  const el = $("#dock-approach");
-  if (used.size < 3) {
-    el.textContent = "Each chest needs its own side of the dock.";
-  } else if (!used.has("up")) {
-    el.textContent = "Turtles come straight down into the dock, so keep the sky above it open.";
-  } else {
-    const entry = ["south", "north", "west"].find((s) => !used.has(s));
-    el.textContent = `With a chest above the dock, turtles come down the column on its ${entry} side and step in sideways, so keep the sky above that block open.`;
-  }
+  const open = Object.keys(SIDES).filter((s) => !used.has(s)).map((s) => SIDES[s].toLowerCase());
+  $("#dock-approach").textContent = used.size < 3
+    ? "Each chest needs its own side of the dock."
+    : `Turtles come into the dock from any open side (${open.join(", ")}) and wait their turn 3 to 5 blocks away, so leave some open space around it. A room 3 or 4 blocks high is plenty; no open sky needed.`;
 }
 
 function renderDepotStatus() {
@@ -1748,7 +1745,6 @@ function bindEvents() {
     const w = currentTurtle()?.status?.world;
     if (!w) return;
     for (const k of ["x", "y", "z"]) $(`[data-field="depot.${k}"]`).value = w[k];
-    if (!$('[data-field="travelY"]').value) $('[data-field="travelY"]').value = w.y + 20;
     markFleetDirty();
   });
   $("#btn-save-fleet").addEventListener("click", () => {
@@ -1765,7 +1761,7 @@ function bindEvents() {
     fillFleetForm();
   });
   $("#btn-release-dock").addEventListener("click", () => {
-    if (confirm("Release the dock? Only do this if the turtle using it is stuck or gone, or two turtles may meet in the depot column.")) {
+    if (confirm("Release the dock? Only do this if the turtle using it is stuck or gone, or two turtles may meet at the dock.")) {
       sendRaw({ type: "releaseDepot" });
     }
   });

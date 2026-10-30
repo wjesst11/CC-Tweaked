@@ -6,8 +6,9 @@ A web dashboard for running a fleet of CC:Tweaked mining turtles, deployed on Di
 - **3D map.** A map of the world you can spin and zoom, showing every turtle, the depot, protected areas, job areas and every block the fleet has mined, colored by what it was.
 - **Never stranded.** A turtle always keeps enough fuel to get back to where it refuels, judged from the way it would really go. When it runs low on fuel or space, even partway through an ore vein, it unloads and refuels, then goes back to exactly where it left off.
 - **A shared depot.** Every turtle unloads at the same dock with three chests: junk, valuables and fuel. Items are sorted by name patterns you choose. Turtles refuel from the fuel chest and deposit the coal they mine into it.
-- **No collisions.** Turtles take the shortest open route, and the server shares where every turtle is and where it's about to move, so they steer around each other. The lower ID has right of way, and turtles standing still are treated as obstacles. The dock is used by one turtle at a time. A turtle never digs another one.
-- **Travel never breaks blocks.** Going home, to the depot or to a job, a turtle plans a route through open air and goes around roofs, trees and hills. If there's no open way, it stops and says where it is instead of digging.
+- **No collisions.** Turtles take the quickest open route, and the server shares where every turtle is and where it's about to move, so they steer around each other. The lower ID has right of way, and turtles standing still are treated as obstacles. One turtle at a time uses the dock while the others wait a few blocks away. A turtle never digs another one.
+- **Travel never breaks blocks.** Going home, to the depot or to a job, a turtle plans a route through open space and goes around walls, roofs, trees and hills. It prefers ways it has already been, rather than feeling its way along rock it can't see. If there's no open way, it stops and says where it is instead of digging.
+- **Few turns.** A turn takes as long as a move, so routes run straight rather than zig-zag. Turtles also check ore veins and sort at the dock in the order that needs the fewest turns.
 - **Retracing home.** Each turtle remembers the blocks it has moved through since it left home. Going home (when a job ends, is cancelled, or runs into a problem), it goes back that way, clearing only sand, gravel and other blocks that fell into its path.
 - **Protection.** Turtles never dig chests, barrels, shulker boxes, hoppers, Create blocks, or any ComputerCraft block such as other turtles and your GPS computers. They never dig or build inside protected areas, like a friend's base. The rules live on every turtle, so they hold even if the server is down.
 - **Pause, Resume, Cancel.** Pause freezes a turtle in place. Cancel stops the job and sends it home. **Pause all**, **Resume all** and **Recall all** act on the whole fleet.
@@ -60,11 +61,15 @@ A home doesn't need open sky directly above it, but it does need some open way o
 
 ## Set up the fleet (Fleet page)
 
-1. **Depot.** Pick a dock spot and put three chests next to it on different sides (north, south, east, west, above or below). Enter the dock's coordinates, or drive a turtle there and click **Dock at …'s position**. Then choose which side each chest is on. Turtles come straight down into the dock, so keep the sky above it open. With a chest *above* the dock, they come down the column next to it instead (the dashboard tells you which side), so keep that one open.
-2. **Waiting height.** Turtles waiting for the dock line up in the air just east of it, one per block, starting at this height. It must be at least 3 blocks above the dock, with up to 64 blocks of room above it.
-3. **Protection.** Add protected areas (two corners, inclusive) and adjust the block patterns. `*` matches anything, so `create:*` covers every Create block.
-4. **Item sorting.** Name patterns for valuables and fuel. Everything else is junk. With a big fleet the junk chest fills quickly, so empty it into a trash can or a hopper line.
-5. Click **Save fleet settings**. Every turtle gets them right away.
+1. **Depot.**
+   1. Pick a dock spot and put three chests next to it on different sides (north, south, east, west, above or below).
+   2. Enter the dock's coordinates, or drive a turtle there and click **Dock at …'s position**.
+   3. Choose which side each chest is on.
+
+   Turtles come into the dock through open space from any side without a chest. The one whose turn it is goes in; the others wait 3 to 5 blocks away. So the depot works anywhere with a little open room around it, including a low room underground. A room 3 or 4 blocks high is plenty, and it doesn't need open sky. Keep job start points at least 6 blocks from the dock; the server refuses ones that are closer.
+2. **Protection.** Add protected areas (two corners, inclusive) and adjust the block patterns. `*` matches anything, so `create:*` covers every Create block.
+3. **Item sorting.** Name patterns for valuables and fuel. Everything else is junk. With a big fleet the junk chest fills quickly, so empty it into a trash can or a hopper line.
+4. Click **Save fleet settings**. Every turtle gets them right away.
 
 ## Fleet jobs
 
@@ -87,12 +92,15 @@ The planned area is outlined on the fleet map before you start. Each turtle flie
 
 It keeps the same again for the trip back out, plus a margin. At the depot it takes on at least that much, even if **Refuel to** is set lower.
 
-Before anything starts, the server checks that no job would dig into a protected area, the depot, or a turtle's home. That covers each turtle's whole slice, including its height band, and the shaft down to it. If anything would, it refuses and tells you why.
+Before anything starts, the server checks the job. If anything fails, it refuses and tells you why:
+- **Protected areas:** no turtle's slice, including its height band, may reach into one. A shaft can start in a cave or room under a base, so shafts aren't checked against protected areas; turtles never dig inside one anyway.
+- **The depot:** no job or shaft may dig at the depot or where turtles wait for it.
+- **Homes:** no shaft may come up through a turtle's home.
 
 - **Pause** stops a turtle where it is. A turtle at the dock finishes its turn first.
 - **Resume** carries on.
 - **Cancel** (or **Go home**, or **Recall** for a group) retraces the turtle's way home.
-- **If something stops a job,** such as a protected block in the way or a dock column that's blocked, the turtle notes why ("Job stopped: …"), retraces its way home, and waits. Fix the problem and press **Resume**, and it goes back to work.
+- **If something stops a job,** such as a protected block in the way or no open way to the dock, the turtle notes why ("Job stopped: …"), retraces its way home, and waits. Fix the problem and press **Resume**, and it goes back to work.
 
 If a turtle reboots mid-job, it picks the job back up by itself.
 
@@ -113,6 +121,15 @@ The **3D map** tab draws the world in Minecraft's own coordinates.
 - **Clear history** forgets the mined blocks.
 
 The map keeps the most recent 250,000 mined blocks in the server's memory, so a redeploy clears it. It needs WebGL and loads its 3D library from cdn.jsdelivr.net.
+
+## Turtles that go offline far away
+
+A turtle only runs while its chunk is loaded. Usually that means a player is nearby. Mining far from where you are, or after you log off, it stops and shows as offline. The sidebar shows where it was last seen.
+
+When you come back near it, it switches back on and carries on with its job by itself. To keep a mining area running while you're away, keep its chunks loaded:
+- `/forceload add <x1> <z1> <x2> <z2>` if you're an operator;
+- a chunk-loading mod or claim, such as FTB Chunks;
+- a chunk-loading turtle upgrade, such as the one in Advanced Peripherals.
 
 ## Positions and GPS
 
@@ -146,7 +163,7 @@ Then open http://localhost:8080. If you don't set the two variables, the server 
 
 | Path | What it is |
 | --- | --- |
-| `server.js` | HTTP + WebSocket server: auth, turtle state, lanes, the dock queue, fleet settings, command relay, Lua downloads |
+| `server.js` | HTTP + WebSocket server: auth, turtle state, traffic, the dock queue, fleet settings, command relay, Lua downloads |
 | `fleet.js` | Fleet settings validation and fleet-job planning and safety checks |
 | `public/` | The dashboard (plain HTML/CSS/JS, no build step; `world.js` is the 3D map, using three.js from a CDN) |
 | `turtle/minerdash.lua` | The turtle client (served at `/turtle.lua` with the server's address filled in) |
