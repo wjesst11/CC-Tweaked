@@ -3,11 +3,13 @@
 -- Install (in game):  wget https://<your-app>/turtle.lua startup.lua
 -- Then run "startup" (or reboot). Run "startup setup" to change the URL or token.
 --
--- Coordinates are relative: x/y/z start at 0,0,0 where the turtle first ran,
--- and heading 0 is the direction it was facing then. Jobs set "home" to where
--- they start and unload into a chest placed directly behind home.
+-- Movement is tracked in local coordinates: x/y/z start at 0,0,0 where the
+-- turtle first ran, and heading 0 is the direction it was facing then. With a
+-- wireless/ender modem and a GPS network, the turtle also works out its world
+-- coordinates and compass facing. Jobs set "home" to where they start and
+-- unload into a chest placed directly behind home.
 
-local VERSION = "1.0.0"
+local VERSION = "1.1.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local STOP = setmetatable({}, { __tostring = function() return "Stopped" end })
@@ -59,7 +61,8 @@ local job         -- { name, detail, progress } while a job runs
 local stopRequested = false
 local dirty = true
 local around      -- block names next to the turtle (refreshed when idle)
-local gpsPos
+local calib       -- GPS anchor { l = local pos, w = world pos, f0 = compass of heading 0 }
+local gpsState = "none" -- "none" (no wireless modem), "nofix" or "ok"
 
 local function loadState()
   if not fs.exists(STATE_FILE) then return end
@@ -67,13 +70,13 @@ local function loadState()
   local data = textutils.unserialize(f.readAll())
   f.close()
   if type(data) == "table" and data.pos then
-    pos, heading, home = data.pos, data.heading, data.home
+    pos, heading, home, calib = data.pos, data.heading, data.home, data.calib
   end
 end
 
 local function saveState()
   local f = fs.open(STATE_FILE, "w")
-  f.write(textutils.serialize({ pos = pos, heading = heading, home = home }))
+  f.write(textutils.serialize({ pos = pos, heading = heading, home = home, calib = calib }))
   f.close()
 end
 
@@ -130,6 +133,95 @@ local function pause(seconds)
     checkStop()
     sleep(0.5)
   until os.clock() >= deadline
+end
+
+-- GPS -------------------------------------------------------------------------
+-- A GPS fix anchors the local frame to the world. The first fix after a
+-- horizontal move reveals which compass direction local heading 0 points.
+
+local COMPASS = { [0] = "north", [1] = "east", [2] = "south", [3] = "west" }
+local CX = { [0] = 0, [1] = 1, [2] = 0, [3] = -1 } -- world X/Z step per compass direction
+local CZ = { [0] = -1, [1] = 0, [2] = 1, [3] = 0 }
+
+local function samePos(a, b)
+  return a.x == b.x and a.y == b.y and a.z == b.z
+end
+
+local function toWorld(p)
+  if not (calib and calib.f0) then return nil end
+  local dx, dz = p.x - calib.l.x, p.z - calib.l.z
+  local a, b = calib.f0, (calib.f0 + 1) % 4
+  return {
+    x = calib.w.x + dz * CX[a] + dx * CX[b],
+    y = calib.w.y + p.y - calib.l.y,
+    z = calib.w.z + dz * CZ[a] + dx * CZ[b],
+  }
+end
+
+local function fromWorld(w)
+  local dX, dZ = w.x - calib.w.x, w.z - calib.w.z
+  local a, b = calib.f0, (calib.f0 + 1) % 4
+  return {
+    x = calib.l.x + dX * CX[b] + dZ * CZ[b],
+    y = calib.l.y + w.y - calib.w.y,
+    z = calib.l.z + dX * CX[a] + dZ * CZ[a],
+  }
+end
+
+local function worldPos()
+  if calib and calib.f0 then return toWorld(pos) end
+  if calib and samePos(pos, calib.l) then return calib.w end
+end
+
+-- l: local position when the fix was taken, w: rounded GPS position.
+local function onFix(l, w)
+  local savedHome = calib and calib.home
+  if calib and calib.f0 then
+    local slip = calib.slip
+    if samePos(toWorld(l), w) then
+      -- A matching fix after a sideways move confirms the heading as well.
+      if slip and (l.x ~= slip.x or l.z ~= slip.z) then
+        calib.slip = nil
+        saveState()
+      end
+      return
+    end
+    if job then stopRequested = true end
+    if not slip then
+      -- First assume only the position slipped (e.g. the server stopped mid-move).
+      pos = fromWorld(w)
+      calib.slip = { x = pos.x, z = pos.z }
+      saveState()
+      changed()
+      log("warn", "GPS corrected the tracked position")
+      return
+    end
+    -- Still wrong after correcting: the heading is off too, so it was moved by
+    -- hand. Recalibrate, but keep home at its real location.
+    log("warn", "Turtle was moved. Move it one block to recalibrate GPS.")
+    savedHome = { w = toWorld(home), compass = (calib.f0 + home.heading) % 4 }
+  elseif calib and (l.x ~= calib.l.x or l.z ~= calib.l.z) then
+    for f0 = 0, 3 do
+      calib.f0 = f0
+      if samePos(toWorld(l), w) then
+        if savedHome then
+          home = fromWorld(savedHome.w)
+          home.heading = (savedHome.compass - f0) % 4
+          calib.home = nil
+        end
+        saveState()
+        changed()
+        log("info", "GPS calibrated, facing " .. COMPASS[(f0 + heading) % 4])
+        return
+      end
+    end
+    -- No direction fits (moved by hand while calibrating?): re-anchor below.
+  elseif calib and l.y - calib.l.y == w.y - calib.w.y then
+    return -- hasn't moved sideways yet
+  end
+  calib = { l = { x = l.x, y = l.y, z = l.z }, w = w, home = savedHome }
+  saveState()
+  changed()
 end
 
 -- Movement ------------------------------------------------------------------
@@ -512,7 +604,7 @@ actions.setHome = function()
 end
 
 actions.resetPosition = function()
-  pos, heading = { x = 0, y = 0, z = 0 }, 0
+  pos, heading, calib = { x = 0, y = 0, z = 0 }, 0, nil
   setHome()
   return true, "Position reset to 0, 0, 0"
 end
@@ -605,7 +697,10 @@ local function status()
     pos = pos,
     heading = heading,
     home = home,
-    gps = gpsPos,
+    world = worldPos(),
+    homeWorld = toWorld(home),
+    facing = calib and calib.f0 and COMPASS[(calib.f0 + heading) % 4] or nil,
+    gpsState = gpsState,
     selected = turtle.getSelectedSlot(),
     inventory = inventory,
     job = job,
@@ -659,14 +754,32 @@ local function hasWirelessModem()
   return peripheral.find("modem", function(_, m) return m.isWireless() end) ~= nil
 end
 
+-- Take a GPS fix every 30s to verify tracking, and after each move until the
+-- compass direction is known.
+local function updateGps(fixPos)
+  local before = gpsState
+  if not hasWirelessModem() then
+    gpsState = "none"
+  else
+    local x, y, z = gps.locate(1)
+    gpsState = x and "ok" or "nofix"
+    -- Ignore fixes that straddled a move.
+    if x and samePos(fixPos, pos) then
+      onFix(fixPos, { x = math.floor(x + 0.5), y = math.floor(y + 0.5), z = math.floor(z + 0.5) })
+    end
+  end
+  if gpsState ~= before then changed() end
+end
+
 local function heartbeat()
-  local lastSent, lastGps = -math.huge, -math.huge
+  local lastSent, lastFix, fixPos = -math.huge, -math.huge, nil
   while true do
     local now = os.clock()
-    if now - lastGps >= 10 and hasWirelessModem() then
-      lastGps = now
-      local x, y, z = gps.locate(1)
-      gpsPos = x and { x = x, y = y, z = z } or nil
+    local calibrating = not (calib and calib.f0) or calib.slip ~= nil
+    if now - lastFix >= 30 or (calibrating and not samePos(fixPos, pos) and now - lastFix >= 1) then
+      lastFix = now
+      fixPos = { x = pos.x, y = pos.y, z = pos.z }
+      updateGps(fixPos)
     end
     if dirty or now - lastSent >= 5 then
       dirty = false

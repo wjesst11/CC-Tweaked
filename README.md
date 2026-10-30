@@ -3,11 +3,12 @@
 A web dashboard for controlling CC:Tweaked mining turtles from anywhere, deployed on DigitalOcean App Platform.
 
 - Live status for every turtle: fuel, position, inventory, current job, and the blocks around it
+- GPS support: world coordinates and compass facing (north/east/south/west) for turtles with a wireless or ender modem
 - Drive a turtle with buttons or the keyboard (`W A S D` move and turn, `E`/`Q` up and down, `Esc` stops)
 - Start quarry and tunnel jobs. Turtles unload into a chest, burn the coal they mine, and return home when done
-- **Stop all** and **Recall all** buttons for every turtle at once
-- Top-down map with each turtle's recent path
-- **Update script** pushes the latest turtle code from the server to a turtle and reboots it
+- Built for big fleets: search (`/`), filters for Working / Needs attention / Idle / Offline, and a **Fleet** map of every turtle, colored by status, where you click a turtle to select it
+- **Stop all**, **Recall all** and **Update all** act on every turtle at once
+- **Update script** pushes the latest turtle code from the server to one turtle and reboots it
 
 ```
 turtle (Lua) ──wss──▶  server.js (Node, App Platform)  ◀──wss── browser dashboard
@@ -30,7 +31,7 @@ Health checks hit `/healthz`. Every push to `main` redeploys. Turtles and open d
 
 ## Set up a turtle
 
-1. Use a **mining turtle** (one with a pickaxe), give it some fuel, and name it: `label set Miner1`
+1. Use a **mining turtle** (one with a pickaxe) and give it some fuel. For GPS, equip a wireless or ender modem on the other side. Name it: `label set Miner1`
 2. On the turtle, run:
    ```
    wget https://<your-app>.ondigitalocean.app/turtle.lua startup.lua
@@ -51,7 +52,23 @@ The Minecraft server needs CC:Tweaked's HTTP API (with websockets) enabled. It i
 - It burns fuel items it has mined when it needs to. If it still can't make the trip, it goes home and waits for you to give it fuel.
 - **Stop** halts the turtle where it is. **Go home** cancels any running job and brings the turtle back.
 
-Coordinates are relative to where the turtle first ran the script, with +Z being the direction it faced then. They're saved on the turtle, so they survive reboots. If you pick the turtle up and put it somewhere else, use **Reset position**. If the turtle has a wireless modem and you have a GPS network, the dashboard also shows its world coordinates.
+## Positions and GPS
+
+Turtles track their own movement, starting from 0, 0, 0 where they first ran the script. The position is saved on the turtle, so it survives reboots.
+
+With a wireless or ender modem and a GPS network (4 GPS host computers), each turtle also works out its world position:
+
+- It gets a GPS fix right away. The first time it moves sideways, it works out which way is north. Any manual move or job does this; you don't need to calibrate anything.
+- After that, the dashboard shows world coordinates and N/E/S/W facing. The map puts north up, and the job panel tells you which directions a quarry or tunnel will dig.
+- It re-checks against GPS every 30 seconds. If the server stopped mid-move and left the saved position one block off, it corrects itself. If a player picked it up and moved it, it recalibrates after its next move. Either way, home stays at its real world location.
+
+Turtles without a modem still work. They just show coordinates relative to where they started. If you move one of those by hand, use **Reset position**.
+
+## Running a big fleet
+
+With dozens of turtles, the server only forwards a turtle's status when something changed, and compresses what it sends to the browser. With 64 turtles and 40 of them working, an open dashboard uses about 3 KB/s.
+
+When you change `turtle/minerdash.lua`, push to deploy, then press **Update all**. Every idle turtle downloads the new script and reboots. Busy turtles skip it and say so in their log.
 
 ## Run locally
 

@@ -20,10 +20,13 @@ const store = {
 
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
-const FACING = ["+Z", "+X", "−Z", "−X"];
+const RENDER_INTERVAL_MS = 150;
+const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
+const COMPASS = ["north", "east", "south", "west"];
 const KEYS = { w: "forward", s: "back", a: "turnLeft", d: "turnRight", e: "up", q: "down" };
 const DIGGABLE = new Set(["forward", "up", "down"]);
 const JOB_NAMES = { quarry: "Quarry", tunnel: "Tunnel", goHome: "Going home" };
+const STATE_LABELS = { working: "Working", attention: "Needs attention", idle: "Idle", offline: "Offline" };
 
 // Swatches that make valuables easy to spot in the inventory grid.
 const ITEM_COLORS = [
@@ -50,8 +53,11 @@ const ICONS = {
 const savedSelection = store.get("selected");
 const state = {
   turtles: new Map(), // id -> turtle as sent by the server, plus logs
-  trails: new Map(), // id -> recent [{x, z}] positions for the map
+  trails: new Map(), // id -> { frame, points: [{x, z}] } for the map
   selected: savedSelection === null ? null : Number(savedSelection),
+  filter: store.get("filter") ?? "all",
+  search: "",
+  mapMode: store.get("mapMode") === "fleet" ? "fleet" : "turtle",
   ready: false, // received the first snapshot
   ws: null,
   loggedIn: false,
@@ -63,6 +69,7 @@ const state = {
 
 const nameOf = (t) => t.label || `Turtle #${t.id}`;
 const fmt = (n) => Math.round(n).toLocaleString();
+const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 function itemsOf(status) {
   const inv = status?.inventory;
@@ -71,8 +78,7 @@ function itemsOf(status) {
 
 function prettyName(id) {
   if (!id) return "";
-  const name = String(id).replace(/^[^:]+:/, "").replaceAll("_", " ");
-  return name.charAt(0).toUpperCase() + name.slice(1);
+  return capital(String(id).replace(/^[^:]+:/, "").replaceAll("_", " "));
 }
 
 function itemColor(id) {
@@ -108,6 +114,18 @@ function turtleState(t) {
   if (job) return { key: "working", label: `${JOB_NAMES[job.name] ?? prettyName(job.name)} ${jobPercent(job)}`.trim() };
   if (fuelInfo(t.status)?.sev === "crit") return { key: "attention", label: "Low fuel" };
   return { key: "idle", label: "Idle" };
+}
+
+// Where to draw a turtle: world coordinates once GPS knows its facing,
+// otherwise its own frame relative to where it started.
+function mapPos(t) {
+  const s = t.status;
+  const num = (p) => p && { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+  if (s?.world && s.facing) {
+    return { frame: "world", ...num(s.world), dir: COMPASS.indexOf(s.facing), home: num(s.homeWorld) };
+  }
+  if (s?.pos) return { frame: "local", ...num(s.pos), dir: Number(s.heading), home: num(s.home) };
+  return null;
 }
 
 // Connection -----------------------------------------------------------------
@@ -170,22 +188,21 @@ function handle(msg) {
       state.turtles = new Map(msg.turtles.map((t) => [t.id, t]));
       for (const t of state.turtles.values()) recordTrail(t);
       state.ready = true;
+      state.revealSelected = true;
       ensureSelection();
-      renderAll(true);
+      invalidate("list", "detail", "log");
       break;
 
     case "turtle": {
-      const hadSelection = state.turtles.has(state.selected);
       const t = { ...msg.turtle, logs: state.turtles.get(msg.turtle.id)?.logs ?? [] };
       state.turtles.set(t.id, t);
       recordTrail(t);
-      if (!hadSelection) {
+      if (!state.turtles.has(state.selected)) {
         ensureSelection();
-        renderAll(true);
-      } else {
-        renderList();
-        if (t.id === state.selected) renderDetail();
+        invalidate("log");
       }
+      // Other turtles appear on the map, so the detail view can change too.
+      invalidate("list", "detail");
       break;
     }
 
@@ -194,7 +211,7 @@ function handle(msg) {
       if (!t) break;
       t.logs.push(msg.entry);
       if (t.logs.length > MAX_LOGS) t.logs.shift();
-      if (msg.id === state.selected) appendLog(msg.entry);
+      if (msg.id === state.selected && !dirty.log) appendLog(msg.entry);
       if (msg.entry.level !== "info") toast(`${nameOf(t)}: ${msg.entry.msg}`, msg.entry.level);
       break;
     }
@@ -203,7 +220,7 @@ function handle(msg) {
       state.turtles.delete(msg.id);
       state.trails.delete(msg.id);
       ensureSelection();
-      renderAll(true);
+      invalidate("list", "detail", "log");
       break;
 
     case "error":
@@ -226,6 +243,28 @@ function command(action, args = {}, id = state.selected) {
   sendRaw({ type: "cmd", id, action, args });
 }
 
+// Rendering is batched: with dozens of turtles streaming updates, draw at most
+// every RENDER_INTERVAL_MS rather than once per message.
+const dirty = { list: false, detail: false, log: false };
+let renderTimer = 0;
+let lastRender = 0;
+
+function invalidate(...parts) {
+  for (const part of parts) dirty[part] = true;
+  if (renderTimer) return;
+  const wait = Math.max(0, RENDER_INTERVAL_MS - (performance.now() - lastRender));
+  renderTimer = setTimeout(() => requestAnimationFrame(flush), wait);
+}
+
+function flush() {
+  renderTimer = 0;
+  lastRender = performance.now();
+  const { list, detail, log } = dirty;
+  dirty.list = dirty.detail = dirty.log = false;
+  if (list) renderList();
+  if (detail || log) renderDetail(log);
+}
+
 // Selection & views ------------------------------------------------------------
 
 function sortedTurtles() {
@@ -242,8 +281,9 @@ function ensureSelection() {
 
 function select(id) {
   state.selected = id;
+  state.revealSelected = true;
   store.set("selected", id);
-  renderAll(true);
+  invalidate("list", "detail", "log");
 }
 
 function showApp() {
@@ -276,12 +316,7 @@ function toast(text, level = "info") {
   setTimeout(() => el.remove(), level === "info" ? 3000 : 6000);
 }
 
-// Rendering --------------------------------------------------------------------
-
-function renderAll(rebuildLog = false) {
-  renderList();
-  renderDetail(rebuildLog);
-}
+// Turtle list --------------------------------------------------------------------
 
 function renderStatus(el, st) {
   el.className = `status status-${st.key}`;
@@ -295,23 +330,53 @@ function renderMeter(el, frac, sev = "ok") {
   el.firstElementChild.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
 }
 
-function renderList() {
-  const list = $("#turtle-list");
-  const turtles = sortedTurtles();
-  const existing = new Map([...list.children].map((li) => [Number(li.dataset.id), li]));
+function matchesSearch(t, query) {
+  if (!query) return true;
+  const q = query.toLowerCase().replace(/^#/, "");
+  return nameOf(t).toLowerCase().includes(q) || String(t.id) === q;
+}
 
-  turtles.forEach((t, i) => {
+function renderList() {
+  const turtles = sortedTurtles();
+  const states = new Map(turtles.map((t) => [t.id, turtleState(t)]));
+
+  const counts = { all: turtles.length, working: 0, attention: 0, idle: 0, offline: 0 };
+  for (const st of states.values()) counts[st.key]++;
+  for (const chip of $$(".chip")) {
+    chip.setAttribute("aria-pressed", String(chip.dataset.filter === state.filter));
+    chip.lastElementChild.textContent = counts[chip.dataset.filter];
+  }
+
+  const visible = turtles.filter(
+    (t) => (state.filter === "all" || states.get(t.id).key === state.filter) && matchesSearch(t, state.search),
+  );
+
+  const list = $("#turtle-list");
+  const existing = new Map([...list.children].map((li) => [Number(li.dataset.id), li]));
+  visible.forEach((t, i) => {
     let li = existing.get(t.id);
     existing.delete(t.id);
     if (!li) li = createListItem(t.id);
-    updateListItem(li, t);
+    updateListItem(li, t, states.get(t.id));
     if (list.children[i] !== li) list.insertBefore(li, list.children[i] ?? null);
   });
   for (const li of existing.values()) li.remove();
 
-  const online = turtles.filter((t) => t.online).length;
-  $("#list-empty").hidden = turtles.length > 0 || !state.ready;
-  $("#turtle-count").textContent = turtles.length ? `${online} of ${turtles.length} online` : "";
+  // Selecting from the map or search can pick a turtle that's scrolled out of view.
+  const selectedLi = state.revealSelected && list.querySelector(`li[data-id="${state.selected}"]`);
+  state.revealSelected = false;
+  if (selectedLi) {
+    // Scroll the list only (scrollIntoView would also jump the page on phones).
+    const l = list.getBoundingClientRect();
+    const r = selectedLi.getBoundingClientRect();
+    if (r.top < l.top || r.bottom > l.bottom) list.scrollTop += r.top - l.top - (l.height - r.height) / 2;
+    if (r.left < l.left || r.right > l.right) list.scrollLeft += r.left - l.left;
+  }
+
+  const empty = $("#list-empty");
+  empty.hidden = visible.length > 0 || !state.ready;
+  empty.textContent = turtles.length ? "No turtles match." : "No turtles have connected yet.";
+  $("#turtle-count").textContent = turtles.length ? `${turtles.length - counts.offline} of ${turtles.length} online` : "";
 }
 
 function createListItem(id) {
@@ -327,12 +392,12 @@ function createListItem(id) {
   return li;
 }
 
-function updateListItem(li, t) {
+function updateListItem(li, t, st) {
   const btn = li.firstElementChild;
   const fuel = fuelInfo(t.status);
   btn.setAttribute("aria-current", String(t.id === state.selected));
   $(".ti-name", btn).textContent = nameOf(t);
-  renderStatus($(".status", btn), turtleState(t));
+  renderStatus($(".status", btn), st);
 
   const meter = $(".meter", btn);
   meter.hidden = !fuel || fuel.unlimited;
@@ -344,6 +409,8 @@ function updateListItem(li, t) {
   else if (fuel) sub = fuel.unlimited ? "Unlimited fuel" : `${fmt(fuel.fuel)} fuel`;
   $(".ti-sub", btn).textContent = sub;
 }
+
+// Turtle detail --------------------------------------------------------------------
 
 function renderDetail(rebuildLog = false) {
   const t = state.turtles.get(state.selected);
@@ -367,38 +434,8 @@ function renderDetail(rebuildLog = false) {
     .join(" · ");
   $("#btn-forget").hidden = t.online;
 
-  // Fuel
-  const fuel = fuelInfo(s);
-  const fuelMeter = $("#fuel-meter");
-  fuelMeter.hidden = !fuel || fuel.unlimited;
-  if (!fuel) {
-    $("#fuel-value").textContent = "–";
-    $("#fuel-sub").textContent = "";
-  } else if (fuel.unlimited) {
-    $("#fuel-value").textContent = "Unlimited";
-    $("#fuel-sub").textContent = "Fuel is turned off on this server";
-  } else {
-    $("#fuel-value").textContent = fmt(fuel.fuel);
-    renderMeter(fuelMeter, fuel.frac, fuel.sev);
-    $("#fuel-sub").textContent =
-      `${Math.round(fuel.frac * 100)}% of ${fmt(fuel.limit)}` + (fuel.sev === "crit" ? " · refuel soon" : "");
-  }
-
-  // Position
-  if (s.pos) {
-    const [x, y, z] = [s.pos.x, s.pos.y, s.pos.z].map(Number);
-    $("#pos-value").innerHTML = `<b>X</b>${x}<b>Y</b>${y}<b>Z</b>${z}`;
-    const parts = [`Facing ${FACING[s.heading] ?? "?"}`];
-    if (s.home) {
-      const dist = Math.abs(x - s.home.x) + Math.abs(y - s.home.y) + Math.abs(z - s.home.z);
-      parts.push(dist === 0 ? "At home" : `${dist} blocks from home`);
-    }
-    if (s.gps) parts.push(`GPS ${[s.gps.x, s.gps.y, s.gps.z].map((n) => Math.round(n)).join(", ")}`);
-    $("#pos-sub").textContent = parts.join(" · ");
-  } else {
-    $("#pos-value").textContent = "–";
-    $("#pos-sub").textContent = "";
-  }
+  renderFuel(s);
+  renderPosition(s);
 
   // Job
   $("#job-value").textContent = job ? (JOB_NAMES[job.name] ?? prettyName(job.name)) : t.online ? "Idle" : "–";
@@ -410,6 +447,14 @@ function renderDetail(rebuildLog = false) {
     : s.queued
       ? `${s.queued} command${s.queued === 1 ? "" : "s"} queued`
       : "";
+
+  const direction = $("#job-direction");
+  direction.hidden = !s.facing;
+  if (s.facing) {
+    const right = COMPASS[(COMPASS.indexOf(s.facing) + 1) % 4];
+    direction.innerHTML = `Facing <b></b>: a quarry extends ${s.facing} and ${right}, a tunnel heads ${s.facing}.`;
+    direction.firstElementChild.textContent = capital(s.facing);
+  }
 
   // Blocks around the turtle (only refreshed while idle)
   for (const side of ["up", "front", "down"]) {
@@ -427,6 +472,53 @@ function renderDetail(rebuildLog = false) {
   for (const el of $$(".needs-idle")) el.disabled = !t.online || busy;
 
   if (rebuildLog) renderLog(t);
+}
+
+function renderFuel(s) {
+  const fuel = fuelInfo(s);
+  const meter = $("#fuel-meter");
+  meter.hidden = !fuel || fuel.unlimited;
+  if (!fuel) {
+    $("#fuel-value").textContent = "–";
+    $("#fuel-sub").textContent = "";
+  } else if (fuel.unlimited) {
+    $("#fuel-value").textContent = "Unlimited";
+    $("#fuel-sub").textContent = "Fuel is turned off on this server";
+  } else {
+    $("#fuel-value").textContent = fmt(fuel.fuel);
+    renderMeter(meter, fuel.frac, fuel.sev);
+    $("#fuel-sub").textContent =
+      `${Math.round(fuel.frac * 100)}% of ${fmt(fuel.limit)}` + (fuel.sev === "crit" ? " · refuel soon" : "");
+  }
+}
+
+function coordsHtml(p) {
+  const [x, y, z] = [p.x, p.y, p.z].map((n) => Math.round(Number(n)));
+  return `<b>X</b>${x}<b>Y</b>${y}<b>Z</b>${z}`;
+}
+
+function renderPosition(s) {
+  const world = s.world ?? s.gps; // script v1.0 sent `gps`
+  const parts = [];
+  if (world) {
+    $("#pos-label").textContent = "Position · GPS";
+    $("#pos-value").innerHTML = coordsHtml(world);
+    parts.push(s.facing ? `Facing ${capital(s.facing)}` : "Move one block so it can find north");
+  } else if (s.pos) {
+    $("#pos-label").textContent = "Position · relative to start";
+    $("#pos-value").innerHTML = coordsHtml(s.pos);
+    parts.push(`Facing ${FACING[s.heading] ?? "?"}`);
+    if (s.gpsState === "none") parts.push("no wireless modem");
+    if (s.gpsState === "nofix") parts.push("no GPS signal");
+  } else {
+    $("#pos-label").textContent = "Position";
+    $("#pos-value").textContent = "–";
+  }
+  if (s.pos && s.home) {
+    const dist = Math.abs(s.pos.x - s.home.x) + Math.abs(s.pos.y - s.home.y) + Math.abs(s.pos.z - s.home.z);
+    parts.push(dist === 0 ? "At home" : `${fmt(dist)} blocks from home`);
+  }
+  $("#pos-sub").textContent = parts.join(" · ");
 }
 
 // Inventory ----------------------------------------------------------------------
@@ -480,40 +572,63 @@ function selectSlot(slot) {
 // Map ----------------------------------------------------------------------------
 
 function recordTrail(t) {
-  const p = t.status?.pos;
+  const p = mapPos(t);
   if (!p) return;
   let trail = state.trails.get(t.id);
-  if (!trail) state.trails.set(t.id, (trail = []));
-  const last = trail.at(-1);
+  if (!trail || trail.frame !== p.frame) state.trails.set(t.id, (trail = { frame: p.frame, points: [] }));
+  const points = trail.points;
+  const last = points.at(-1);
   if (last && last.x === p.x && last.z === p.z) return;
-  // A big jump means the position was reset; don't draw a line across it.
-  if (last && Math.abs(last.x - p.x) + Math.abs(last.z - p.z) > 6) trail.length = 0;
-  trail.push({ x: p.x, z: p.z });
-  if (trail.length > MAX_TRAIL) trail.shift();
+  // A big jump means the position was reset or recalibrated; don't draw a line across it.
+  if (last && Math.abs(last.x - p.x) + Math.abs(last.z - p.z) > 6) points.length = 0;
+  points.push({ x: p.x, z: p.z });
+  if (points.length > MAX_TRAIL) points.shift();
+}
+
+const escapeXml = (s) => String(s).replace(/[<>&"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+function arrow(cls, x, y, dir, size) {
+  const k = size / 10;
+  return `<path class="${cls}" transform="translate(${x} ${y}) rotate(${(Number(dir) || 0) * 90}) scale(${k})" d="M0 -10 L8 8 L0 4 L-8 8 Z"/>`;
 }
 
 function renderMap(t) {
   const svg = $("#map");
   const size = 240;
-  const s = t.status;
-  if (!s?.pos) {
-    svg.innerHTML = `<text class="map-note" x="120" y="124" text-anchor="middle">No position yet</text>`;
+  const fleet = state.mapMode === "fleet";
+  const me = mapPos(t);
+  const mine = me && (!fleet || me.frame === "world") ? me : null;
+  const world = fleet || me?.frame === "world";
+  const others = world
+    ? sortedTurtles()
+        .filter((o) => o.id !== t.id)
+        .map((o) => ({ t: o, p: mapPos(o) }))
+        .filter((o) => o.p?.frame === "world")
+    : [];
+  renderLegend(fleet, world);
+
+  if (!mine && !(fleet && others.length)) {
+    const note = fleet ? "No GPS positions yet" : "No position yet";
+    svg.innerHTML = `<text class="map-note" x="120" y="124" text-anchor="middle">${note}</text>`;
     return;
   }
 
-  const trail = state.trails.get(t.id) ?? [];
-  const points = [...trail, s.pos, s.home].filter(Boolean);
-  const xs = points.map((p) => Number(p.x));
-  const zs = points.map((p) => Number(p.z));
+  const trail = mine ? (state.trails.get(t.id)?.points ?? []) : [];
+  const fit = fleet ? [...others.map((o) => o.p), mine] : [...trail, mine, mine.home];
+  const pts = fit.filter(Boolean);
+  const xs = pts.map((p) => Number(p.x));
+  const zs = pts.map((p) => Number(p.z));
   const [minX, maxX, minZ, maxZ] = [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
-  const span = Math.max(maxX - minX, maxZ - minZ, 10) + 4;
+  const span = Math.max(maxX - minX, maxZ - minZ, 10) * 1.15 + 4;
   const scale = size / span;
   const cx = (minX + maxX) / 2;
   const cz = (minZ + maxZ) / 2;
-  const sx = (x) => (size / 2 + (x - cx) * scale).toFixed(1);
-  const sy = (z) => (size / 2 - (z - cz) * scale).toFixed(1); // +Z points up
+  const sx = (x) => +(size / 2 + (x - cx) * scale).toFixed(1);
+  // World maps put north (−Z) up; local maps put the start direction (+Z) up.
+  const sy = (z) => +(size / 2 + (world ? 1 : -1) * (z - cz) * scale).toFixed(1);
+  const inView = (p) => Math.abs(p.x - cx) <= span / 2 && Math.abs(p.z - cz) <= span / 2;
 
-  const step = [1, 2, 5, 10, 25, 50, 100, 250, 500].find((n) => n * scale >= 18) ?? 1000;
+  const step = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000].find((n) => n * scale >= 18) ?? 10000;
   let out = "";
   for (let x = Math.ceil((cx - span / 2) / step) * step; x <= cx + span / 2; x += step) {
     out += `<line class="grid-line" x1="${sx(x)}" x2="${sx(x)}" y1="0" y2="${size}"/>`;
@@ -526,20 +641,54 @@ function renderMap(t) {
     out += `<polyline class="trail" points="${trail.map((p) => `${sx(p.x)},${sy(p.z)}`).join(" ")}"/>`;
   }
 
-  if (s.home) {
+  if (mine?.home && !fleet) {
+    const h = mine.home;
     const r = Math.max(5, Math.min(9, scale * 0.45));
-    const [hx, hy, hz] = [s.home.x, s.home.y, s.home.z].map(Number);
-    out += `<rect class="home" x="${sx(hx) - r}" y="${sy(hz) - r}" width="${2 * r}" height="${2 * r}" rx="2">
-      <title>Home: ${hx}, ${hy}, ${hz}</title></rect>`;
+    out += `<rect class="home" x="${sx(h.x) - r}" y="${sy(h.z) - r}" width="${2 * r}" height="${2 * r}" rx="2">
+      <title>Home: ${[h.x, h.y, h.z].map(Number).join(", ")}</title></rect>`;
   }
 
-  const [x, y, z] = [s.pos.x, s.pos.y, s.pos.z].map(Number);
-  out += `<g transform="translate(${sx(x)} ${sy(z)}) rotate(${Number(s.heading) * 90})">
-    <path class="turtle-mark" d="M0 -10 L8 8 L0 4 L-8 8 Z"/>
-    <title>${nameOf(t).replace(/[<&]/g, "")}: ${x}, ${y}, ${z} facing ${FACING[s.heading] ?? "?"}</title></g>`;
-  out += `<text class="scale" x="8" y="${size - 8}">Grid: ${step} block${step === 1 ? "" : "s"}</text>`;
+  // Other turtles: status-colored and clickable in fleet view, faint context otherwise.
+  for (const { t: o, p } of others) {
+    if (!inView(p)) continue;
+    const st = turtleState(o);
+    const title = `<title>${escapeXml(nameOf(o))} · ${st.label} · ${p.x}, ${p.y}, ${p.z}</title>`;
+    out += fleet
+      ? `<g class="pick" data-id="${o.id}">${arrow(`mark mark-${st.key}`, sx(p.x), sy(p.z), p.dir, 7)}${title}</g>`
+      : `<g class="pick" data-id="${o.id}"><circle class="other" cx="${sx(p.x)}" cy="${sy(p.z)}" r="3.5"/>${title}</g>`;
+  }
 
+  if (mine) {
+    const st = turtleState(t);
+    const [x, y] = [sx(mine.x), sy(mine.z)];
+    const facing = mine.frame === "world" ? capital(COMPASS[mine.dir] ?? "?") : FACING[mine.dir];
+    if (fleet) out += `<circle class="selected-ring" cx="${x}" cy="${y}" r="13"/>`;
+    out += `<g>${arrow(fleet ? `mark mark-${st.key}` : "turtle-mark", x, y, mine.dir, 10)}
+      <title>${escapeXml(nameOf(t))}: ${mine.x}, ${mine.y}, ${mine.z} facing ${facing}</title></g>`;
+    if (fleet) {
+      const anchor = x > size - 70 ? "end" : "start";
+      out += `<text class="map-label" x="${x + (anchor === "end" ? -16 : 16)}" y="${y + 4}" text-anchor="${anchor}">${escapeXml(nameOf(t))}</text>`;
+    }
+  }
+
+  out += `<text class="compass" x="${size - 8}" y="16" text-anchor="end">${world ? "N ↑" : "↑ start direction"}</text>`;
+  out += `<text class="scale" x="8" y="${size - 8}">Grid: ${fmt(step)} block${step === 1 ? "" : "s"}</text>`;
   svg.innerHTML = out;
+}
+
+function renderLegend(fleet, world) {
+  const key = fleet ? `fleet` : world ? "world" : "local";
+  const legend = $("#map-legend");
+  if (legend.dataset.key === key) return;
+  legend.dataset.key = key;
+  legend.innerHTML = fleet
+    ? Object.entries(STATE_LABELS)
+        .map(([k, label]) => `<li><span class="key key-mark mark-${k}"></span>${label}</li>`)
+        .join("") + `<li><span class="key key-ring"></span>Selected</li>`
+    : `<li><span class="key key-turtle"></span>Turtle</li>
+       <li><span class="key key-home"></span>Home</li>
+       <li><span class="key key-trail"></span>Path</li>` +
+      (world ? `<li><span class="key key-other"></span>Other turtles</li>` : "");
 }
 
 // Log ----------------------------------------------------------------------------
@@ -579,9 +728,16 @@ function appendLog(entry) {
 // Setup --------------------------------------------------------------------------
 
 function setTab(name) {
-  for (const tab of $$(".tab")) tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
+  for (const tab of $$(".tab[data-tab]")) tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
   for (const form of $$(".job-form")) form.hidden = form.dataset.job !== name;
   store.set("jobTab", name);
+}
+
+function setMapMode(mode) {
+  state.mapMode = mode;
+  store.set("mapMode", mode);
+  for (const tab of $$(".tab[data-map]")) tab.setAttribute("aria-selected", String(tab.dataset.map === mode));
+  invalidate("detail");
 }
 
 function setupInstallSteps() {
@@ -641,6 +797,23 @@ function bindEvents() {
   $("#btn-recall-all").addEventListener("click", () => {
     if (confirm("Stop every turtle's job and send it home?")) sendRaw({ type: "cmd", id: "all", action: "goHome" });
   });
+  $("#btn-update-all").addEventListener("click", () => {
+    if (confirm("Download the latest script to every idle turtle and reboot them? Busy turtles skip it.")) {
+      sendRaw({ type: "cmd", id: "all", action: "update" });
+    }
+  });
+
+  $("#turtle-search").addEventListener("input", (event) => {
+    state.search = event.target.value.trim();
+    invalidate("list");
+  });
+  for (const chip of $$(".chip")) {
+    chip.addEventListener("click", () => {
+      state.filter = chip.dataset.filter;
+      store.set("filter", state.filter);
+      invalidate("list");
+    });
+  }
 
   $("#btn-stop").addEventListener("click", () => command("stop"));
   $("#btn-rename").addEventListener("click", () => {
@@ -663,7 +836,12 @@ function bindEvents() {
   });
 
   for (const btn of $$("[data-cmd]")) btn.addEventListener("click", () => command(btn.dataset.cmd));
-  for (const tab of $$(".tab")) tab.addEventListener("click", () => setTab(tab.dataset.tab));
+  for (const tab of $$(".tab[data-tab]")) tab.addEventListener("click", () => setTab(tab.dataset.tab));
+  for (const tab of $$(".tab[data-map]")) tab.addEventListener("click", () => setMapMode(tab.dataset.map));
+  $("#map").addEventListener("click", (event) => {
+    const pick = event.target.closest("[data-id]");
+    if (pick) select(Number(pick.dataset.id));
+  });
 
   for (const form of $$(".job-form")) {
     form.addEventListener("submit", (event) => {
@@ -680,10 +858,16 @@ function bindEvents() {
   document.addEventListener("keydown", (event) => {
     if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.target.closest?.("input:not([type=checkbox]), select, textarea")) return;
-    if ($("#app").hidden || $("#turtle").hidden || $("#install-dialog").open) return;
+    if ($("#app").hidden || $("#install-dialog").open) return;
 
+    if (event.key === "/") {
+      event.preventDefault();
+      $("#turtle-search").focus();
+      return;
+    }
+    if ($("#turtle").hidden) return;
     if (event.key === "Escape") {
-      if (!$("#btn-stop").disabled) command("stop");
+      if (currentTurtle()?.online) command("stop");
       return;
     }
     const key = event.key.toLowerCase();
@@ -697,23 +881,20 @@ function bindEvents() {
   });
 
   // Keep "last seen" times fresh.
-  setInterval(() => {
-    renderList();
-    if (currentTurtle() && !currentTurtle().online) renderDetail();
-  }, 15000);
+  setInterval(() => invalidate("list", "detail"), 15000);
 }
 
 applyTheme(store.get("theme"));
 buildInventory();
 setupInstallSteps();
 setTab(store.get("jobTab") === "tunnel" ? "tunnel" : "quarry");
+setMapMode(state.mapMode);
 bindEvents();
 
 const session = store.get("session");
 if (session) {
   state.loggedIn = true;
   showApp();
-  renderAll();
   connect({ session });
 } else {
   showLogin();

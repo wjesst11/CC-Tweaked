@@ -33,6 +33,7 @@
       <div class="spacer"></div>
       <div class="topbar-actions">
         <button id="btn-install" class="btn">Add turtle</button>
+        <button id="btn-update-all" class="btn" title="Push the latest script to every idle turtle">Update all</button>
         <button id="btn-recall-all" class="btn">Recall all</button>
         <button id="btn-stop-all" class="btn danger">Stop all</button>
         <button id="btn-theme" class="btn icon" title="Toggle light/dark" aria-label="Toggle light/dark theme">
@@ -48,8 +49,16 @@
           <h2>Turtles</h2>
           <span id="turtle-count" class="muted"></span>
         </div>
+        <input id="turtle-search" class="search" type="search" placeholder="Search name or ID  ( / )" aria-label="Search turtles" autocomplete="off">
+        <div class="chips" role="group" aria-label="Filter turtles">
+          <button class="chip" data-filter="all">All <span></span></button>
+          <button class="chip" data-filter="working">Working <span></span></button>
+          <button class="chip" data-filter="attention">Needs attention <span></span></button>
+          <button class="chip" data-filter="idle">Idle <span></span></button>
+          <button class="chip" data-filter="offline">Offline <span></span></button>
+        </div>
         <ul id="turtle-list" class="turtle-list"></ul>
-        <p id="list-empty" class="list-empty muted">No turtles have connected yet.</p>
+        <p id="list-empty" class="list-empty muted"></p>
       </aside>
 
       <main class="detail">
@@ -76,18 +85,18 @@
           </div>
 
           <div class="stats">
-            <section class="card stat">
+            <section class="card stat stat-fuel">
               <div class="stat-label">Fuel</div>
               <div id="fuel-value" class="stat-value">–</div>
               <div id="fuel-meter" class="meter"><div class="meter-fill"></div></div>
               <div id="fuel-sub" class="stat-sub"></div>
             </section>
-            <section class="card stat">
-              <div class="stat-label">Position</div>
+            <section class="card stat stat-pos">
+              <div id="pos-label" class="stat-label">Position</div>
               <div id="pos-value" class="stat-value coords">–</div>
               <div id="pos-sub" class="stat-sub"></div>
             </section>
-            <section class="card stat">
+            <section class="card stat stat-job">
               <div class="stat-head">
                 <div class="stat-label">Job</div>
                 <button id="btn-stop" class="btn danger sm needs-online" title="Stop (Esc)">Stop</button>
@@ -193,6 +202,7 @@
                   <button class="tab" role="tab" data-tab="quarry">Quarry</button>
                   <button class="tab" role="tab" data-tab="tunnel">Tunnel</button>
                 </div>
+                <p id="job-direction" class="direction" hidden></p>
                 <form class="job-form" data-job="quarry">
                   <div class="fields">
                     <label class="field"><span>Length</span><input name="length" type="number" min="1" max="128" value="8" required></label>
@@ -226,14 +236,13 @@
               <section class="card">
                 <div class="card-head">
                   <h2>Map</h2>
-                  <span class="muted">Top-down, relative to where it started</span>
+                  <div class="tabs inline" role="tablist" aria-label="Map view">
+                    <button class="tab" role="tab" data-map="turtle">This turtle</button>
+                    <button class="tab" role="tab" data-map="fleet">Fleet</button>
+                  </div>
                 </div>
-                <svg id="map" class="map" viewBox="0 0 240 240" role="img" aria-label="Top-down map of the turtle and its home"></svg>
-                <ul class="legend">
-                  <li><span class="key key-turtle"></span>Turtle</li>
-                  <li><span class="key key-home"></span>Home</li>
-                  <li><span class="key key-trail"></span>Path</li>
-                </ul>
+                <svg id="map" class="map" viewBox="0 0 240 240" role="img" aria-label="Top-down map of turtles"></svg>
+                <ul id="map-legend" class="legend"></ul>
                 <div class="row">
                   <button class="btn needs-online" data-cmd="goHome" title="Stops any running job">Go home</button>
                   <button class="btn needs-idle" data-cmd="setHome">Set home here</button>

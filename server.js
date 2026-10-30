@@ -20,8 +20,9 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const AUTH_TIMEOUT_MS = 10_000;
 const TURTLE_TIMEOUT_MS = 30_000;
 const MAX_LOGS = 200;
+const SNAPSHOT_LOGS = 50;
 // Actions the dashboard may send to every turtle at once.
-const BROADCAST_ACTIONS = new Set(["stop", "goHome"]);
+const BROADCAST_ACTIONS = new Set(["stop", "goHome", "update"]);
 
 function secretFromEnv(name) {
   if (process.env[name]) return process.env[name];
@@ -83,7 +84,7 @@ function turtleView(t, withLogs = false) {
     version: t.version,
     status: t.status,
   };
-  if (withLogs) view.logs = t.logs;
+  if (withLogs) view.logs = t.logs.slice(-SNAPSHOT_LOGS);
   return view;
 }
 
@@ -142,6 +143,10 @@ function handleTurtle(ws) {
     switch (msg.type) {
       case "status": {
         const { type, ...status } = msg;
+        // Idle turtles re-send the same status every few seconds as a heartbeat.
+        const json = JSON.stringify(status);
+        if (json === turtle.statusJson) break;
+        turtle.statusJson = json;
         turtle.status = status;
         turtle.label = typeof status.label === "string" ? status.label : null;
         broadcast({ type: "turtle", turtle: turtleView(turtle) });
@@ -268,17 +273,19 @@ app.get("/turtle.lua", async (req, res, next) => {
 app.use(express.static(path.join(ROOT, "public")));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+const turtleWss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+// Status JSON compresses well, which matters with dozens of turtles streaming.
+const dashboardWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: true });
 
 server.on("upgrade", (req, socket, head) => {
   const { pathname } = new URL(req.url, "http://localhost");
-  const handler =
-    pathname === "/ws/turtle" ? handleTurtle : pathname === "/ws/dashboard" ? handleDashboard : null;
-  if (!handler) {
+  if (pathname === "/ws/turtle") {
+    turtleWss.handleUpgrade(req, socket, head, handleTurtle);
+  } else if (pathname === "/ws/dashboard") {
+    dashboardWss.handleUpgrade(req, socket, head, handleDashboard);
+  } else {
     socket.destroy();
-    return;
   }
-  wss.handleUpgrade(req, socket, head, handler);
 });
 
 setInterval(() => {
