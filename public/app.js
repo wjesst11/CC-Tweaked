@@ -1545,13 +1545,28 @@ function renderFleetMap(turtles, f) {
   const pts = [
     ...items.map((o) => o.p),
     ...jobs.flatMap(({ box }) => [{ x: box.x1, z: box.z1 }, { x: box.x2, z: box.z2 }]),
-    ...areas.flatMap((a) => [{ x: a.x1, z: a.z1 }, { x: a.x2, z: a.z2 }]),
     ...savedRoutes.flatMap((route) => [route.home, route.bottom, route.lane].filter(Boolean)),
     ...radii.flatMap(({ circle: c }) => [{ x: c.x - c.radius, z: c.z - c.radius }, { x: c.x + c.radius, z: c.z + c.radius }]),
   ];
   if (f.depot) pts.push(f.depot);
   const plans = state.view === "fleet" ? plannedFleetJob() : [];
   for (const p of plans) pts.push({ x: p.x1, z: p.z1 }, { x: p.x2, z: p.z2 });
+  // The map frames the fleet. A protected area far away (say, around a base)
+  // would shrink everything else to a corner, so only nearby ones join in.
+  let offMap = 0;
+  if (pts.length) {
+    const xs = pts.map((p) => p.x), zs = pts.map((p) => p.z);
+    const [minX, maxX, minZ, maxZ] = [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
+    const margin = Math.max(32, Math.max(maxX - minX, maxZ - minZ) / 2);
+    for (const a of areas) {
+      const near = Math.max(a.x1, a.x2) >= minX - margin && Math.min(a.x1, a.x2) <= maxX + margin &&
+        Math.max(a.z1, a.z2) >= minZ - margin && Math.min(a.z1, a.z2) <= maxZ + margin;
+      if (near) pts.push({ x: a.x1, z: a.z1 }, { x: a.x2, z: a.z2 });
+      else offMap++;
+    }
+  } else {
+    for (const a of areas) pts.push({ x: a.x1, z: a.z1 }, { x: a.x2, z: a.z2 });
+  }
   if (!pts.length) {
     svg.innerHTML = `<text class="map-note" x="200" y="204" text-anchor="middle">Turtles appear here once GPS knows where they are</text>`;
     return;
@@ -1570,7 +1585,7 @@ function renderFleetMap(turtles, f) {
   for (const { t, circle } of radii) out += drawMiningRadius(v, circle, `${nameOf(t)}: mining radius ${circle.radius} blocks from saved home`);
   for (const { t, box } of jobs) {
     const a = t.status.fleetJob.args;
-    out += miningRadius(a)
+    out += miningRadius(a) && a.pattern !== "staggered"
       ? rect(v, a.x, a.z, a.x, a.z + a.length - 1, "job-area", `${nameOf(t)}: mining lane at Y ${a.y}`)
       : rect(v, box.x1, box.z1, box.x2, box.z2, "job-area", `${nameOf(t)}: ${KIND_NAMES[a.kind]} (${a.kind === "branchMine" && a.pattern !== "staggered" ? `Y ${a.y}` : `Y ${a.yTop} to ${a.yBottom}`})`);
   }
@@ -1596,6 +1611,7 @@ function renderFleetMap(turtles, f) {
   }
   out += `<text class="compass" x="${size - 8}" y="16" text-anchor="end">N ↑</text>`;
   out += `<text class="scale" x="8" y="${size - 8}">Grid: ${fmt(v.step)} block${v.step === 1 ? "" : "s"}</text>`;
+  if (offMap) out += `<text class="scale" x="8" y="16">${offMap} protected area${offMap === 1 ? "" : "s"} far away, off this map</text>`;
   svg.innerHTML = out;
 }
 
