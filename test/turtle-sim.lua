@@ -64,7 +64,7 @@ local function miner(files, initial)
   local sim = {
     pos = {x=0,y=0,z=0}, heading = 0, moves = 0, turns = 0, digs = 0,
     blocks = {}, time = 0, history = {}, slots = {}, items = {}, inspected = {},
-    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {}, refuse = {}, pulls = 0, worldDrops = {},
+    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {}, refuse = {}, sticky = {}, pulls = 0, worldDrops = {},
   }
   local dx, dz = {[0]=0,1,0,-1}, {[0]=1,0,-1,0}
   local function nextCell(direction)
@@ -94,6 +94,8 @@ local function miner(files, initial)
     if not sim.blocks[target] then return false end
     -- Blocks the game refuses to break, such as under spawn protection.
     if sim.refuse[target] then return false, sim.refuse[target] end
+    -- Blocks a mod puts straight back: the dig reports success.
+    if sim.sticky[target] then sim.digs = sim.digs + 1; return true end
     sim.blocks[target], sim.digs = nil, sim.digs+1
     return true
   end
@@ -137,6 +139,18 @@ local function miner(files, initial)
       if sim.items[slot] and (sim.slots[slot] or 0) > 0 then return {name=sim.items[slot],count=sim.slots[slot]} end
     end,
     getItemCount=function(slot) return sim.slots[slot or sim.selected] or 0 end,
+    getItemSpace=function(slot) return 64-(sim.slots[slot or sim.selected] or 0) end,
+    transferTo=function(slot, count)
+      local from=sim.selected
+      local n=sim.slots[from] or 0
+      if n==0 or (sim.items[slot] and sim.items[slot]~=sim.items[from]) then return false end
+      local moved=math.min(count or n, n, 64-(sim.slots[slot] or 0))
+      if moved<=0 then return false end
+      sim.slots[slot],sim.items[slot]=(sim.slots[slot] or 0)+moved,sim.items[from]
+      sim.slots[from]=n-moved
+      if sim.slots[from]==0 then sim.slots[from],sim.items[from]=nil,nil end
+      return true
+    end,
     getSelectedSlot=function() return sim.selected end,
     select=function(slot) sim.selected=slot; return true end,
     refuel=function(count)

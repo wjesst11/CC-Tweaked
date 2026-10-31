@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.8"
+local VERSION = "2.2.9"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -614,16 +614,24 @@ end
 -- mustn't be.
 local function clear(dir, context)
   local side = SIDES[dir]
+  local stays, dug = 0, nil
   for _ = 1, 64 do
     local found, block = side.inspect()
     if not found or LIQUIDS[block.name] then return true end
     if isTurtleBlock(block.name) then return false, "another turtle is in the way" end
     local reason = protection(dir, block, context)
     if reason then return false, reason end
+    -- A block that doesn't fall but is still there after digging isn't
+    -- breaking here: a mod or claim puts it back without saying so.
+    if block.name == dug and not nav.hasFallen(block.name) then
+      stays = stays + 1
+      if stays >= 3 then return false, "Cannot break it: it is still there after digging" end
+    end
     local ok, err = side.dig()
     if ok then noteDug(dir, block.name) end
     -- "Nothing to dig here" means it's already gone (another turtle got it).
     if not ok and err ~= "Nothing to dig here" then return false, err end
+    dug = block.name
     -- Let gravel/sand above us land so it gets dug on the next pass.
     if dir == "up" and (block.name:find("gravel") or block.name:find("sand") or block.name:find("powder")) then
       sleep(0.4)
@@ -1433,14 +1441,39 @@ function dock.dropJunk()
   changed()
 end
 
--- How many slots hold junk.
-function dock.junkSlots()
-  local n = 0
+-- Merge stacks of the same item split across slots. A turtle puts what it
+-- digs into the first slot with room from the selected one onward, so a new
+-- stack can start ahead of a partly full one.
+function dock.compact()
+  local selected, open = turtle.getSelectedSlot(), {}
   for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
-    if item and dock.category(item.name) == "junk" then n = n + 1 end
+    if item then
+      local into = open[item.name]
+      if into then
+        turtle.select(slot)
+        turtle.transferTo(into)
+        if turtle.getItemSpace(into) == 0 then open[item.name] = nil end
+      end
+      if turtle.getItemCount(slot) > 0 and turtle.getItemSpace(slot) > 0 and not open[item.name] then open[item.name] = slot end
+    end
   end
-  return n
+  turtle.select(selected)
+end
+
+-- Before each step: drop junk once it fills two slots, and merge split stacks.
+function dock.tidy()
+  local junk, seen, split = 0, {}, false
+  for slot = 1, 16 do
+    local item = turtle.getItemDetail(slot)
+    if item then
+      if dock.category(item.name) == "junk" then junk = junk + 1 end
+      split = split or seen[item.name] == true
+      seen[item.name] = true
+    end
+  end
+  if junk >= 2 then dock.dropJunk() end
+  if split then dock.compact() end
 end
 
 -- At the dock: sort the inventory into the three chests and top up fuel from
@@ -2641,7 +2674,7 @@ local function fleetWork()
   local function service(cut)
     -- Junk goes in batches as it builds up: at most about a stack is carried,
     -- without leaving an item behind for every block mined.
-    if a.routeMode == "southRow" and dock.junkSlots() >= 2 then dock.dropJunk() end
+    if a.routeMode == "southRow" then dock.tidy() end
     local need = continuationFuel() + (cut and 64 or 0)
     if emptySlots() > 2 and fuelLevel() >= need then return end
     tally()

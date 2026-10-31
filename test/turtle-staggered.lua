@@ -528,6 +528,52 @@ test("a turtle joining a running job takes over columns, and between them they m
   end
 end)
 
+test("a block still there after digging is skipped like a protected one, in tunnels and veins",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  -- Zinc ore a mod keeps putting back: one in a tunnel, one beside a tunnel.
+  local inTunnel={x=100,y=60,z=-57}
+  local beside={x=101,y=58,z=-54}
+  -- The second sits on top of the tunnel at (101, 57).
+  assert(tunnel(100,60) and tunnel(101,57) and not tunnel(101,58))
+  for _,w in ipairs({inTunnel,beside}) do
+    sim.blocks[lkey(w)]="create:deepslate_zinc_ore"
+    sim.sticky[lkey(w)]=true
+  end
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  assert(sim.blocks[lkey(inTunnel)] and sim.blocks[lkey(beside)])
+  local logs=table.concat(sim.prints,"\n")
+  assert(logs:find("Tunnel stops at X 100, Y 60, Z -56",1,true),logs)
+  assert(not sim.blocks[lkey({x=100,y=60,z=-54})],"skipped the reachable half of that tunnel")
+end)
+
+test("stacks of the same item split across slots are merged before the next step",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  local split=false
+  sim.afterSave=function()
+    local job=api.state().fleetJob
+    if not split and job and job.step>=5 then
+      split=true
+      sim.items[3],sim.slots[3]="minecraft:diamond",2
+      sim.items[7],sim.slots[7]="minecraft:diamond",4
+      sim.items[9],sim.slots[9]="minecraft:emerald_ore",60
+      sim.items[12],sim.slots[12]="minecraft:emerald_ore",10
+    elseif split and job and job.step==10 then
+      local diamonds,redstone={},{}
+      for slot=1,16 do
+        if sim.items[slot]=="minecraft:diamond" then diamonds[#diamonds+1]=sim.slots[slot] end
+        if sim.items[slot]=="minecraft:emerald_ore" then redstone[#redstone+1]=sim.slots[slot] end
+      end
+      assert(#diamonds==1 and diamonds[1]==6,"diamonds still split")
+      assert(#redstone==2 and redstone[1]==64 and redstone[2]==6,"emerald ore not merged into a full stack")
+    end
+  end
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  assert(split)
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==6)
+end)
+
 test("go home drops junk before leaving the mine and keeps its treasure",function()
   local api,sim,files,a=stoppedDeep()
   sim.items[2],sim.slots[2]="minecraft:cobblestone",40
