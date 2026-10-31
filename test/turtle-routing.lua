@@ -49,6 +49,17 @@ test("a blocked backward step inspects without digging a protected block", funct
   assert(not ok and why=="block" and sim.digs==0)
 end)
 
+test("Create ores can be mined while every other Create block stays protected", function()
+  local api, sim = miner()
+  api.config({updatedAt=1, protect={blocks={"create:*","!create:*_ore"},areas={}}, items={valuables={},fuel={}}, veinBlocks={"*_ore"}})
+  sim.blocks["0,0,1"]="create:deepslate_zinc_ore"
+  assert(api.step({x=0,y=0,z=1,h=0}, true), "Create ore was protected")
+  same(sim.pos,{x=0,y=0,z=1})
+  sim.blocks["0,0,2"]="create:andesite_casing"
+  local ok, why = api.step({x=0,y=0,z=2,h=0}, true)
+  assert(not ok and why=="block" and sim.blocks["0,0,2"]=="create:andesite_casing", "a Create machine block was dug")
+end)
+
 test("only fallen blocks in already visited cells can be cleared", function()
   local api, sim = miner()
   sim.blocks["0,0,-1"]="minecraft:sand"

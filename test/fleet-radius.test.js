@@ -37,7 +37,9 @@ test("each tunnel ends at the edge of the circle centered on its own original ho
 });
 
 test("staircase and assembly checks use their actual horizontal positions in the home cylinder", () => {
-  assert.match(plan({ ...SETTINGS, y: -59, radius: 125 }).error, /staircase leaves the home cylinder.*at least 126 blocks horizontally/);
+  const deep = plan({ ...SETTINGS, y: -59, radius: 125 }, READY.slice(0, 1));
+  assert.equal(deep.error, undefined, "a staircase deeper than the radius switches back");
+  assert.deepEqual(deep.assignments[0].args.stairBottom, { x: 100, y: -59, z: -55 + 124 });
   const selected = [turtle(1, 100), turtle(2, 105)];
   const result = plan({ ...SETTINGS, y: 63, radius: 5 }, selected);
   assert.equal(result.error, undefined);
@@ -70,13 +72,14 @@ test("the same fixed XZ is inside or outside the cylinder independently of its Y
   }
 });
 
-test("a small radius rejects a deep diagonal only because the staircase moves south outside the cylinder", () => {
+test("a small radius switches the staircase back instead of leaving the cylinder", () => {
   const shallow = plan({ ...SETTINGS, y: 62, radius: 5 }, READY.slice(0, 1));
   assert.equal(shallow.error, undefined);
   assert.deepEqual(shallow.assignments[0].args.stairBottom, { x: 100, y: 62, z: -50 });
-  const result = plan({ ...SETTINGS, y: 61, radius: 5 }, READY.slice(0, 1));
-  assert.match(result.error, /staircase leaves the home cylinder.*at least 6 blocks horizontally/);
-  assert.doesNotMatch(result.error, /vertical|depth|Y=/);
+  const result = plan({ ...SETTINGS, y: 51, radius: 5 }, READY.slice(0, 1));
+  assert.equal(result.error, undefined);
+  // 16 steps: south to Z -50, north to Z -55, south to Z -50, then one north.
+  assert.deepEqual(result.assignments[0].args.stairBottom, { x: 100, y: 51, z: -51 });
 });
 
 test("mining bounds and radius stay tied to the saved home despite obsolete coordinate fields", () => {

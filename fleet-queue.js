@@ -154,6 +154,7 @@ export class FleetJobQueue {
       if (job.kind === "branchMine" && !status.oreScanSupported) return `Update ${label}'s script to check every side for ore`;
       if (job.kind === "branchMine" && !status.southRowSupported) return `Update ${label}'s script for the saved south staircase`;
       if (job.kind === "branchMine" && !status.radiusSupported) return `Update ${label}'s script for the home mining radius`;
+      if (job.kind === "branchMine" && !status.staggeredSupported) return `Update ${label}'s script for staggered tunnels`;
       if (!located(status, job.kind)) return `Waiting for ${label}'s GPS position`;
       if (!idle(status)) return `Waiting for ${label} to finish its current work`;
       if (job.kind === "branchMine") {

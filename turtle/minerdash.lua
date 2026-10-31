@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.1.2"
+local VERSION = "2.2.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -132,7 +132,7 @@ local odometer = 0                  -- blocks moved, ever (to measure real trip 
 local fleet = {
   updatedAt = 0,
   refuelTo = 10000,
-  protect = { blocks = { "*chest*", "*barrel*", "*shulker_box*", "*hopper*", "create:*" }, areas = {} },
+  protect = { blocks = { "*chest*", "*barrel*", "*shulker_box*", "*hopper*", "create:*", "!create:*_ore" }, areas = {} },
   items = {
     valuables = {
       "*diamond*", "*emerald*", "*raw_*", "*_ore", "*redstone*", "*lapis*",
@@ -396,7 +396,7 @@ end
 
 -- Fleet settings & protection ---------------------------------------------------
 
-local compiled = { protect = {}, valuables = {}, fuel = {}, vein = {} }
+local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {} }
 
 -- "*" is the only wildcard; everything else matches literally.
 local function glob(pattern)
@@ -414,7 +414,15 @@ end
 
 local function compileFleet()
   local protect, items = fleet.protect or {}, fleet.items or {}
-  compiled.protect = compileList(protect.blocks)
+  -- A protected-block line starting with "!" is an exception: "create:*"
+  -- with "!create:*_ore" protects every Create block except its ores.
+  local keep, except = {}, {}
+  for _, p in ipairs(type(protect.blocks) == "table" and protect.blocks or {}) do
+    if type(p) == "string" and p:sub(1, 1) == "!" then except[#except + 1] = p:sub(2)
+    else keep[#keep + 1] = p end
+  end
+  compiled.protect = compileList(keep)
+  compiled.unprotect = compileList(except)
   compiled.valuables = compileList(items.valuables)
   compiled.fuel = compileList(items.fuel)
   compiled.vein = compileList(fleet.veinBlocks)
@@ -426,6 +434,10 @@ local function matches(name, patterns)
     if name:find(p) then return true end
   end
   return false
+end
+
+local function protectedName(name)
+  return matches(name, compiled.protect) and not matches(name, compiled.unprotect)
 end
 
 local function loadFleet()
@@ -483,7 +495,7 @@ end
 local function protection(dir, block, context)
   if block then
     local name = block.name:lower()
-    if name:find("^computercraft:") or matches(name, compiled.protect) then
+    if name:find("^computercraft:") or protectedName(name) then
       return "protected block " .. block.name
     end
   end
@@ -1470,13 +1482,23 @@ function rowRoute.withinRadius(w)
   return not miningRoute.radius or rowRoute.inCircle(w, miningRoute.home, miningRoute.radius)
 end
 
+-- World Z of staircase step `step` (0 is the home). Step n has its foot at
+-- Y 67 - n. When the radius is smaller than the depth, the stairs switch
+-- back: south to Z -55 + radius, north to Z -55, south again, and so on.
+-- The server plans the same cells (fleet.js stairZ).
+function rowRoute.stairZ(step, radius)
+  if not radius then return -55 + step end
+  local p = step % (2 * radius)
+  return -55 + (p <= radius and p or 2 * radius - p)
+end
+
 function rowRoute.position(w)
   if not miningRoute or w.x ~= miningRoute.home.x then return nil end
-  local step = w.z - miningRoute.home.z
-  if step < 0 or step ~= math.floor(step) then return nil end
-  local footY = 67 - step
-  if w.y == footY then return step, false end
-  if step > 0 and w.y == footY + 1 then return step, true end
+  local step = 67 - w.y
+  if step ~= math.floor(step) then return nil end
+  if step >= 0 and w.z == rowRoute.stairZ(step, miningRoute.radius) then return step, false end
+  step = step + 1
+  if step > 0 and w.z == rowRoute.stairZ(step, miningRoute.radius) then return step, true end
 end
 
 function rowRoute.initialCell(w)
@@ -1484,7 +1506,7 @@ function rowRoute.initialCell(w)
   local p = r and r.stair.pending
   if not r or r.phase ~= "building" or not p or not samePos(w, p.to) or not samePos(toWorld(pos), p.from) then return false end
   return p.step == r.stair.completed + 1 and p.step <= 67 - r.targetY
-    and w.x == r.home.x and w.z == -55 + p.step
+    and w.x == r.home.x and w.z == rowRoute.stairZ(p.step, r.radius)
     and w.y == 67 - p.step + (p.leg == "forward" and 1 or 0)
     and (p.leg == "forward" or p.leg == "down")
 end
@@ -1567,12 +1589,23 @@ function rowRoute.validate(a)
     or (a.band or 0) ~= 0 or (a.dir ~= "south" and a.dir ~= 2) then
     error("South-row mining requires one safe target Y and south-facing lanes", 0)
   end
-  if type(b) ~= "table" or b.x ~= h.x or b.y ~= a.y or b.z ~= -55 + 67 - a.y or a.z ~= b.z then
+  if not integer(a.radius, 1, 1024) then error("Set a mining radius from 1 to 1024 blocks", 0) end
+  local staggered = a.pattern == "staggered"
+  if type(b) ~= "table" or b.x ~= h.x or b.y ~= a.y or b.z ~= rowRoute.stairZ(67 - a.y, a.radius)
+    or a.z ~= (staggered and h.z or b.z) then
     error("The staircase bottom must match the saved home and target Y", 0)
   end
-  if not integer(a.radius, 1, 1024) then error("Set a mining radius from 1 to 1024 blocks", 0) end
   if not rowRoute.inCircle(b, h, a.radius) or not rowRoute.inCircle({ x = a.x, z = a.z }, h, a.radius) then
     error("The radius must reach the staircase bottom and assigned mining lane from the original home", 0)
+  end
+  if staggered then
+    if not integer(a.first, -3e7, 3e7) or not integer(a.last, -3e7, 3e7) or a.x ~= a.first
+      or math.abs(a.first - h.x) > a.radius or math.abs(a.last - h.x) > a.radius then
+      error("Staggered mining columns must lie inside the radius from the original home", 0)
+    end
+    if a.y > 66 or not integer(a.low, -64, a.y - 1) or (a.peak ~= nil and not integer(a.peak, -64, 320)) then
+      error("Invalid staggered mining levels", 0)
+    end
   end
 end
 
@@ -1613,25 +1646,26 @@ function rowRoute.ensure(a)
   elseif not samePos(miningRoute.home, a.routeHome) then
     error("A later job cannot replace this turtle's saved home", 0)
   end
-  if miningRoute.radius ~= a.radius then
-    if not samePos(w, miningRoute.home) then error("Return to the saved home before changing the mining radius", 0) end
-    miningRoute.radius = a.radius
-    rowRoute.save()
-  end
-  if miningRoute.targetY ~= a.y then
-    if not samePos(w, miningRoute.home) then error("Return to the saved home before changing the mining level", 0) end
-    miningRoute.targetY = a.y
-    miningRoute.bottom = { x = miningRoute.home.x, y = a.y, z = -55 + 67 - a.y }
+  if miningRoute.radius ~= a.radius or miningRoute.targetY ~= a.y then
+    if not samePos(w, miningRoute.home) then error("Return to the saved home before changing the mining radius or level", 0) end
+    -- Every radius shares the stair cells up to its first turn. Past that
+    -- they differ, so only the shared steps still count as opened.
+    local shared = math.min(miningRoute.radius or math.huge, a.radius)
+    if miningRoute.stair.completed >= shared then
+      miningRoute.stair.completed, miningRoute.stair.half = shared, false
+    end
+    miningRoute.radius, miningRoute.targetY = a.radius, a.y
+    miningRoute.bottom = { x = miningRoute.home.x, y = a.y, z = rowRoute.stairZ(67 - a.y, a.radius) }
     miningRoute.stair.complete = miningRoute.stair.completed >= 67 - a.y
     miningRoute.bottomSaved = miningRoute.stair.complete
-    miningRoute.work, miningRoute.veinPath = nil, nil
+    miningRoute.work, miningRoute.veinPath, miningRoute.columns = nil, nil, nil
     rowRoute.save("home")
   end
   rowRoute.reconcile()
 end
 
 function rowRoute.buildLeg(dir, target, leg, step)
-  faceCompass(2)
+  if dir == "forward" then faceCompass(target.z > toWorld(pos).z and 2 or 0) end
   miningRoute.stair.pending = { from = toWorld(pos), to = target, leg = leg, step = step }
   rowRoute.save("building")
   if not rowRoute.initialCell(target) then error("Invalid initial stair excavation", 0) end
@@ -1665,7 +1699,7 @@ function rowRoute.unwind()
   local index
   for i = #path, 1, -1 do if samePos(current, path[i]) then index = i break end end
   if not index then
-    if rowRoute.opened(current) then return end
+    if rowRoute.opened(current) or rowRoute.inColumns(current) then return end
     if current.y ~= r.targetY then error("No saved opened vein path back to the safe mining Y", 0) end
     return
   end
@@ -1679,6 +1713,57 @@ function rowRoute.unwind()
   r.unwindIndex = nil
 end
 
+-- A staggered job's turtle works below the safe mining Y, in tunnels off
+-- one shaft per column (see KINDS.staggered). Its columns are saved on the
+-- route so a cleared job can still find its way out.
+function rowRoute.inColumns(w)
+  local c = miningRoute and miningRoute.columns
+  return c ~= nil and w.x >= c.x1 and w.x <= c.x2 and w.y >= c.low and w.y < miningRoute.targetY
+end
+
+-- Back along its tunnel to the shaft, then straight up the shaft to the safe
+-- mining Y. Tunnels are mined outward from the shaft, so every cell on this
+-- way is already open; only fallen sand or gravel is cleared.
+function rowRoute.leaveColumns()
+  local c, w = miningRoute.columns, toWorld(pos)
+  if not rowRoute.inColumns(w) then return end
+  rowRoute.save("toShaft")
+  setDetail("Returning to the mining shaft")
+  while w.z ~= c.z do
+    rowRoute.walkStep({ x = w.x, y = w.y, z = w.z + (c.z > w.z and 1 or -1) }, true)
+    w = toWorld(pos)
+  end
+  while w.y < miningRoute.targetY do
+    rowRoute.walkStep({ x = w.x, y = w.y + 1, z = w.z }, true)
+    w = toWorld(pos)
+  end
+end
+
+-- At the safe mining Y, a staggered job's corridor runs along its shaft row
+-- and the stair bottom joins it straight along the home column. Following
+-- those two legs keeps travel in the blocks already dug.
+function rowRoute.corridor(target)
+  local c, h, w = miningRoute.columns, miningRoute.home, toWorld(pos)
+  if c then
+    -- Onto the corridor row, unless both ends are on the home column.
+    if w.z ~= c.z and not (w.x == h.x and target.x == h.x) then
+      rowRoute.flatMine({ x = w.x, y = target.y, z = c.z })
+    end
+    -- Along it to the target's column, or to the home column for the stairs.
+    w = toWorld(pos)
+    local x = target.z == c.z and target.x or h.x
+    if w.z == c.z and w.x ~= x then rowRoute.flatMine({ x = x, y = target.y, z = c.z }) end
+  end
+  rowRoute.flatMine(target)
+end
+
+-- How far it walks to its stair bottom, for fuel estimates.
+function rowRoute.toBottom(w)
+  local c, b = miningRoute.columns, miningRoute.bottom
+  if not c or not (rowRoute.inColumns(w) or (w.y == b.y and w.z == c.z)) then return distance(w, b) end
+  return math.abs(w.z - c.z) + (b.y - w.y) + math.abs(w.x - b.x) + math.abs(c.z - b.z)
+end
+
 function rowRoute.exit(intent)
   if not miningRoute then error("No saved south-row route. Start a new row job first.", 0) end
   local deadline = os.clock() + 10
@@ -1688,6 +1773,7 @@ function rowRoute.exit(intent)
   setDetail("Returning to the saved staircase")
   rowRoute.reconcile()
   rowRoute.unwind()
+  rowRoute.leaveColumns()
   local w = toWorld(pos)
   if w.y == 67 and (rowRoute.surfacePhase() or rowRoute.opened(w)) then
     setDetail("Returning to the saved home")
@@ -1697,16 +1783,16 @@ function rowRoute.exit(intent)
     local step, upper = rowRoute.position(w)
     if not step or not rowRoute.opened(w) then
       rowRoute.save("toBottom")
-      rowRoute.flatMine(miningRoute.bottom)
+      rowRoute.corridor(miningRoute.bottom)
       step, upper = rowRoute.position(toWorld(pos))
     end
     rowRoute.save("climbing")
     setDetail("Climbing the saved staircase")
     while step > 0 do
       if not upper then
-        rowRoute.walkStep({ x = miningRoute.home.x, y = 68 - step, z = -55 + step })
+        rowRoute.walkStep({ x = miningRoute.home.x, y = 68 - step, z = rowRoute.stairZ(step, miningRoute.radius) })
       end
-      rowRoute.walkStep({ x = miningRoute.home.x, y = 68 - step, z = -56 + step })
+      rowRoute.walkStep({ x = miningRoute.home.x, y = 68 - step, z = rowRoute.stairZ(step - 1, miningRoute.radius) })
       step, upper = step - 1, false
     end
   end
@@ -1718,9 +1804,13 @@ function rowRoute.enter(a, service)
   setDetail("Heading to the mining level")
   rowRoute.ensure(a)
   rowRoute.unwind()
+  -- Out of any earlier job's columns before taking on this job's.
+  rowRoute.leaveColumns()
+  miningRoute.columns = a.pattern == "staggered"
+    and { x1 = math.min(a.first, a.last), x2 = math.max(a.first, a.last), z = a.z, low = a.low } or nil
   if not rowRoute.surfacePhase() and toWorld(pos).y == a.y and not rowRoute.position(toWorld(pos)) then
     rowRoute.save("toWork")
-    rowRoute.flatMine({ x = a.x, y = a.y, z = a.z })
+    rowRoute.corridor({ x = a.x, y = a.y, z = a.z })
     rowRoute.save("work")
     return
   end
@@ -1746,7 +1836,7 @@ function rowRoute.enter(a, service)
       else rowRoute.buildLeg("down", target, "down", step) end
     else
       local nextStep = step + 1
-      local target = { x = w.x, y = w.y, z = w.z + 1 }
+      local target = { x = w.x, y = w.y, z = rowRoute.stairZ(nextStep, miningRoute.radius) }
       if nextStep <= miningRoute.stair.completed or (nextStep == miningRoute.stair.completed + 1 and miningRoute.stair.half) then
         rowRoute.save("descending"); rowRoute.walkStep(target)
       else rowRoute.buildLeg("forward", target, "forward", nextStep) end
@@ -1754,7 +1844,7 @@ function rowRoute.enter(a, service)
   end
   miningRoute.stair.complete, miningRoute.bottomSaved = true, true
   rowRoute.save("toWork")
-  rowRoute.flatMine({ x = a.x, y = a.y, z = a.z })
+  rowRoute.corridor({ x = a.x, y = a.y, z = a.z })
   rowRoute.save("work")
 end
 
@@ -2049,6 +2139,154 @@ KINDS.branchMine = {
   exit = function() rowRoute.exit() end,
 }
 
+-- Staggered mining runs 1x1 north-south tunnels through the whole cylinder.
+-- On every level there is a tunnel in one of every five columns, shifted
+-- two columns east for each level down: column x has a tunnel at level y
+-- when (x + 2y) % 5 == 0. Each tunnel block is checked up, down, east and
+-- west, and every block between tunnels touches exactly one tunnel, so no
+-- exposed ore is missed while only a fifth of the rock is dug.
+--
+-- A turtle takes a run of columns, from a.first to a.last. Each column's
+-- tunnels cross a shaft at Z -55 (a.z), the circle's widest row, and run
+-- out north and south to the circle's edge. The shafts hang off a corridor
+-- along Z -55 at the access level a.y, two above the top tunnel, where the
+-- staircase ends. Tunnels are mined outward from the shaft, so the way
+-- back is always open.
+--
+-- Levels are mined in passes of five, starting with the band around a.peak,
+-- where the ore is most common, and moving outward. A pass has one tunnel
+-- in each column, so it sweeps the run, back and forth on alternate passes.
+-- Each shaft is always dug in one piece from the corridor down, so once a
+-- pass has reached every column, later passes cross between shafts at depth.
+local staggeredPlans = setmetatable({}, { __mode = "k" })
+
+local function staggeredHalf(a, x)
+  return math.floor(math.sqrt(a.radius ^ 2 - (x - a.routeHome.x) ^ 2))
+end
+
+local function staggeredPlan(a)
+  local plan = staggeredPlans[a]
+  if plan then return plan end
+  plan = { total = 0 }
+  local top, low = a.y - 1, a.low
+  local peak = math.max(low, math.min(top, tonumber(a.peak) or top))
+  -- Bands of five levels, the peak's band whole where the levels allow.
+  local base = math.max(low, math.min(peak - 2, top - 4))
+  local bands, k = {}, 0
+  while base + 5 * (k - 1) + 4 >= low do k = k - 1 end
+  while base + 5 * k <= top do bands[#bands + 1] = k; k = k + 1 end
+  table.sort(bands, function(p, q) return math.abs(p) < math.abs(q) or (math.abs(p) == math.abs(q) and p > q) end)
+  local cols, deepest = {}, {}
+  for x = a.first, a.last, a.last >= a.first and 1 or -1 do
+    cols[#cols + 1], deepest[x] = x, a.y
+  end
+  for pass, band in ipairs(bands) do
+    -- Every shaft is dug at least this far down when the pass starts.
+    local floor = -math.huge
+    for _, x in ipairs(cols) do floor = math.max(floor, deepest[x]) end
+    local hi, lo = math.min(top, base + 5 * band + 4), math.max(low, base + 5 * band)
+    for n = 1, #cols do
+      local x = cols[pass % 2 == 1 and n or #cols + 1 - n]
+      for y = hi, lo, -1 do
+        if (x + 2 * y) % 5 == 0 then
+          local h = staggeredHalf(a, x)
+          plan[#plan + 1] = { x = x, y = y, h = h, floor = floor, pass = pass, start = plan.total }
+          plan.total = plan.total + 2 * h + 1
+          deepest[x] = math.min(deepest[x], y)
+        end
+      end
+    end
+  end
+  plan.passes = #bands
+  staggeredPlans[a] = plan
+  return plan
+end
+
+-- Step i: a tunnel's shaft crossing, then north to the edge, then south
+-- from the shaft to the edge.
+local function staggeredCell(a, i)
+  local plan = staggeredPlan(a)
+  i = math.max(0, math.min(i, plan.total - 1))
+  local lo, hi = 1, #plan
+  while lo < hi do
+    local mid = math.floor((lo + hi + 1) / 2)
+    if plan[mid].start <= i then lo = mid else hi = mid - 1 end
+  end
+  local t = plan[lo]
+  local j = i - t.start
+  return {
+    x = t.x, y = t.y, z = j <= t.h and a.z - j or a.z + j - t.h,
+    floor = t.floor, pass = t.pass, passes = plan.passes,
+  }
+end
+
+KINDS.staggered = {
+  total = function(a) return staggeredPlan(a).total end,
+  entry = function(a) return a.routeHome end,
+  cell = staggeredCell,
+  -- On the corridor, a shaft or a tunnel of this turtle's columns.
+  inside = function(a, w)
+    if w.x < math.min(a.first, a.last) or w.x > math.max(a.first, a.last) or w.y > a.y or w.y < a.low then return false end
+    if w.z == a.z then return true end
+    return w.y < a.y and (w.x + 2 * w.y) % 5 == 0 and math.abs(w.z - a.z) <= staggeredHalf(a, w.x)
+  end,
+  mayDig = function(a, w)
+    return rowRoute.inCircle(w, a.routeHome, a.radius) and type(a.veinBounds) == "table" and inBox(w, a.veinBounds)
+  end,
+  -- Back along the tunnel to its shaft. For another column, up its own shaft
+  -- to a level every shaft between is dug to (the corridor at first) and
+  -- across. Then up or down the target shaft, deepening only that one, and
+  -- out along the tunnel.
+  walk = function(a, t)
+    local w = toWorld(pos)
+    if w.x ~= t.x or w.y ~= t.y then
+      if w.z ~= a.z then goWorld({ z = a.z }, "z") end
+      if w.x ~= t.x then
+        local across = math.min(a.y, math.max(w.y, t.y, t.floor or a.y))
+        goWorld({ y = across }, "y")
+        if across == a.y then rowRoute.flatMine({ x = t.x, y = a.y, z = a.z })
+        else goWorld({ x = t.x }, "x") end
+      end
+      goWorld({ y = t.y }, "y")
+    end
+    goWorld({ z = t.z }, "z")
+  end,
+  -- Up, down, east and west. North and south are the tunnel itself.
+  work = function(a, i, veins)
+    local root = here()
+    local function finish()
+      if not samePos(pos, root) then stepBack(root) end
+      face(root.heading)
+      return not veins.cut
+    end
+    if veins.resume then
+      resumeVein(veins, veins.resume)
+      if veins.cut then return finish() end
+    end
+    mineVein("up", veins, 0)
+    mineVein("down", veins, 0)
+    local walls = { (1 - calib.f0) % 4, (3 - calib.f0) % 4 }
+    if turnsTo(walls[2]) < turnsTo(walls[1]) then walls[1], walls[2] = walls[2], walls[1] end
+    for _, h in ipairs(walls) do
+      if veins.cut then break end
+      face(h)
+      mineVein("forward", veins, 0)
+    end
+    return finish()
+  end,
+  detail = function(a, i)
+    local c = staggeredCell(a, i)
+    return ("Pass %d of %d, tunnel at X %d, Y %d, Z %d"):format(c.pass, c.passes, c.x, c.y, c.z)
+  end,
+  enter = function(a, service) rowRoute.enter(a, service) end,
+  exit = function() rowRoute.exit() end,
+}
+
+local function kindOf(job)
+  if job.kind == "branchMine" and job.args and job.args.pattern == "staggered" then return KINDS.staggered end
+  return KINDS[job.kind]
+end
+
 -- The quarry's columns and top height in local coordinates.
 local function quarryColumns(a)
   local p, q = fromWorld({ x = a.x1, y = a.yTop, z = a.z1 }), fromWorld({ x = a.x2, y = a.yTop, z = a.z2 })
@@ -2110,7 +2348,7 @@ KINDS.areaQuarry = {
 -- with a margin.
 local function roundTrip(k, a, extra)
   if a.routeMode == "southRow" and miningRoute then
-    return 2 * (distance(toWorld(pos), miningRoute.bottom) + 2 * (67 - a.y)
+    return 2 * (rowRoute.toBottom(toWorld(pos)) + 2 * (67 - a.y)
       + (extra or 0) + depotCost(miningRoute.home, fleetJob.route)) + 100
   end
   local e = k.entry(a)
@@ -2146,7 +2384,7 @@ local function leaveWork(k, a)
 end
 
 local function fleetWork()
-  local k = KINDS[fleetJob.kind]
+  local k = kindOf(fleetJob)
   if not k then error("Unknown fleet job " .. tostring(fleetJob.kind), 0) end
   if not fleet.depot then error("Set up the depot on the dashboard first", 0) end
   local a = fleetJob.args
@@ -2296,10 +2534,15 @@ function jobs.fleetJob(a)
       kind = a.kind, x = clampInt(a.x, -3e7, 3e7, 0), z = clampInt(a.z, -3e7, 3e7, 0),
       y = a.y, dir = 2,
       radius = a.radius,
-      length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (67 - a.y) + 1, scan = true,
+      length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (a.z + 55) + 1, scan = true,
       spacing = 2, band = 0,
       goal = 0, goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
     }
+    if a.pattern == "staggered" then
+      args.pattern, args.first, args.last, args.low, args.peak, args.spacing = "staggered", a.first, a.last, a.low, a.peak, 5
+      args.yTop, args.yBottom = tonumber(a.yTop), tonumber(a.yBottom)
+      args.length = nil
+    end
     args.routeMode, args.access, args.entryY = "southRow", "southStairs", 67
     args.routeHome = { x = a.routeHome.x, y = 67, z = -55, facing = "south" }
     args.stairBottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }
@@ -2366,7 +2609,7 @@ function jobs.goHome()
     if emptySlots() < 16 then unloadAt(trip, false) end
   end
   if fleetJob then
-    local k, a = KINDS[fleetJob.kind], fleetJob.args
+    local k, a = kindOf(fleetJob), fleetJob.args
     if fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning home" } end
     fleetJob = nil
     saveState()
@@ -2591,7 +2834,7 @@ local function status()
   end
   local fj
   if fleetJob then
-    local k = KINDS[fleetJob.kind]
+    local k = kindOf(fleetJob)
     fj = {
       kind = fleetJob.kind, step = fleetJob.step, total = k and k.total(fleetJob.args),
       paused = fleetJob.paused, failed = fleetJob.failed, args = fleetJob.args, found = fleetJob.found,
@@ -2628,6 +2871,7 @@ local function status()
     forceHomeSupported = true,
     southRowSupported = true,
     radiusSupported = true,
+    staggeredSupported = true,
     miningRoute = miningRoute and {
       home = miningRoute.home, bottom = miningRoute.bottom, targetY = miningRoute.targetY,
       radius = miningRoute.radius,

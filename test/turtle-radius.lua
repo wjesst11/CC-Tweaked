@@ -139,14 +139,16 @@ test("flat mining cannot walk or excavate outside the circle to bypass a protect
   end
 end)
 
-test("initial descent outside the circle is rejected before the protected-area exception or air travel",function()
+test("a straight stair bottom outside the circle is rejected before the protected-area exception or air travel",function()
   for _,useStone in ipairs({false,true}) do
+    -- Deeper than the radius, the stairs switch back; the bottom of a
+    -- straight staircase would be outside the circle.
     local api,sim,files,a,f=rowMiner(64,2)
     f.protect.areas={{name="Initial area",x1=90,x2=110,y1=60,y2=70,z1=-60,z2=0}}
     api.config(f)
     if useStone then sim.blocks["0,0,1"]="minecraft:stone" end
     local ok,why=pcall(api.row.enter,a)
-    assert(not ok and tostring(why):find("radius"),"accepted an unreachable staircase")
+    assert(not ok and tostring(why):find("staircase bottom"),"accepted an unreachable staircase")
     assert(sim.moves==0 and sim.digs==0)
   end
   local api,sim,files,a=rowMiner(66,2,97)

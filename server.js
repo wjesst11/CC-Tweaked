@@ -359,6 +359,7 @@ function readyTurtles(ids, kind) {
     else if (kind === "branchMine" && !s.oreScanSupported) skipped.push(`${nameOf(t)} needs the latest script for complete side checks`);
     else if (kind === "branchMine" && !s.southRowSupported) skipped.push(`${nameOf(t)} needs script 2.0.0 for the saved south staircase`);
     else if (kind === "branchMine" && !s.radiusSupported) skipped.push(`${nameOf(t)} needs script 2.1.0 for the home mining radius`);
+    else if (kind === "branchMine" && !s.staggeredSupported) skipped.push(`${nameOf(t)} needs script 2.2.0 for staggered tunnels`);
     else if (kind === "branchMine" && !atRowHome(s)) skipped.push(`${nameOf(t)} must be at its saved home on Y=67, Z=-55`);
     else if (s.job || s.fleetJob || s.miningRoute?.intent || s.queued > 0 || t.pendingFleetUntil > Date.now() || queueOwns(t.id)) skipped.push(`${nameOf(t)} is busy or has saved work`);
     else ready.push(plannerTurtle(t.id));

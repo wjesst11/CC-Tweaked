@@ -379,20 +379,24 @@
                     <div class="fields">
                       <label class="field"><span>Ore</span>
                         <select name="preset">
-                          <option value="-59">Diamond (Y -59)</option>
-                          <option value="-58">Redstone (Y -58)</option>
-                          <option value="-16">Gold (Y -16)</option>
-                          <option value="0">Lapis (Y 0)</option>
-                          <option value="16">Iron (Y 16)</option>
-                          <option value="48">Copper (Y 48)</option>
-                          <option value="15">Ancient debris (Nether Y 15)</option>
-                          <option value="">Custom level</option>
+                          <option value="16:-58:-58">Diamond (Y -64 to 16, most at -64)</option>
+                          <option value="15:-58:-58">Redstone (Y -64 to 15, most at -64)</option>
+                          <option value="32:-58:-16">Gold (Y -64 to 32, most at -16)</option>
+                          <option value="64:-58:0">Lapis (Y -64 to 64, most at 0)</option>
+                          <option value="64:-58:16">Iron (Y -64 to 72, most at 16)</option>
+                          <option value="64:-16:48">Copper (Y -16 to 112, most at 48)</option>
+                          <option value="64:0:64">Coal (Y 0 to 320, most at 96)</option>
+                          <option value="64:-16:64">Emerald (mountains, Y -16 to 320, most at 232)</option>
+                          <option value="64:8:16">Ancient debris (Nether, Y 8 to 119, most at 16)</option>
+                          <option value="">Custom levels</option>
                         </select>
                       </label>
-                      <label class="field"><span>Target level (Y)</span><input name="y" type="number" min="-64" max="67" value="-59" required></label>
+                      <label class="field"><span>Top level (Y)</span><input name="levelTop" type="number" min="-58" max="64" value="16" required></label>
+                      <label class="field"><span>Bottom level (Y)</span><input name="levelBottom" type="number" min="-58" max="64" value="-58" required></label>
+                      <label class="field"><span>Start at (Y)</span><input name="levelPeak" type="number" min="-58" max="64" value="-58"></label>
                       <label class="field"><span>Radius (blocks)</span><input name="radius" type="number" min="1" max="1024" step="1" value="256" required></label>
                     </div>
-                    <p class="hint flush">Radius around each saved home X/Z, at every height.</p>
+                    <p class="hint flush">Staggered 1×1 tunnels run through each turtle's whole circle, so every block from the top level to the bottom level is checked for ore. Turtles start at the <strong>Start at</strong> level and work outward, so the richest levels are done first; leave it empty to start at the top. Presets cover the ore's whole range in Java 1.21.1, cut to Y -58 (bedrock is below) and Y 64 (just under the home row). The radius is measured from each saved home's X/Z.</p>
                   </div>
                   <div data-kind="areaQuarry" hidden>
                     <div class="corner-row">
@@ -522,7 +526,7 @@
             <section class="card">
               <div class="card-head"><h2>Protection</h2></div>
               <label class="field">
-                <span>Never dig these blocks (one per line, * matches anything)</span>
+                <span>Never dig these blocks (one per line, * matches anything, a line starting with ! is an exception)</span>
                 <textarea data-field="protect.blocks" rows="6" spellcheck="false"></textarea>
               </label>
               <p class="hint flush">Turtles, computers and other ComputerCraft blocks are always protected.</p>

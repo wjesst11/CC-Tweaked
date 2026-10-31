@@ -13,8 +13,10 @@ export const DEFAULT_FLEET = {
   depot: null, // { x, y, z, junk, valuables, fuel } with each chest's side of the dock
   refuelTo: 10000,
   protect: {
-    blocks: ["*chest*", "*barrel*", "*shulker_box*", "*hopper*", "create:*"],
+    // A leading "!" is an exception: Create's ores are fair game, nothing else of Create.
+    blocks: ["*chest*", "*barrel*", "*shulker_box*", "*hopper*", "create:*", "!create:*_ore"],
     areas: [], // { name, x1, y1, z1, x2, y2, z2 }
+    oreExceptions: true,
   },
   items: {
     valuables: [
@@ -65,11 +67,20 @@ export function sanitizeFleet(input = {}) {
       x2: coord(a?.x2), y2: height(a?.y2), z2: coord(a?.z2),
     }))
     .filter((a) => [a.x1, a.y1, a.z1, a.x2, a.y2, a.z2].every((n) => n !== null));
+  let blocks = patterns(input.protect?.blocks, DEFAULT_FLEET.protect.blocks);
+  let updatedAt = Number(input.updatedAt) || 0;
+  // Settings saved before exceptions existed protected Create's ores with
+  // "create:*". Add the ore exception once; the list is the user's after that.
+  // The newer timestamp makes turtles adopt the changed copy.
+  if (input.protect?.oreExceptions !== true && blocks.includes("create:*") && !blocks.includes("!create:*_ore")) {
+    blocks = [...blocks, "!create:*_ore"].slice(0, 60);
+    if (updatedAt) updatedAt += 1;
+  }
   return {
-    updatedAt: Number(input.updatedAt) || 0,
+    updatedAt,
     depot,
     refuelTo: int(input.refuelTo, 100, 1_000_000) ?? DEFAULT_FLEET.refuelTo,
-    protect: { blocks: patterns(input.protect?.blocks, DEFAULT_FLEET.protect.blocks), areas },
+    protect: { blocks, areas, oreExceptions: true },
     items: {
       valuables: patterns(input.items?.valuables, DEFAULT_FLEET.items.valuables),
       fuel: patterns(input.items?.fuel, DEFAULT_FLEET.items.fuel),
@@ -95,6 +106,25 @@ function intersects(a, b) {
 // A home cylinder extends through every Y. Its radius measures only world XZ.
 const insideCylinder = (cylinder, point) =>
   (point.x - cylinder.x) ** 2 + (point.z - cylinder.z) ** 2 <= cylinder.radius ** 2;
+
+// World Z of staircase step `step` (step n has its foot at Y 67 - n). When
+// the radius is smaller than the depth the stairs switch back: south to
+// Z -55 + radius, north to Z -55, and so on. Same as the turtle's stairZ.
+export function stairZ(step, radius) {
+  const p = step % (2 * radius);
+  return -55 + (p <= radius ? p : 2 * radius - p);
+}
+
+// Staggered tunnels: column x has a tunnel at level y when (x + 2y) % 5 is 0.
+// Every block between tunnels touches exactly one of them on its east, west,
+// top or bottom face.
+export const staggeredTunnel = (x, y) => (((x + 2 * y) % 5) + 5) % 5 === 0;
+
+// The lowest level the pattern checks fully. Its tunnels one below stay out
+// of the bedrock that starts at Y -60.
+export const STAGGERED_LOWEST = -58;
+// The highest: its access corridor (two above the top tunnel) stays below Y 67.
+export const STAGGERED_HIGHEST = 64;
 
 // Work bounds are conservative boxes around a lane. Only integer block cells
 // inside that turtle's original-home cylinder can actually be mined.
@@ -123,6 +153,95 @@ export function validateFleet(fleet) {
   return null;
 }
 
+// Forward, then down, from this turtle's own saved surface home. The surface
+// home itself is never an access block to be dug out.
+function stairAccess(home, y, radius) {
+  return Array.from({ length: 67 - y }, (_, index) => {
+    const step = index + 1, py = 67 - step, pz = stairZ(step, radius);
+    return box(home.x, py, pz, home.x, py + 1, pz);
+  });
+}
+
+// Staggered tunnels through every turtle's cylinder from Y top down to Y
+// bottom, split into runs of whole columns, one run per turtle. A column's
+// tunnels cross its shaft at Z -55 and run to the circle's edge both ways;
+// the shafts hang off a corridor along Z -55 at the access level y, two
+// above the top tunnel, where each staircase ends. Every block from the top
+// to the bottom level is checked: the tunnels run one level beyond each.
+function planStaggered(params, ready, radius) {
+  const yTop = Number(params.yTop), yBottom = Number(params.yBottom);
+  if (params.yTop === null || params.yBottom === null || !Number.isInteger(yTop) || !Number.isInteger(yBottom) || yBottom > yTop) {
+    return { error: "Choose a top and a bottom level, with the bottom at or below the top." };
+  }
+  if (yBottom < STAGGERED_LOWEST || yTop > STAGGERED_HIGHEST) {
+    return { error: `Choose levels from Y ${STAGGERED_LOWEST} to Y ${STAGGERED_HIGHEST}; deeper tunnels would run into bedrock.` };
+  }
+  const y = yTop + 2, low = yBottom - 1;
+  // Where the ore is most common: tunnels start there and work outward.
+  // Without one, they start at the top.
+  const wanted = params.peak ?? null;
+  if (wanted !== null && !Number.isInteger(Number(wanted))) return { error: "Choose a whole-number level to start at." };
+  const peak = wanted === null ? y - 1 : Math.max(low, Math.min(y - 1, Number(wanted)));
+  const sorted = [...ready].sort((a, b) => a.home.x - b.home.x);
+  // Every column inside some turtle's circle, weighted by what is dug there.
+  const columns = [];
+  for (let x = sorted[0].home.x - radius; x <= sorted.at(-1).home.x + radius; x++) {
+    const near = Math.min(...sorted.map(({ home }) => Math.abs(x - home.x)));
+    if (near > radius) continue;
+    let tunnels = 0, lowest = y;
+    for (let level = y - 1; level >= low; level--) {
+      if (staggeredTunnel(x, level)) [tunnels, lowest] = [tunnels + 1, level];
+    }
+    const half = Math.floor(Math.sqrt(radius ** 2 - near ** 2));
+    columns.push({ x, weight: tunnels ? tunnels * (2 * half + 1) + (y - lowest) : 0 });
+  }
+  // West to east, each turtle takes about its share. A column only one
+  // turtle can reach always goes to it.
+  const total = columns.reduce((sum, c) => sum + c.weight, 0);
+  let next = 0, done = 0;
+  const runs = sorted.map((turtle, k) => {
+    const after = sorted[k + 1], run = [];
+    while (next < columns.length && Math.abs(columns[next].x - turtle.home.x) <= radius) {
+      const c = columns[next];
+      const mustTake = !after || c.x < after.home.x - radius;
+      if (!mustTake && run.length && done + c.weight / 2 > (total * (k + 1)) / sorted.length) break;
+      run.push(c);
+      done += c.weight;
+      next++;
+    }
+    return run;
+  });
+  const zb = stairZ(67 - y, radius);
+  const jobs = [], selected = [];
+  for (const [k, turtle] of sorted.entries()) {
+    const run = runs[k];
+    if (!run.some((c) => c.weight > 0)) continue;
+    const home = turtle.home, west = run[0].x, east = run.at(-1).x;
+    // From the end nearer its stairs, sweeping to the other.
+    const [first, last] = Math.abs(west - home.x) <= Math.abs(east - home.x) ? [west, east] : [east, west];
+    // Ore checks reach the next turtle's nearest column, the level below the
+    // lowest tunnel and the corridor above the top one.
+    const volume = box(west - 1, low - 1, -55 - radius - 1, east + 1, y, -55 + radius + 1);
+    jobs.push({
+      args: {
+        kind: "branchMine", pattern: "staggered", x: first, z: -55, y, dir: "south", radius, first, last, low, peak, yTop, yBottom,
+        scan: true, spacing: 5, band: 0, goal: 0, goalItem: "valuables",
+        routeMode: "southRow", routeHome: { ...home }, stairBottom: { x: home.x, y, z: zb }, access: "southStairs", entryY: 67,
+        coverage: "allSides", veinBounds: volume,
+      },
+      volume,
+      circle: { x: home.x, z: home.z, radius },
+      // From the stair bottom along the home column to the corridor, and
+      // along the corridor to the far end of its columns.
+      assembly: [box(home.x, y, zb, home.x, y, -55), box(Math.min(home.x, west), y, -55, Math.max(home.x, east), y, -55)],
+      access: stairAccess(home, y, radius),
+    });
+    selected.push(turtle);
+  }
+  if (!jobs.length) return { error: "No tunnels fall inside these levels and radius. Widen the levels or the radius." };
+  return { jobs, selected };
+}
+
 // Splits a fleet job between the ready turtles and checks it can't dig
 // anywhere it shouldn't. For level jobs `ready` is [{ id, name, home }], with
 // a confirmed, south-facing home in the surface row; `homes` is [{ name, home }]
@@ -139,10 +258,6 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
       return { error: "This level job uses an old route layout. Create a new south-row level job." };
     }
     if (fleet.depot.y !== 67) return { error: "The shared depot must be at Y=67 for south-row mining." };
-    const y = Number(params.y);
-    if (params.y === null || !Number.isInteger(y) || y < -64 || y > 67) {
-      return { error: "Check the tunnel settings." };
-    }
     const radius = params.radius;
     if (!Number.isInteger(radius) || radius < 1 || radius > 1024) {
       return { error: "Choose a mining radius from 1 to 1024 whole blocks, measured horizontally from each turtle's original home." };
@@ -157,63 +272,69 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     if (new Set(ready.map(({ home }) => home.x)).size !== ready.length) {
       return { error: "Each turtle needs its own X position in the home row." };
     }
-    selected = [...ready].sort((a, b) => b.home.x - a.home.x);
-    const x = selected[0].home.x, z = -55 + 67 - y;
-    const spacing = 2, band = 0, goal = 0, goalItem = "valuables", scan = true;
-    for (const [k, turtle] of selected.entries()) {
-      const home = turtle.home, cylinder = { x: home.x, z: home.z, radius };
-      const bottom = { x: home.x, z }, lane = { x: x - k * spacing, z };
-      if (!insideCylinder(cylinder, bottom)) {
-        const needed = Math.ceil(Math.hypot(bottom.x - home.x, bottom.z - home.z));
-        return { error: `${turtle.name || `Turtle ${turtle.id}`}'s staircase leaves the home cylinder; it needs at least ${needed} blocks horizontally.` };
+    if (params.pattern === "staggered") {
+      const planned = planStaggered(params, ready, radius);
+      if (planned.error) return planned;
+      ({ jobs, selected } = planned);
+    } else {
+      // Jobs queued before staggered tunnels: parallel lanes on one level.
+      const y = Number(params.y);
+      if (params.y === null || !Number.isInteger(y) || y < -64 || y > 67) {
+        return { error: "Check the tunnel settings." };
       }
-      if (!insideCylinder(cylinder, lane)) {
-        const needed = Math.ceil(Math.hypot(lane.x - home.x, lane.z - home.z));
-        return { error: `${turtle.name || `Turtle ${turtle.id}`}'s assigned lane starts outside its home cylinder. It needs at least ${needed} blocks horizontally; increase the radius or select fewer turtles.` };
+      selected = [...ready].sort((a, b) => b.home.x - a.home.x);
+      const x = selected[0].home.x, z = stairZ(67 - y, radius);
+      const spacing = 2, band = 0, goal = 0, goalItem = "valuables", scan = true;
+      for (const [k, turtle] of selected.entries()) {
+        const home = turtle.home, cylinder = { x: home.x, z: home.z, radius };
+        const bottom = { x: home.x, z }, lane = { x: x - k * spacing, z };
+        if (!insideCylinder(cylinder, bottom)) {
+          const needed = Math.ceil(Math.hypot(bottom.x - home.x, bottom.z - home.z));
+          return { error: `${turtle.name || `Turtle ${turtle.id}`}'s staircase leaves the home cylinder; it needs at least ${needed} blocks horizontally.` };
+        }
+        if (!insideCylinder(cylinder, lane)) {
+          const needed = Math.ceil(Math.hypot(lane.x - home.x, lane.z - home.z));
+          return { error: `${turtle.name || `Turtle ${turtle.id}`}'s assigned lane starts outside its home cylinder. It needs at least ${needed} blocks horizontally; increase the radius or select fewer turtles.` };
+        }
       }
+      const dir = COMPASS.indexOf("south"), entryY = 67;
+      const right = (dir + 1) % 4;
+      // Automatic lanes have one shared wall. Their ore-check bounds include
+      // every exposed side, and the circle clips the final reachable blocks.
+      const [left, rightSide] = [Math.floor((spacing - 1) / 2), Math.ceil((spacing - 1) / 2)];
+      const [y1, y2] = [Math.max(-64, y - band), Math.min(319, y + 1 + band)];
+      jobs = selected.map((turtle, k) => {
+        const sx = x + k * spacing * CX[right];
+        const sz = z + k * spacing * CZ[right];
+        const maxSouth = Math.floor(Math.sqrt(radius ** 2 - (sx - turtle.home.x) ** 2));
+        const length = turtle.home.z + maxSouth - sz + 1;
+        const ex = sx + (length - 1) * CX[dir];
+        const ez = sz + (length - 1) * CZ[dir];
+        // Shared walls have a single owner. The outer lanes also own their
+        // exposed outside wall, even with the one-block gap of spacing 2.
+        const sliceLeft = scan && k === 0 ? Math.max(1, left) : left;
+        const sliceRight = scan && k === ready.length - 1 ? Math.max(1, rightSide) : rightSide;
+        const halo = scan ? 1 : 0;
+        const volume = box(
+          sx - halo * CX[dir] - sliceLeft * CX[right], Math.max(-64, y1 - halo), sz - halo * CZ[dir] - sliceLeft * CZ[right],
+          ex + halo * CX[dir] + sliceRight * CX[right], Math.min(319, y2 + halo), ez + halo * CZ[dir] + sliceRight * CZ[right],
+        );
+        return {
+          args: {
+            kind, x: sx, z: sz, y, dir: COMPASS[dir], radius, length, scan, spacing, band, goal, goalItem,
+            routeMode: "southRow", routeHome: { ...turtle.home },
+            stairBottom: { x: turtle.home.x, y, z }, access: "southStairs", entryY,
+            ...(scan ? { coverage: "allSides", veinBounds: volume } : {}),
+          },
+          volume,
+          circle: { x: turtle.home.x, z: turtle.home.z, radius },
+          // Assembly and later returns run across the bottom level. Only the
+          // initial descent may cross protected areas; these corridors may not.
+          assembly: box(turtle.home.x, y, z, sx, y + 1, z),
+          access: stairAccess(turtle.home, y, radius),
+        };
+      });
     }
-    const dir = COMPASS.indexOf("south"), entryY = 67;
-    const right = (dir + 1) % 4;
-    // Automatic lanes have one shared wall. Their ore-check bounds include
-    // every exposed side, and the circle clips the final reachable blocks.
-    const [left, rightSide] = [Math.floor((spacing - 1) / 2), Math.ceil((spacing - 1) / 2)];
-    const [y1, y2] = [Math.max(-64, y - band), Math.min(319, y + 1 + band)];
-    jobs = selected.map((turtle, k) => {
-      const sx = x + k * spacing * CX[right];
-      const sz = z + k * spacing * CZ[right];
-      const maxSouth = Math.floor(Math.sqrt(radius ** 2 - (sx - turtle.home.x) ** 2));
-      const length = turtle.home.z + maxSouth - sz + 1;
-      const ex = sx + (length - 1) * CX[dir];
-      const ez = sz + (length - 1) * CZ[dir];
-      // Shared walls have a single owner. The outer lanes also own their
-      // exposed outside wall, even with the one-block gap of spacing 2.
-      const sliceLeft = scan && k === 0 ? Math.max(1, left) : left;
-      const sliceRight = scan && k === ready.length - 1 ? Math.max(1, rightSide) : rightSide;
-      const halo = scan ? 1 : 0;
-      const volume = box(
-        sx - halo * CX[dir] - sliceLeft * CX[right], Math.max(-64, y1 - halo), sz - halo * CZ[dir] - sliceLeft * CZ[right],
-        ex + halo * CX[dir] + sliceRight * CX[right], Math.min(319, y2 + halo), ez + halo * CZ[dir] + sliceRight * CZ[right],
-      );
-      return {
-        args: {
-          kind, x: sx, z: sz, y, dir: COMPASS[dir], radius, length, scan, spacing, band, goal, goalItem,
-          routeMode: "southRow", routeHome: { ...turtle.home },
-          stairBottom: { x: turtle.home.x, y, z }, access: "southStairs", entryY,
-          ...(scan ? { coverage: "allSides", veinBounds: volume } : {}),
-        },
-        volume,
-        circle: { x: turtle.home.x, z: turtle.home.z, radius },
-        // Assembly and later returns run across the bottom level. Only the
-        // initial descent may cross protected areas; these corridors may not.
-        assembly: box(turtle.home.x, y, z, sx, y + 1, z),
-        // Forward, then down, from this turtle's own saved surface home.
-        // The surface home itself is never an access block to be dug out.
-        access: Array.from({ length: entryY - y }, (_, index) => {
-          const step = index + 1, py = entryY - step, pz = -55 + step;
-          return box(turtle.home.x, py, pz, turtle.home.x, py + 1, pz);
-        }),
-      };
-    });
   } else if (kind === "areaQuarry") {
     const v = [coord(params.x1), coord(params.z1), coord(params.x2), coord(params.z2), height(params.yTop), height(params.yBottom)];
     if (v.includes(null)) return { error: "Check the quarry corners and levels." };
@@ -240,7 +361,7 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
   // Validate each stair column rather than its much larger enclosing box.
   const depot = depotBox(fleet.depot);
   for (const job of jobs) {
-    const work = [job.volume, ...(job.assembly ? [job.assembly] : [])];
+    const work = [job.volume, ...[job.assembly ?? []].flat()];
     for (const part of [...work, ...(job.access ?? [])]) {
       if ([part.x1, part.x2, part.z1, part.z2].some((value) => coord(value) === null)) {
         return { error: "The job or its access stairs extend beyond the world coordinate limits." };

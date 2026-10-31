@@ -18,7 +18,7 @@ const FLEET = {
 };
 const PARAMS = { x1: 100, x2: 103, z1: 100, z2: 103, yTop: 64, yBottom: 62 };
 const IDLE = {
-  label: "Test miner", queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: true, radiusSupported: true, forceHomeSupported: true, gpsTrusted: true, queued: 0,
+  label: "Test miner", queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: true, radiusSupported: true, staggeredSupported: true, forceHomeSupported: true, gpsTrusted: true, queued: 0,
   job: null, fleetJob: null, fuel: 10000,
   world: { x: 30, y: 64, z: 30 }, homeWorld: { x: 30, y: 64, z: 30 },
 };

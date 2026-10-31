@@ -86,6 +86,7 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.12;
+  controls.zoomSpeed = 3; // each wheel notch or pinch moves three times the default
   controls.maxDistance = 3000;
   scene.add(new THREE.HemisphereLight(0xffffff, 0x556070, 1.4));
   const sun = new THREE.DirectionalLight(0xffffff, 1.4);
