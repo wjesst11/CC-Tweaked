@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.1.1"
+local VERSION = "2.1.2"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -158,15 +158,29 @@ local function loadState()
   end
 end
 
+-- A copy with every repeated table written out separately. Only a table
+-- inside itself is an error.
+local function plainCopy(value, active)
+  if type(value) ~= "table" then return value end
+  active = active or {}
+  if active[value] then error("Cannot serialize table with recursive entries", 0) end
+  active[value] = true
+  local copy = {}
+  for k, v in pairs(value) do copy[plainCopy(k, active)] = plainCopy(v, active) end
+  active[value] = nil
+  return copy
+end
+
 local function saveState()
-  -- Job and independent return paths may share coordinate tables. Repeated
-  -- references are valid; recursive tables are still rejected by textutils.
+  -- Job and independent return paths share coordinate tables (the vein path
+  -- is in both). CC:Tweaked versions without allow_repetitions reject a
+  -- table seen twice, so save a plain copy instead of relying on that option.
   -- Serialize first so an error cannot truncate the last saved home/route.
-  local encoded = textutils.serialize({
+  local encoded = textutils.serialize(plainCopy({
     pos = pos, heading = heading, home = home, calib = calib,
     fleetJob = fleetJob, lastFleetResult = lastFleetResult, miningRoute = miningRoute,
     holding = leases.depot == "granted", odometer = odometer,
-  }, { allow_repetitions = true })
+  }))
   local f, err = fs.open(STATE_FILE, "w")
   if not f then error("Cannot save turtle state: " .. tostring(err), 0) end
   f.write(encoded)

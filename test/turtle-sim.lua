@@ -37,17 +37,18 @@ return {
 ]]
 
 local function key(p) return p.x .. "," .. p.y .. "," .. p.z end
-local function serialize(value, options)
+-- The strictest CC:Tweaked serializer: versions without allow_repetitions
+-- ignore that option and reject any table that appears twice.
+local function serialize(value)
   local seen, active = {}, {}
-  local allowRepetitions = type(options) == "table" and options.allow_repetitions == true
   local function encode(v)
     if type(v) ~= "table" then
       if type(v) == "string" then return string.format("%q", v) end
-      return tostring(v)
+      if type(v) == "number" or type(v) == "boolean" or type(v) == "nil" then return tostring(v) end
+      error("Cannot serialize type " .. type(v), 0)
     end
-    if active[v] or (seen[v] and not allowRepetitions) then
-      error("Cannot serialize table with repeated entries", 0)
-    end
+    if active[v] then error("Cannot serialize table with recursive entries", 0) end
+    if seen[v] then error("Cannot serialize table with repeated entries", 0) end
     seen[v], active[v] = true, true
     local parts = {}
     for k, item in pairs(v) do parts[#parts + 1] = "[" .. encode(k) .. "]=" .. encode(item) end

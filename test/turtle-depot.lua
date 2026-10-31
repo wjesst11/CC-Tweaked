@@ -176,7 +176,7 @@ test("a full valuables chest remains a real unload problem",function()
   assert(sim.slots[1]==3,"undeposited valuables were lost")
 end)
 
-test("shared state references save normally while a real cycle fails before touching the previous file",function()
+test("shared state references save on strict CC serializers while a real cycle fails before touching the previous file",function()
   local api,sim,files,a=setup()
   api.row.enter(a)
   local route=api.state().miningRoute
@@ -189,7 +189,7 @@ test("shared state references save normally while a real cycle fails before touc
   same(saved.miningRoute.secondReference,shared)
   route.realCycle=route
   local ok,why=pcall(api.save)
-  assert(not ok and tostring(why):find("Cannot serialize table with repeated entries",1,true),"a real state cycle was not rejected")
+  assert(not ok and tostring(why):find("Cannot serialize table with recursive entries",1,true),"a real state cycle was not rejected")
   assert(files[".minerdash_state"]==before,"failed serialization truncated the last durable position and route")
   route.realCycle=nil
   api.save()
