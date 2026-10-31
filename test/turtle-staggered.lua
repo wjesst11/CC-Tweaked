@@ -648,6 +648,51 @@ test("a turtle off every saved route digs back up to its corridor and goes home"
   assert(table.concat(sim.prints,"\n"):find("Off its saved route",1,true),"didn't say it was off its route")
 end)
 
+test("a turtle carried above ground flies home through open air without digging",function()
+  local api,sim,files,a=stoppedDeep()
+  -- Set down by hand above the home row, a few blocks from home.
+  displaced(api,sim,{x=HOME.x-7,y=HOME.y+6,z=HOME.z-4})
+  local digs=sim.digs
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(sim.digs==digs,"dug on the way home above ground")
+  assert(table.concat(sim.prints,"\n"):find("flying home",1,true))
+end)
+
+test("a turtle stranded underground above its corridor digs down to it",function()
+  local api,sim,files,a=stoppedDeep()
+  local off={x=HOME.x+2,y=a.y+3,z=HOME.z+1}
+  sim.blocks[lkey({x=off.x,y=off.y,z=off.z+1})]=nil
+  displaced(api,sim,off)
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+end)
+
+test("a move left half-done by a crash doesn't keep it from going home once GPS reports",function()
+  local api,sim,files,a=stoppedDeep()
+  -- Saved before a move that, after a rollback, matches neither end.
+  api.state().miningRoute.pendingMove={from={x=0,y=0,z=0},to={x=1,y=0,z=0}}
+  api.save()
+  sim.onSleep=function()
+    api.fix(api.state().pos,{x=HOME.x-sim.pos.x,y=HOME.y+sim.pos.y,z=HOME.z+sim.pos.z})
+  end
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+end)
+
+test("a turtle with no open side climbs through open space to find its facing",function()
+  local api,sim,files,a=stoppedDeep()
+  local w=api.state().world
+  -- A pocket in rock below its tunnels, open only straight up for three
+  -- blocks; one side opens at the top.
+  local base={x=w.x,y=a.low-4,z=w.z}
+  for dy=1,3 do sim.blocks[lkey({x=base.x,y=base.y+dy,z=base.z})]=nil end
+  sim.blocks[lkey({x=base.x,y=base.y+3,z=base.z+1})]=nil
+  displaced(api,sim,base)
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+end)
+
 test("a tunnel that is solid again on the way out is dug back through",function()
   local api,sim,files,a=stoppedDeep()
   local w=api.state().world

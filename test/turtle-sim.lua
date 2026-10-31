@@ -147,6 +147,7 @@ local function miner(files, initial)
     end,
     getItemCount=function(slot) return sim.slots[slot or sim.selected] or 0 end,
     detect=function() return sim.blocks[key(nextCell("forward"))] ~= nil end,
+    detectUp=function() return sim.blocks[key(nextCell("up"))] ~= nil end,
     getItemSpace=function(slot) return 64-(sim.slots[slot or sim.selected] or 0) end,
     transferTo=function(slot, count)
       local from=sim.selected
