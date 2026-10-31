@@ -324,10 +324,10 @@ test("an update reaches a turtle stuck waiting for a turn at the depot",function
   local api,sim,files,a=setup(4,60,58,96,104)
   local source=assert(io.open("turtle/minerdash.lua")):read("a")
   sim.httpGet=function() return {readAll=function() return source end,close=function() end} end
-  -- Nobody ever gets the dock, and its cargo is full from the start.
+  -- Nobody ever gets the dock, and its cargo is full of valuables from the start.
   api.lease(nil)
   sim.beforeMove=nil
-  for slot=1,15 do sim.items[slot],sim.slots[slot]="minecraft:cobblestone",64 end
+  for slot=1,15 do sim.items[slot],sim.slots[slot]="minecraft:diamond",64 end
   local waits=0
   sim.onPullEvent=function()
     waits=waits+1
@@ -383,6 +383,40 @@ test("a dock turn saved away from the dock is dropped on boot",function()
   api.save()
   local api2=miner(files)
   assert(api2.leases().depot==nil,"kept a dock turn at home")
+end)
+
+test("junk is dropped in the tunnel instead of filling the cargo, and never reaches the dock",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  local filled,visits=false,0
+  sim.afterSave=function()
+    local job=api.state().fleetJob
+    if not filled and job and job.step>=10 then
+      filled=true
+      for slot=1,13 do sim.items[slot],sim.slots[slot]="minecraft:deepslate",64 end
+      sim.items[14],sim.slots[14]="minecraft:diamond",5
+    end
+  end
+  local before=sim.beforeMove
+  sim.beforeMove=function(target,direction)
+    if key(target)=="-8,0,0" then visits=visits+1 end
+    before(target,direction)
+  end
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  assert(filled)
+  assert(visits==1,"made "..visits.." dock visits; junk should not need one")
+  assert(sim.worldDrops["minecraft:deepslate"]==13*64,"did not drop its junk underground")
+  assert(not (sim.deposits["-8,-1,0"] or {})["minecraft:deepslate"],"carried junk to the dock")
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==5,"lost its treasure")
+end)
+
+test("go home drops junk before leaving the mine and keeps its treasure",function()
+  local api,sim,files,a=stoppedDeep()
+  sim.items[2],sim.slots[2]="minecraft:cobblestone",40
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(sim.worldDrops["minecraft:cobblestone"]==40,"brought junk home")
+  assert(sim.items[1]=="minecraft:diamond" and sim.slots[1]==3,"lost its treasure")
 end)
 
 assert(#failures==0,table.concat(failures,"\n"))

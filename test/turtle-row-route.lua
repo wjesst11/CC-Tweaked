@@ -515,6 +515,7 @@ test("a crash during the pre-depot surface return still unloads and refuels befo
   end
   reboot.recover()
   assert(after.fuel>=10000,"recovery skipped refueling at the shared depot")
+  -- A surface job never drops junk on the ground; it goes to the dock.
   assert(after.deposits["-8,-1,0"]["minecraft:cobblestone"]==9,"recovery skipped unloading junk")
   assert(after.deposits["-8,0,-1"]["minecraft:diamond"]==2,"recovery skipped unloading valuables")
   same(reboot.state().world,a.routeHome)
@@ -543,7 +544,8 @@ test("inventory servicing during the first descent returns through opened stairs
     local saved=decoded(text)
     if not filled and saved.miningRoute and saved.miningRoute.stair.completed==2 and saved.pos.y==-2 then
       filled=true
-      for slot=1,14 do sim.items[slot],sim.slots[slot]="minecraft:cobblestone",64 end
+      -- Valuables fill it; junk would just be dropped on the stairs.
+      for slot=1,14 do sim.items[slot],sim.slots[slot]="minecraft:diamond",64 end
     end
   end
   sim.beforeMove=function(target)
@@ -555,7 +557,7 @@ test("inventory servicing during the first descent returns through opened stairs
   local state=api.state()
   assert(filled and visits==2,"did not service inventory during the initial descent and at completion")
   assert(not state.fleetJob and state.lastFleetResult.id==a.queueId and state.lastFleetResult.ok)
-  assert(sim.deposits["-8,-1,0"]["minecraft:cobblestone"]==14*64)
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==14*64)
   same(state.world,a.routeHome)
   same(state.miningRoute.home,a.routeHome)
   assert(state.miningRoute.stair.completed==5 and state.miningRoute.bottomSaved and sim.digs==10)

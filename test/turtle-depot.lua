@@ -146,7 +146,8 @@ local function serviceJob()
     local saved=decoded(text)
     if not injected and saved.fleetJob and saved.fleetJob.step==1 then
       injected=true
-      for slot=1,14 do sim.items[slot],sim.slots[slot]="minecraft:cobblestone",64 end
+      -- Valuables fill it; junk would just be dropped in the tunnel.
+      for slot=1,14 do sim.items[slot],sim.slots[slot]="minecraft:diamond",64 end
       sim.items[15],sim.slots[15]="minecraft:coal",64
     end
   end
@@ -167,7 +168,7 @@ local function serviceJob()
   assert(injected and visits==2,"job did not service inventory and then finish mining")
   assert((sim.slots[15] or 0)==0,"the job kept spare coal")
   assert(sim.deposits["-8,0,-1"]["minecraft:coal"]==64,"surplus coal was not stored with the valuables")
-  assert(sim.deposits["-8,-1,0"]["minecraft:cobblestone"]==14*64)
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==14*64)
   return api,sim,resumeDetail
 end
 

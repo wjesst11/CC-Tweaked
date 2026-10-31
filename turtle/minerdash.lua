@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.4"
+local VERSION = "2.2.5"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1406,6 +1406,28 @@ function dock.category(name)
   return "junk"
 end
 
+-- Junk isn't worth a trip to the dock. Below ground, a row miner drops it
+-- where it is, so its cargo space only ever holds valuables and fuel. It
+-- never drops into a chest beside it.
+function dock.dropJunk()
+  if not (miningRoute and gpsTrusted() and toWorld(pos).y < miningRoute.home.y) then return end
+  local into
+  for _, side in ipairs({ "bottom", "top", "front" }) do
+    if not isInventory(side) then into = side break end
+  end
+  if not into then return end
+  local selected = turtle.getSelectedSlot()
+  for slot = 1, 16 do
+    local item = turtle.getItemDetail(slot)
+    if item and dock.category(item.name) == "junk" then
+      turtle.select(slot)
+      dock.DROP[into]()
+    end
+  end
+  turtle.select(selected)
+  changed()
+end
+
 -- At the dock: sort the inventory into the three chests and top up fuel from
 -- the fuel chest. One chest at a time, fuel last, so it turns as little as it
 -- can. Returns a description of anything the player needs to fix.
@@ -1962,6 +1984,7 @@ end
 -- still unloads and refuels.
 function rowRoute.recover()
   if not miningRoute then error("No saved south staircase to recover", 0) end
+  dock.dropJunk()
   if miningRoute.intent == "service" or fuelLevel() < rowRoute.fuelHome() then depotVisit(miningRoute.minFuel or 0)
   else rowRoute.exit() end
   miningRoute.intent, miningRoute.service = nil, nil
@@ -2556,6 +2579,7 @@ local function fleetWork()
 
   local function visit()
     tally()
+    if a.routeMode == "southRow" then dock.dropJunk() end
     local need = continuationFuel()
     fleetJob.phase = "depot"
     saveState()
@@ -2580,6 +2604,8 @@ local function fleetWork()
     if emptySlots() > 2 and fuelLevel() >= need then return end
     tally()
     refuelFromInventory(need + 200)
+    -- Room taken by junk is freed on the spot rather than by a depot trip.
+    if a.routeMode == "southRow" then dock.dropJunk() end
     tally()
     if emptySlots() <= 2 or fuelLevel() < need then visit() end
   end

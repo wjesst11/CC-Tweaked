@@ -112,6 +112,8 @@ Stair travel never cuts a new way through stone or containers. It may clear only
 
 At the depot it takes on at least that reserve, even if **Refuel to** is set lower.
 
+Turtles don't carry junk either. Anything not on the valuables or fuel lists is dropped underground where the turtle is: whenever cargo space runs low, so it keeps mining instead of making a depot trip, and before any trip out of the mine (a depot visit, the end of a job, or Go home), so it arrives with only treasure and fuel. It never drops into a chest beside it, and jobs at the surface keep their junk for the junk chest. Dropped items disappear after five minutes, as Minecraft items do.
+
 Turtles don't carry spare fuel. After refuelling, leftover coal or charcoal goes back in the fuel chest. If the fuel chest is full, the turtle burns the leftover into its tank (up to the tank's limit), and anything still left goes into the valuables chest, or else the junk chest. A full fuel chest is not an unloading error. An empty or missing fuel supply still requires attention when the turtle needs more fuel.
 
 Before anything starts, the server checks the job. If anything fails, it refuses and tells you why:

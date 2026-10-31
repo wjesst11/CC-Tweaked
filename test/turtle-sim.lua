@@ -64,7 +64,7 @@ local function miner(files, initial)
   local sim = {
     pos = {x=0,y=0,z=0}, heading = 0, moves = 0, turns = 0, digs = 0,
     blocks = {}, time = 0, history = {}, slots = {}, items = {}, inspected = {},
-    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {}, refuse = {}, pulls = 0,
+    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {}, refuse = {}, pulls = 0, worldDrops = {},
   }
   local dx, dz = {[0]=0,1,0,-1}, {[0]=1,0,-1,0}
   local function nextCell(direction)
@@ -105,7 +105,15 @@ local function miner(files, initial)
   local function drop(direction)
     local cell = inventory(direction)
     local slot = sim.selected
-    if not cell or sim.fullChests[cell] or (sim.slots[slot] or 0) == 0 then return false end
+    if (sim.slots[slot] or 0) == 0 then return false end
+    if not cell then
+      -- Without a chest the stack lands in the world as an item.
+      local name = sim.items[slot] or "minecraft:cobblestone"
+      sim.worldDrops[name] = (sim.worldDrops[name] or 0) + sim.slots[slot]
+      sim.slots[slot], sim.items[slot] = nil, nil
+      return true
+    end
+    if sim.fullChests[cell] then return false end
     local name = sim.items[slot] or "minecraft:cobblestone"
     sim.deposits[cell] = sim.deposits[cell] or {}
     sim.deposits[cell][name] = (sim.deposits[cell][name] or 0) + sim.slots[slot]
