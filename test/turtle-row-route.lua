@@ -213,14 +213,26 @@ test("return mines at the safe level to the own bottom before climbing", functio
   same(api.state().world,a.routeHome)
 end)
 
-test("return refuses new stone in an opened stair cell", function()
+test("return refuses rock that couldn't have formed in an opened stair cell", function()
   local api,sim,files,a=rowMiner()
   api.row.enter(a)
-  sim.blocks["0,-4,5"]="minecraft:stone"
+  sim.blocks["0,-4,5"]="minecraft:deepslate"
   local digs,moves=sim.digs,sim.moves
   local ok,why=pcall(api.row.exit,"recall")
-  assert(not ok and tostring(why):find("will not dig a new stair route"))
+  assert(not ok and tostring(why):find("will not dig a new route"))
   assert(sim.digs==digs and sim.moves==moves and sim.blocks["0,-4,5"])
+end)
+
+test("return clears stone, cobblestone and obsidian that lava and water formed in its stairs", function()
+  for _,block in ipairs({"minecraft:stone","minecraft:cobblestone","minecraft:obsidian","minecraft:red_sand"}) do
+    local api,sim,files,a=rowMiner()
+    api.row.enter(a)
+    sim.blocks["0,-4,5"]=block
+    local digs=sim.digs
+    api.row.exit("recall")
+    assert(sim.digs==digs+1 and not sim.blocks["0,-4,5"],block.." was not cleared")
+    same(api.state().world,a.routeHome)
+  end
 end)
 
 test("opened stairs clear fallen sand and gravel while preserving block protection", function()
@@ -250,10 +262,10 @@ test("a later descent reuses opened cells and never receives initial excavation 
   local digs=sim.digs
   api.row.enter(a); api.row.exit("recall")
   assert(sim.digs==digs)
-  sim.blocks["0,0,1"]="minecraft:stone"
+  sim.blocks["0,0,1"]="minecraft:deepslate"
   local moves=sim.moves
   local ok,why=pcall(api.row.enter,a)
-  assert(not ok and tostring(why):find("will not dig a new stair route"))
+  assert(not ok and tostring(why):find("will not dig a new route"))
   assert(sim.moves==moves and sim.digs==digs and sim.blocks["0,0,1"])
 end)
 

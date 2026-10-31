@@ -410,6 +410,44 @@ test("junk is dropped in the tunnel instead of filling the cargo, and never reac
   assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==5,"lost its treasure")
 end)
 
+test("junk is dropped once it fills two slots, even with plenty of room left",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  local stage,dropped,kept=0,nil,nil
+  sim.afterSave=function()
+    local job=api.state().fleetJob
+    if not job then return end
+    if stage==0 and job.step>=5 then
+      stage=1
+      sim.items[1],sim.slots[1]="minecraft:deepslate",30
+    elseif stage==1 and job.step>=10 then
+      stage=2
+      kept=sim.slots[1]
+      sim.items[2],sim.slots[2]="minecraft:tuff",20
+      sim.items[3],sim.slots[3]="minecraft:diamond",2
+    elseif stage==2 and job.step>=15 then
+      stage=3
+      dropped=(sim.slots[1] or 0)==0 and (sim.slots[2] or 0)==0
+    end
+  end
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  assert(kept==30,"dropped a single partial stack of junk")
+  assert(dropped,"carried two slots of junk")
+  assert(sim.worldDrops["minecraft:deepslate"]==30 and sim.worldDrops["minecraft:tuff"]==20)
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==2,"lost its treasure")
+end)
+
+test("the way back out of a tunnel clears stone that lava and water formed in it",function()
+  local api,sim,files,a=stoppedDeep()
+  local w=api.state().world
+  -- A block of the tunnel between the turtle and its shaft fills with stone.
+  local between={x=w.x,y=w.y,z=w.z+(w.z>-55 and -1 or 1)}
+  sim.blocks[lkey(between)]="minecraft:stone"
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(not sim.blocks[lkey(between)],"left the stone in its tunnel")
+end)
+
 test("go home drops junk before leaving the mine and keeps its treasure",function()
   local api,sim,files,a=stoppedDeep()
   sim.items[2],sim.slots[2]="minecraft:cobblestone",40

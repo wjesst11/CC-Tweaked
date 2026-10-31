@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.5"
+local VERSION = "2.2.6"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1428,6 +1428,16 @@ function dock.dropJunk()
   changed()
 end
 
+-- How many slots hold junk.
+function dock.junkSlots()
+  local n = 0
+  for slot = 1, 16 do
+    local item = turtle.getItemDetail(slot)
+    if item and dock.category(item.name) == "junk" then n = n + 1 end
+  end
+  return n
+end
+
 -- At the dock: sort the inventory into the three chests and top up fuel from
 -- the fuel chest. One chest at a time, fuel last, so it turns as little as it
 -- can. Returns a description of anything the player needs to fix.
@@ -1636,8 +1646,12 @@ function rowRoute.opened(w)
   return step <= miningRoute.stair.completed or (upper and step == miningRoute.stair.completed + 1 and miningRoute.stair.half)
 end
 
--- Exact opened-cell travel has no detour and never clears new stone. Only
--- sand/gravel which fell into these specific saved cells may be removed.
+-- Exact opened-cell travel has no detour and never digs a new way. It only
+-- clears what fell into, or lava and water formed in, these saved cells.
+-- Blocks that turn up in cells it already dug: lava flowing into water
+-- makes stone, cobblestone or obsidian. Sand and gravel fall in (hasFallen).
+rowRoute.REFILL = { ["minecraft:stone"] = true, ["minecraft:cobblestone"] = true, ["minecraft:obsidian"] = true }
+
 function rowRoute.walkStep(w, known)
   if not known and not rowRoute.opened(w) then error("That staircase step has not been opened", 0) end
   local current = toWorld(pos)
@@ -1658,11 +1672,11 @@ function rowRoute.walkStep(w, known)
     elseif found and not LIQUIDS[block.name] then
       local reason = protection(dir, block)
       if reason then error("Saved route blocked: " .. reason, 0) end
-      if block.name ~= "minecraft:sand" and block.name ~= "minecraft:gravel" then
-        error("Saved route blocked by " .. block.name .. "; it will not dig a new stair route", 0)
+      if not (nav.hasFallen(block.name) or rowRoute.REFILL[block.name]) then
+        error("Saved route blocked by " .. block.name .. "; it will not dig a new route", 0)
       end
       local dug, why = SIDES[dir].dig()
-      if not dug then error("Can't clear fallen block: " .. tostring(why), 0) end
+      if not dug then error("Can't clear " .. block.name .. " from its saved route: " .. tostring(why), 0) end
       noteDug(dir, block.name)
     elseif not SIDES[dir].attack() then sleep(0.2) end
   end
@@ -2600,6 +2614,9 @@ local function fleetWork()
   -- nearly full or hasn't the fuel to get there and back. After a step cut
   -- short (a vein it had no room or fuel to finish), it wants a bit more.
   local function service(cut)
+    -- Junk goes in batches as it builds up: at most about a stack is carried,
+    -- without leaving an item behind for every block mined.
+    if a.routeMode == "southRow" and dock.junkSlots() >= 2 then dock.dropJunk() end
     local need = continuationFuel() + (cut and 64 or 0)
     if emptySlots() > 2 and fuelLevel() >= need then return end
     tally()
