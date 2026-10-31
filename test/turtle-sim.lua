@@ -11,6 +11,13 @@ return {
   returnHome = function() navigate(cellGoal(home)); face(home.heading) end,
   jobs = jobs, actions = actions, row = rowRoute,
   fix = function(l, w) gpsChecked = true; gpsState = "ok"; return net.onFix(l, w) end,
+  -- The state net.onFix leaves after deciding the turtle was moved by hand.
+  loseFacing = function()
+    local savedHome = { w = toWorld(home), compass = (calib.f0 + home.heading) % 4 }
+    calib = { l = { x = pos.x, y = pos.y, z = pos.z }, w = toWorld(pos), home = savedHome }
+    saveState()
+  end,
+  trusted = function() return gpsTrusted() end,
   state = function() return { pos = here(), home = home, world = worldPos(), miningRoute = miningRoute, fleetJob = fleetJob, lastFleetResult = lastFleetResult } end,
   protection = function(areas) fleet.protect.areas = areas; gpsChecked = true; cfg.compileFleet() end,
   depot = function(value) fleet.depot = value end,
@@ -139,6 +146,7 @@ local function miner(files, initial)
       if sim.items[slot] and (sim.slots[slot] or 0) > 0 then return {name=sim.items[slot],count=sim.slots[slot]} end
     end,
     getItemCount=function(slot) return sim.slots[slot or sim.selected] or 0 end,
+    detect=function() return sim.blocks[key(nextCell("forward"))] ~= nil end,
     getItemSpace=function(slot) return 64-(sim.slots[slot or sim.selected] or 0) end,
     transferTo=function(slot, count)
       local from=sim.selected

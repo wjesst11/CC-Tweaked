@@ -610,6 +610,20 @@ test("go home waits for a turtle on its stairs instead of giving up",function()
   assert(waits>=180,"never had to wait")
 end)
 
+test("a turtle whose facing is in doubt steps aside to find it with GPS, then goes home",function()
+  local api,sim,files,a=stoppedDeep()
+  api.loseFacing()
+  assert(not api.trusted())
+  -- GPS keeps reporting where it really is.
+  sim.onSleep=function()
+    api.fix(api.state().pos,{x=HOME.x-sim.pos.x,y=HOME.y+sim.pos.y,z=HOME.z+sim.pos.z})
+  end
+  local digs=sim.digs
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(sim.digs==digs,"dug to find its facing")
+end)
+
 test("go home drops junk before leaving the mine and keeps its treasure",function()
   local api,sim,files,a=stoppedDeep()
   sim.items[2],sim.slots[2]="minecraft:cobblestone",40

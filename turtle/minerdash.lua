@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.0"
+local VERSION = "2.3.1"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1796,8 +1796,11 @@ function rowRoute.ensure(a)
     forgetVisited()
     remember(pos)
     saveState()
-  elseif not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
-    error("Confirm GPS position and facing before using the saved staircase", 0)
+  else
+    rowRoute.findFacing()
+    if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
+      error("Can't confirm its GPS position and facing. If it's in a shaft with no open space beside it, move it one block sideways by hand.", 0)
+    end
   end
   local w = toWorld(pos)
   if not miningRoute then
@@ -1934,11 +1937,44 @@ function rowRoute.toBottom(w)
   return math.abs(w.z - c.z) + (b.y - w.y) + math.abs(w.x - b.x) + math.abs(c.z - b.z)
 end
 
-function rowRoute.exit(intent)
-  if not miningRoute then error("No saved south-row route. Start a new row job first.", 0) end
+-- When GPS disagreed with where it thought it was (moved by hand, or the
+-- world rolled back), its facing is in doubt and it won't travel. One step
+-- sideways into open space with a GPS fix there settles the facing; then it
+-- steps back. It never digs to do this.
+function rowRoute.findFacing()
   local deadline = os.clock() + 10
   while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
-  if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then error("Confirm GPS position and facing before returning on the saved staircase", 0) end
+  if gpsTrusted() or not calib or gpsState ~= "ok" then return end
+  setDetail("Finding its facing with GPS")
+  for _ = 1, 4 do
+    if not turtle.detect() then
+      local from = { x = pos.x, z = pos.z }
+      physicalMove = true
+      local moved = turtle.forward()
+      physicalMove = false
+      if moved then
+        pos.x, pos.z = pos.x + DX[heading], pos.z + DZ[heading]
+        saveState()
+        local wait = os.clock() + 8
+        while not gpsTrusted() and os.clock() < wait do waitSeconds(0.5) end
+        physicalMove = true
+        if turtle.back() then pos.x, pos.z = from.x, from.z end
+        physicalMove = false
+        saveState()
+        changed()
+        if gpsTrusted() then return end
+      end
+    end
+    turn(true)
+  end
+end
+
+function rowRoute.exit(intent)
+  if not miningRoute then error("No saved south-row route. Start a new row job first.", 0) end
+  rowRoute.findFacing()
+  if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
+    error("Can't confirm its GPS position and facing. If it's in a shaft with no open space beside it, move it one block sideways by hand.", 0)
+  end
   if intent then miningRoute.intent = intent end
   setDetail("Returning to the saved staircase")
   rowRoute.reconcile()
@@ -2051,6 +2087,10 @@ end
 -- still unloads and refuels.
 function rowRoute.recover()
   if not miningRoute then error("No saved south staircase to recover", 0) end
+  rowRoute.findFacing()
+  if not gpsTrusted() then
+    error("Can't confirm its GPS position and facing. If it's in a shaft with no open space beside it, move it one block sideways by hand.", 0)
+  end
   dock.dropJunk()
   if miningRoute.intent == "service" or fuelLevel() < rowRoute.fuelHome() then depotVisit(miningRoute.minFuel or 0)
   else rowRoute.exit() end
