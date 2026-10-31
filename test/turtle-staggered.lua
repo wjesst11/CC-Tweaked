@@ -574,6 +574,42 @@ test("stacks of the same item split across slots are merged before the next step
   assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==6)
 end)
 
+test("a turtle in the way is waited for however long it takes, instead of stopping the job",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  local cell=lkey({x=100,y=60,z=-57})
+  assert(tunnel(100,60))
+  sim.blocks[cell]="computercraft:turtle_normal"
+  local waits,shown=0,false
+  sim.onSleep=function()
+    if sim.blocks[cell]=="computercraft:turtle_normal" then
+      waits=waits+1
+      local job=api.status().job
+      shown=shown or (job and job.detail=="Waiting for another turtle to move")
+      if waits>=180 then sim.blocks[cell]=nil end
+    end
+  end
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  assert(waits>=180,"never had to wait")
+  assert(shown,"the wait wasn't shown")
+end)
+
+test("go home waits for a turtle on its stairs instead of giving up",function()
+  local api,sim,files,a=stoppedDeep()
+  local cell=lkey({x=100,y=67-2,z=stairZ(2,4)})
+  sim.blocks[cell]="computercraft:turtle_normal"
+  local waits=0
+  sim.onSleep=function()
+    if sim.blocks[cell] then
+      waits=waits+1
+      if waits>=180 then sim.blocks[cell]=nil end
+    end
+  end
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(waits>=180,"never had to wait")
+end)
+
 test("go home drops junk before leaving the mine and keeps its treasure",function()
   local api,sim,files,a=stoppedDeep()
   sim.items[2],sim.slots[2]="minecraft:cobblestone",40

@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.9"
+local VERSION = "2.3.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -648,12 +648,14 @@ local function forbidden(why)
 end
 
 -- Move one block, digging or attacking whatever is in the way. Another turtle
--- in the way is only passing through, so wait for it rather than dig.
--- Returns false, why and the block's name at a block it may not break.
-local function tryDigMove(dir, context)
+-- in the way is waited for rather than dug, for as long as it takes unless
+-- `patience` (seconds) runs out: then it returns false, as it does with
+-- the reason and the block's name at a block it may not break. Pause and
+-- cancel still work while it waits.
+local function tryDigMove(dir, context, patience)
   local side = SIDES[dir]
-  local waited = 0
-  for _ = 1, 400 do
+  local waited, tries = 0, 0
+  while true do
     checkStop()
     local ok, err = move(dir)
     if ok then return true end
@@ -661,20 +663,25 @@ local function tryDigMove(dir, context)
     if err == "Out of fuel" then error("Out of fuel", 0) end
     local found, block = side.inspect()
     if found and isTurtleBlock(block.name) then
-      waited = waited + 1
-      if waited > 120 then error("Blocked by another turtle for a minute", 0) end
+      -- Waiting on a turtle doesn't use up its tries.
+      waited = waited + 0.5
+      if patience and waited > patience then return false, "another turtle is in the way", block.name end
+      if waited == 5 then setDetail("Waiting for another turtle to move") end
       sleep(0.5)
-    elseif found and not LIQUIDS[block.name] then
-      local cleared, why = clear(dir, context)
-      if not cleared and forbidden(why) then return false, why, block.name end
-      if not cleared and why ~= "another turtle is in the way" then
-        error(("Can't dig %s: %s"):format(block.name, why or "unknown"), 0)
+    else
+      tries = tries + 1
+      if tries > 400 then error("Can't move " .. dir, 0) end
+      if found and not LIQUIDS[block.name] then
+        local cleared, why = clear(dir, context)
+        if not cleared and forbidden(why) then return false, why, block.name end
+        if not cleared and why ~= "another turtle is in the way" then
+          error(("Can't dig %s: %s"):format(block.name, why or "unknown"), 0)
+        end
+      elseif not side.attack() then
+        sleep(0.2) -- falling block or entity we can't hit; give it a moment
       end
-    elseif not side.attack() then
-      sleep(0.2) -- falling block or entity we can't hit; give it a moment
     end
   end
-  error("Can't move " .. dir, 0)
 end
 
 local function digMove(dir, context)
@@ -1698,7 +1705,8 @@ function rowRoute.walkStep(w, known)
   if dir == "forward" then
     faceCompass(w.x ~= current.x and (w.x > current.x and 1 or 3) or (w.z > current.z and 2 or 0))
   end
-  for _ = 1, 120 do
+  local tries, waited = 0, 0
+  while true do
     checkStop()
     travelNext = fromWorld(w)
     local ok, err = move(dir)
@@ -1706,19 +1714,26 @@ function rowRoute.walkStep(w, known)
     if err == "Outside mining radius" then error(err, 0) end
     if err == "Out of fuel" then error(err, 0) end
     local found, block = SIDES[dir].inspect()
-    if found and isTurtleBlock(block.name) then sleep(0.5)
-    elseif found and not LIQUIDS[block.name] then
-      local reason = protection(dir, block)
-      if reason then error("Saved route blocked: " .. reason, 0) end
-      if not (nav.hasFallen(block.name) or rowRoute.REFILL[block.name]) then
-        error("Saved route blocked by " .. block.name .. "; it will not dig a new route", 0)
-      end
-      local dug, why = SIDES[dir].dig()
-      if not dug then error("Can't clear " .. block.name .. " from its saved route: " .. tostring(why), 0) end
-      noteDug(dir, block.name)
-    elseif not SIDES[dir].attack() then sleep(0.2) end
+    if found and isTurtleBlock(block.name) then
+      -- Another turtle on its route is waited for, however long it takes.
+      waited = waited + 0.5
+      if waited == 5 then setDetail("Waiting for another turtle to move") end
+      sleep(0.5)
+    else
+      tries = tries + 1
+      if tries > 120 then error("Saved route blocked by an entity it can't move past", 0) end
+      if found and not LIQUIDS[block.name] then
+        local reason = protection(dir, block)
+        if reason then error("Saved route blocked: " .. reason, 0) end
+        if not (nav.hasFallen(block.name) or rowRoute.REFILL[block.name]) then
+          error("Saved route blocked by " .. block.name .. "; it will not dig a new route", 0)
+        end
+        local dug, why = SIDES[dir].dig()
+        if not dug then error("Can't clear " .. block.name .. " from its saved route: " .. tostring(why), 0) end
+        noteDug(dir, block.name)
+      elseif not SIDES[dir].attack() then sleep(0.2) end
+    end
   end
-  error("Saved route blocked by another turtle or entity", 0)
 end
 
 function rowRoute.surface(target)
@@ -2097,8 +2112,9 @@ function vein.mineVein(dir, veins, depth)
   -- can then replay the seed even if the ore vanished during that move.
   veins.path[#veins.path + 1] = toWorld(neighbour(dir))
   vein.checkpointVein(veins)
-  if not tryDigMove(dir) then
-    -- Ore the game won't let it break (spawn protection or a land claim).
+  if not tryDigMove(dir, nil, 10) then
+    -- Ore the game won't let it break (spawn protection or a land claim),
+    -- or another turtle sitting where the vein goes.
     table.remove(veins.path)
     vein.checkpointVein(veins)
     return

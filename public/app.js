@@ -21,7 +21,17 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.2.9"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.3.0"; // the turtle script this dashboard expects
+
+// "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
+function olderVersion(version, than) {
+  const [a, b] = [String(version).split("."), String(than).split(".")];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (Number(a[i]) || 0) - (Number(b[i]) || 0);
+    if (d) return d < 0;
+  }
+  return false;
+}
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
 const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
@@ -1351,7 +1361,7 @@ function renderFleetWarnings(turtles, f) {
   const notes = [];
   if (!f.depot) notes.push("Set up the depot below before starting fleet jobs.");
   else if (f.depot.y !== 67) notes.push("Home-row mining needs the shared depot at Y 67. Change Dock Y in Fleet settings.");
-  const old = turtles.filter((t) => t.online && t.version && t.version < SCRIPT_VERSION);
+  const old = turtles.filter((t) => t.online && t.version && olderVersion(t.version, SCRIPT_VERSION));
   if (old.length) notes.push(`${old.length} turtle${old.length === 1 ? " runs" : "s run"} an older script. Use Update all scripts.`);
   const byHome = new Map();
   for (const t of turtles) {
