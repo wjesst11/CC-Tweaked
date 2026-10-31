@@ -56,6 +56,14 @@ const nextPow2 = (n) => 2 ** Math.ceil(Math.log2(Math.max(n, 1024)));
 const centre = (p) => new THREE.Vector3(p.x + 0.5, p.y + 0.5, p.z + 0.5);
 const validPoint = (p) => p && [p.x, p.y, p.z].every(Number.isFinite);
 
+// World Z of staircase step `step`, switching back at the radius. Same as
+// stairZ in fleet.js and the turtle script.
+function stairZ(step, radius) {
+  if (!Number.isInteger(radius) || radius < 1) return -55 + step;
+  const p = step % (2 * radius);
+  return -55 + (p <= radius ? p : 2 * radius - p);
+}
+
 function boxBetween(a, b) {
   const min = new THREE.Vector3(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.min(a.z, b.z));
   const max = new THREE.Vector3(Math.max(a.x, b.x) + 1, Math.max(a.y, b.y) + 1, Math.max(a.z, b.z) + 1);
@@ -325,7 +333,7 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
     const jobs = list.filter((t) => t.job).map((t) => [t.id, t.job]);
     const homes = list.filter((t) => t.home).map((t) => t.home);
     const routes = list.filter((t) => validPoint(t.route?.home) && validPoint(t.route?.bottom) && (t.route.bottomSaved || t.route.stair?.complete))
-      .map((t) => ({ id: t.id, home: t.route.home, bottom: t.route.bottom, job: t.job }));
+      .map((t) => ({ id: t.id, home: t.route.home, bottom: t.route.bottom, radius: t.route.radius, job: t.job }));
     const key = JSON.stringify([fleet?.depot, fleet?.protect?.areas, jobs, homes, routes, css().getPropertyValue("--page")]);
     if (key === staticKey) return;
     staticKey = key;
@@ -396,7 +404,13 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
             new THREE.BufferGeometry().setFromPoints(verticals),
             new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.18 }),
           ));
-          box = boxBetween({ x: job.x, y: job.y, z: job.z }, { x: job.x, y: job.y + 1, z: job.z + job.length - 1 });
+          if (job.pattern === "staggered" && job.veinBounds) {
+            // Tunnels through the whole circle: the levels they run through.
+            const b = job.veinBounds;
+            box = boxBetween({ x: b.x1, y: b.y1, z: b.z1 }, { x: b.x2, y: b.y2, z: b.z2 });
+          } else {
+            box = boxBetween({ x: job.x, y: job.y, z: job.z }, { x: job.x, y: job.y + 1, z: job.z + job.length - 1 });
+          }
         } else if (job.veinBounds) {
           const b = job.veinBounds;
           box = boxBetween({ x: b.x1, y: b.y1, z: b.z1 }, { x: b.x2, y: b.y2, z: b.z2 });
@@ -408,7 +422,10 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
           box = boxBetween({ x: job.x, y: job.y - band, z: job.z }, end);
         }
       }
-      if (box) groups.jobs.add(outline(box, accent, 0.7));
+      // A job of an unexpected shape is left off rather than breaking the view.
+      if (box && [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z].every(Number.isFinite)) {
+        groups.jobs.add(outline(box, accent, 0.7));
+      }
     }
 
     const homeMaterial = new THREE.MeshBasicMaterial({ color: cssColor("--ink-2"), transparent: true, opacity: 0.5 });
@@ -417,19 +434,24 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
       pad.position.set(h.x + 0.5, h.y + 0.03, h.z + 0.5);
       groups.homes.add(pad);
     }
-    for (const { id, home, bottom, job } of routes) {
+    for (const { id, home, bottom, radius, job } of routes) {
       const depth = home.y - bottom.y;
-      if (!Number.isInteger(depth) || depth < 0 || depth > 131 || home.x !== bottom.x || bottom.z - home.z !== depth) continue;
+      if (!Number.isInteger(depth) || depth < 0 || depth > 131 || home.x !== bottom.x || bottom.z !== stairZ(depth, radius)) continue;
       const points = [centre(home)];
       for (let step = 1; step <= depth; step++) {
-        points.push(centre({ x: home.x, y: home.y - step + 1, z: home.z + step }));
-        points.push(centre({ x: home.x, y: home.y - step, z: home.z + step }));
+        points.push(centre({ x: home.x, y: home.y - step + 1, z: stairZ(step, radius) }));
+        points.push(centre({ x: home.x, y: home.y - step, z: stairZ(step, radius) }));
       }
       const path = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: cssColor("--ink-2"), transparent: true, opacity: 0.65 }));
       groups.homes.add(path);
       if (job?.routeMode === "southRow" && [job.x, job.z].every(Number.isFinite)) {
+        // A staggered job's corridor runs along the home column to its shaft
+        // row, then along that row to its first column.
+        const corridor = job.pattern === "staggered"
+          ? [bottom, { x: bottom.x, y: bottom.y, z: job.z }, { x: job.x, y: bottom.y, z: job.z }]
+          : [bottom, { x: job.x, y: bottom.y, z: job.z }];
         groups.homes.add(new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints([centre(bottom), centre({ x: job.x, y: bottom.y, z: job.z })]),
+          new THREE.BufferGeometry().setFromPoints(corridor.map(centre)),
           new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.65 }),
         ));
       }
@@ -468,7 +490,7 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
 
   function contentBounds(fleet) {
     const box = new THREE.Box3();
-    for (const e of turtles.values()) box.expandByPoint(e.target);
+    for (const e of turtles.values()) if ([e.target.x, e.target.y, e.target.z].every(Number.isFinite)) box.expandByPoint(e.target);
     if (fleet?.depot) box.expandByPoint(centre(fleet.depot));
     if (minedBounds) box.union(minedBounds);
     for (const child of groups.jobs.children) box.expandByObject(child);
