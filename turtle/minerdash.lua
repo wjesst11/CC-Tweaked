@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.2"
+local VERSION = "2.2.3"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -105,6 +105,7 @@ local queue = {}  -- commands waiting for the worker
 local job         -- { name, detail, progress, paused } while a job runs
 local stopRequested = false
 local pauseRequested = false
+local updateRequested = false -- a running fleet job updates between steps
 local pendingTrip -- way back out of a cancelled local job
 local dirty = true
 local around      -- block names next to the turtle (refreshed when idle)
@@ -1259,6 +1260,34 @@ end
 -- Fleet: the shared depot and fleet jobs ------------------------------------------
 
 -- The dock is shared, so ask the server for a turn and wait for it.
+-- Download this server's script, check it, save it over this program and
+-- reboot. Returns false and why if the download is unusable.
+local function installUpdate()
+  local base = (url:gsub("^ws", "http"):gsub("/ws/turtle$", ""))
+  local res, err = http.get(base .. "/turtle.lua")
+  if not res then return false, "Download failed: " .. tostring(err) end
+  local code = res.readAll()
+  res.close()
+  if not (code and code:find("MinerDash", 1, true) and load(code, "minerdash")) then
+    return false, "Downloaded script is invalid"
+  end
+  local f = fs.open(shell.getRunningProgram(), "w")
+  f.write(code)
+  f.close()
+  log("info", "Updated, rebooting")
+  sleep(0.5)
+  os.reboot()
+end
+
+-- An update asked for mid-job is applied only where a reboot loses nothing:
+-- between two steps, or parked waiting at the depot. The job resumes after.
+local function updateIfAsked()
+  if not updateRequested then return end
+  updateRequested = false
+  local _, why = installUpdate()
+  log("warn", "Update skipped, carrying on: " .. tostring(why))
+end
+
 local function acquire(resource)
   if leases[resource] == "granted" then return end
   leases[resource] = "waiting"
@@ -1269,6 +1298,7 @@ local function acquire(resource)
       repeat
         local event, id = os.pullEvent()
         checkStop()
+        if leases[resource] ~= "granted" then updateIfAsked() end
       until leases[resource] == "granted" or (event == "timer" and id == timer)
     end
   end)
@@ -1500,6 +1530,7 @@ function rowRoute.sharedDepotVisit(minFuel, flat)
     if problem then log("warn", "Depot: " .. problem) end
     if emptySlots() >= 4 and fuelLevel() >= minFuel then return flown end
     setDetail("Waiting: " .. (problem or "not enough fuel at the depot"))
+    updateIfAsked()
     waitSeconds(30)
   end
 end
@@ -1912,9 +1943,19 @@ end
 
 -- A cancelled assignment can be cleared before the return finishes. Keep
 -- that obligation on the permanent route so a reboot still completes it.
+-- Fuel to get from here back to the saved home, with a margin.
+function rowRoute.fuelHome()
+  local w = toWorld(pos)
+  if w.y >= 67 then return 2 * distance(w, miningRoute.home) + 64 end
+  return rowRoute.toBottom(w) + 2 * (67 - miningRoute.targetY) + 64
+end
+
+-- Going home goes straight there with whatever it carries, and only calls
+-- at the depot when it hasn't the fuel to get home. A job's own depot trip
+-- still unloads and refuels.
 function rowRoute.recover()
   if not miningRoute then error("No saved south staircase to recover", 0) end
-  if miningRoute.service or miningRoute.intent == "service" then depotVisit(miningRoute.minFuel or 0)
+  if miningRoute.intent == "service" or fuelLevel() < rowRoute.fuelHome() then depotVisit(miningRoute.minFuel or 0)
   else rowRoute.exit() end
   miningRoute.intent, miningRoute.service = nil, nil
   rowRoute.save("home")
@@ -2577,6 +2618,7 @@ local function fleetWork()
       end
       tally()
       saveState()
+      updateIfAsked()
       local progress = fleetJob.step / total
       if goal then progress = math.max(progress, math.min(1, (fleetJob.found or 0) / goal.count)) end
       setDetail(k.detail(a, fleetJob.step, fleetJob), progress)
@@ -2693,9 +2735,6 @@ end
 function jobs.goHome()
   setDetail("Returning home")
   if miningRoute then
-    miningRoute.service = miningRoute.service or emptySlots() < 16 or miningRoute.intent == "service"
-      or miningRoute.phase == "toDepot" or miningRoute.phase == "fromDepot"
-      or fuelLevel() < (fleet.refuelTo or 10000)
     miningRoute.intent = "home"
     if fleetJob and fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning by saved staircase" } end
     fleetJob, pendingTrip = nil, nil
@@ -2823,22 +2862,7 @@ actions.resetPosition = function()
   return true, "Position reset to 0, 0, 0"
 end
 
-actions.update = function()
-  local base = (url:gsub("^ws", "http"):gsub("/ws/turtle$", ""))
-  local res, err = http.get(base .. "/turtle.lua")
-  if not res then return false, "Download failed: " .. tostring(err) end
-  local code = res.readAll()
-  res.close()
-  if not (code and code:find("MinerDash", 1, true) and load(code, "minerdash")) then
-    return false, "Downloaded script is invalid"
-  end
-  local f = fs.open(shell.getRunningProgram(), "w")
-  f.write(code)
-  f.close()
-  log("info", "Updated, rebooting")
-  sleep(0.5)
-  os.reboot()
-end
+actions.update = installUpdate
 
 actions.forgetJob = function()
   fleetJob = nil
@@ -2922,6 +2946,11 @@ local function worker()
     end
     runCommand(table.remove(queue, 1))
     changed()
+    -- An update asked for during a job that ended before its next step.
+    if updateRequested and #queue == 0 then
+      updateRequested = false
+      runCommand({ action = "update" })
+    end
   end
 end
 
@@ -2973,6 +3002,7 @@ local function status()
     southRowSupported = true,
     radiusSupported = true,
     staggeredSupported = true,
+    midJobUpdateSupported = true,
     miningRoute = miningRoute and {
       home = miningRoute.home, bottom = miningRoute.bottom, targetY = miningRoute.targetY,
       radius = miningRoute.radius,
@@ -3035,6 +3065,10 @@ local function handleMessage(msg)
       local label = type(msg.args) == "table" and tostring(msg.args.label or "") or ""
       os.setComputerLabel(label ~= "" and label:sub(1, 32) or nil)
       changed()
+    elseif name == "update" and job then
+      -- Mid-job, update at the next safe point; the job resumes after the reboot.
+      updateRequested = true
+      send({ type = "result", action = name, ok = true, msg = "Updating at the next safe point, then carrying on" })
     elseif (name == "goHome" or name == "forceHome") and job then
       -- Cancel whatever is running; goHome then backs out of it and heads home.
       queue = { msg }
@@ -3160,6 +3194,16 @@ local function connection()
   end
 end
 
+-- A turn at the dock survives a reboot only at the dock. Anywhere else it
+-- would keep every other turtle waiting.
+local function dropStaleDockTurn()
+  if leases.depot ~= "granted" then return end
+  local w, D = worldPos(), fleet.depot
+  if w and D and inDockRoom(D, w.x, w.y, w.z) then return end
+  leases.depot = nil
+  saveState()
+end
+
 -- Main --------------------------------------------------------------------------
 
 term.clear()
@@ -3167,6 +3211,7 @@ term.setCursorPos(1, 1)
 print(("MinerDash %s | turtle #%d %s"):format(VERSION, os.getComputerID(), os.getComputerLabel() or ""))
 loadState()
 loadFleet()
+dropStaleDockTurn()
 remember(pos)
 refreshSurroundings()
 -- A recall survives even if the assignment was already cleared. An old

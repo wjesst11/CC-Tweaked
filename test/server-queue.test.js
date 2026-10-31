@@ -114,9 +114,9 @@ async function harness(t) {
     await peer.exchange({ type: "auth", password: "queue-test" }, (msg) => msg.type === "snapshot");
     return peer;
   };
-  const turtle = async (status = IDLE, report = true) => {
+  const turtle = async (status = IDLE, report = true, hello = {}) => {
     const peer = await connect("turtle");
-    await peer.exchange({ type: "hello", token: "turtle-test", id: 7, label: "Test miner", version: "2.1.0", fleet: FLEET }, (msg) => msg.type === "welcome");
+    await peer.exchange({ type: "hello", token: "turtle-test", id: 7, label: "Test miner", version: "2.1.0", fleet: FLEET, ...hello }, (msg) => msg.type === "welcome");
     if (report) peer.send({ type: "status", ...status });
     return peer;
   };
@@ -289,4 +289,70 @@ test("new level jobs wait for all-side support and send the checked ore bounds",
   assert.equal(args.dir, "south");
   assert.equal(args.access, "southStairs");
   assert.deepEqual(args.veinBounds, { x1: 99, y1: 49, z1: -39, x2: 101, y2: 52, z2: -33 });
+});
+
+const cmd = (action) => (msg) => msg.type === "cmd" && msg.action === action;
+const job = { kind: "branchMine", step: 40, args: {}, paused: null };
+const busyStatus = { ...IDLE, job: { name: "fleetJob", detail: "Waiting for a turn at the depot" }, fleetJob: job };
+const statusSeen = (dashboard, check) => dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.id === 7 && msg.turtle.status && check(msg.turtle.status));
+
+test("Update stops an older busy turtle, updates it once idle, and resumes its job after the reboot", { timeout: 20000 }, async (t) => {
+  const app = await harness(t);
+  const dashboard = await app.dashboard();
+  let turtle = await app.turtle(busyStatus);
+  await statusSeen(dashboard, (s) => s.job);
+  dashboard.send({ type: "cmd", id: "all", action: "update" });
+  await turtle.wait(cmd("stop"));
+  assert.equal(turtle.messages.some(cmd("update")), false, "updated while its old script was busy");
+  // Stopped where it was, with the job saved and paused.
+  turtle.send({ type: "status", ...IDLE, fleetJob: { ...job, paused: true } });
+  await turtle.wait(cmd("update"));
+  turtle.close();
+  turtle = await app.turtle({ ...IDLE, fleetJob: { ...job, paused: true } }, true, { version: "2.2.3" });
+  await turtle.wait(cmd("resume"));
+});
+
+test("a failed download resumes the stopped job on its old script", { timeout: 20000 }, async (t) => {
+  const app = await harness(t);
+  const dashboard = await app.dashboard();
+  const turtle = await app.turtle(busyStatus);
+  await statusSeen(dashboard, (s) => s.job);
+  dashboard.send({ type: "cmd", id: "all", action: "update" });
+  await turtle.wait(cmd("stop"));
+  turtle.send({ type: "status", ...IDLE, fleetJob: { ...job, paused: true } });
+  await turtle.wait(cmd("update"));
+  turtle.send({ type: "result", action: "update", ok: false, msg: "Download failed" });
+  await turtle.wait(cmd("resume"));
+});
+
+test("a turtle that updates mid-job gets the update straight away", { timeout: 15000 }, async (t) => {
+  const app = await harness(t);
+  const dashboard = await app.dashboard();
+  const turtle = await app.turtle({ ...busyStatus, midJobUpdateSupported: true });
+  await statusSeen(dashboard, (s) => s.job);
+  dashboard.send({ type: "cmd", id: "all", action: "update" });
+  await turtle.wait(cmd("update"));
+  assert.equal(turtle.messages.some(cmd("stop")), false);
+});
+
+test("the dock is freed when its turtle disconnects away from it, and kept when it is at the dock", { timeout: 15000 }, async (t) => {
+  const app = await harness(t);
+  const dashboard = await app.dashboard();
+  const depotHolder = (holder) => (msg) => msg.type === "depot" && msg.depot.holder === holder;
+  let turtle = await app.turtle(IDLE, true, { holding: true });
+  await dashboard.wait(depotHolder(7));
+  await statusSeen(dashboard, (s) => s.world.x === 30);
+  let after = dashboard.messages.length;
+  turtle.close();
+  await dashboard.wait(depotHolder(null), after);
+
+  turtle = await app.turtle({ ...IDLE, world: { x: 1, y: 67, z: -1 } }, true, { holding: true });
+  await dashboard.wait(depotHolder(7), after);
+  await statusSeen(dashboard, (s) => s.world.x === 1);
+  after = dashboard.messages.length;
+  turtle.close();
+  await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.id === 7 && !msg.turtle.online, after);
+  await delay(200);
+  const last = dashboard.messages.filter((msg) => msg.type === "depot").at(-1);
+  assert.equal(last.depot.holder, 7, "a turtle disconnected inside the dock lost its turn");
 });

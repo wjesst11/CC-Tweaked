@@ -5,7 +5,8 @@ local source = input:read("*a")
 input:close()
 source = assert(source:match("^(.-)%-%- Main %-%-")) .. [[
 return {
-  init = function() loadState(); loadFleet(); remember(pos) end,
+  init = function() loadState(); loadFleet(); dropStaleDockTurn(); remember(pos) end,
+  leases = function() return leases end,
   move = move, face = face, step = stepTo,
   returnHome = function() navigate(cellGoal(home)); face(home.heading) end,
   jobs = jobs, actions = actions, row = rowRoute,
@@ -63,7 +64,7 @@ local function miner(files, initial)
   local sim = {
     pos = {x=0,y=0,z=0}, heading = 0, moves = 0, turns = 0, digs = 0,
     blocks = {}, time = 0, history = {}, slots = {}, items = {}, inspected = {},
-    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {}, refuse = {},
+    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {}, refuse = {}, pulls = 0,
   }
   local dx, dz = {[0]=0,1,0,-1}, {[0]=1,0,-1,0}
   local function nextCell(direction)
@@ -157,7 +158,12 @@ local function miner(files, initial)
   end
   sim.turtle = turtle
   local env = setmetatable({
-    turtle=turtle, http={websocket=function() end},
+    turtle=turtle,
+    http={websocket=function() end, get=function(u)
+      if sim.httpGet then return sim.httpGet(u) end
+      return nil, "offline"
+    end},
+    shell={getRunningProgram=function() return "minerdash.lua" end},
     peripheral={getType=function(side)
       local direction = side == "top" and "up" or side == "bottom" and "down" or "forward"
       return inventory(direction) and "inventory" or nil
@@ -175,7 +181,15 @@ local function miner(files, initial)
     end,
     term={isColor=function() return false end,setTextColor=function() end},
     colors={white=1,red=2,yellow=3},
-    os=setmetatable({clock=function() return sim.time end,queueEvent=function() end,pullEvent=function() end,getComputerLabel=function() return "Test" end}, {__index=os}),
+    os=setmetatable({clock=function() return sim.time end,queueEvent=function() end,startTimer=function() return 1 end,
+      pullEvent=function()
+        sim.pulls=sim.pulls+1
+        if sim.pulls>20000 then error("waited forever for an event",0) end
+        if sim.onPullEvent then sim.onPullEvent() end
+      end,getComputerLabel=function() return "Test" end,
+      -- A real reboot never returns. Tests running the turtle in a coroutine
+      -- yield here and abandon it.
+      reboot=function() if sim.onReboot then sim.onReboot() end error("rebooted", 0) end}, {__index=os}),
     fs={exists=function(name) return files[name] ~= nil end, open=function(name, mode)
       if mode == "r" and not files[name] then return nil, "missing file" end
       if mode == "w" then files[name] = "" end

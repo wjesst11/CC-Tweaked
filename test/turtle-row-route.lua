@@ -509,6 +509,10 @@ test("a crash during the pre-depot surface return still unloads and refuels befo
   local saved=decoded(files[".minerdash_state"])
   assert(saved.fleetJob and saved.fleetJob.phase=="depot" and not saved.lastFleetResult)
   local reboot,after=resume(files,sim,f)
+  -- A turn at the dock doesn't survive a reboot away from it; ask again.
+  after.beforeMove=function()
+    if reboot.state().miningRoute.phase=="toDepot" then reboot.lease("granted") end
+  end
   reboot.recover()
   assert(after.fuel>=10000,"recovery skipped refueling at the shared depot")
   assert(after.deposits["-8,-1,0"]["minecraft:cobblestone"]==9,"recovery skipped unloading junk")

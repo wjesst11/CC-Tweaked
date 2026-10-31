@@ -121,7 +121,7 @@ Before anything starts, the server checks the job. If anything fails, it refuses
 
 - **Pause** stops a turtle where it is. A turtle at the dock finishes its turn first.
 - **Resume** carries on.
-- **Cancel** (or **Go home**, or **Recall** for a group) returns a row miner at safe mining Y to its own bottom, climbs its exact stairs, and completes its shared-depot/home trip.
+- **Cancel** (or **Go home**, or **Recall** for a group) returns a row miner to its own bottom, climbs its exact stairs and goes straight home with whatever it carries. It calls at the depot first only when it hasn't the fuel to get home.
 - **If something stops a job,** such as a protected block in the way or no open way to the dock, the turtle notes why ("Job stopped: …"), heads home, and waits. Fix the problem and press **Resume**, and it goes back to work.
 
 If a turtle reboots, its saved phase identifies whether it was opening a forward/down stair half-step, mining, climbing, or visiting the depot. Home and stair data live independently of the job in `.minerdash_state`; a cleared job does not erase them. Interrupted final or recall travel can recover even after job bookkeeping changes. The old `.minerdash_route` breadcrumb journal is no longer used, and its former cell limit does not restrict this route.
@@ -131,6 +131,8 @@ Version **2.2.0** mines levels with staggered tunnels through each turtle's whol
 **Force home** follows the same controlled return route. Its mining is confined to the safe mining-level return, followed by the saved stairs and the flat depot/home trip. It does not grant a free three-dimensional mining path or a protected-area exception. Protected blocks and areas remain protected; an obstructed saved staircase still requires attention.
 
 ## Automatic fleet queue
+
+**Updating scripts.** **Update all scripts** reaches busy turtles too. A turtle on 2.2.3 or later updates at the next point where a reboot loses nothing (between two tunnel blocks, or parked waiting at the depot) and carries on with its job. For an older busy turtle, the server stops its job (the job stays saved), updates it once idle, and resumes the job when it reconnects. **The dock.** If the turtle using the dock disconnects anywhere but at the dock, the next turtle gets its turn; a turtle rebooting away from the dock gives up a turn it had saved. **Release dock** in Fleet settings still frees it by hand.
 
 Use **Fleet → Add to queue** to line up level mines or quarries. Select the turtles that should work each area; they can already be busy. The queue runs one fleet job at a time and waits until every selected turtle is online, has reported a fresh GPS position, and has finished its current work. New level jobs require script **2.2.0** and start from each turtle's saved home; use **Update all scripts** while turtles are idle. Older queued level jobs without a mining radius must be replaced with new radius jobs. Their permanent homes and opened stairs remain saved.
 

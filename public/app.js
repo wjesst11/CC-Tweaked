@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.2.2"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.2.3"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
 const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
@@ -1768,7 +1768,7 @@ function bindEvents() {
     if (confirm("Cancel every turtle's job and send them all home?")) sendRaw({ type: "cmd", id: "all", action: "goHome" });
   });
   $("#btn-update-all").addEventListener("click", () => {
-    if (confirm("Download the latest script to every idle turtle and reboot them? Busy turtles skip it.")) {
+    if (confirm("Download the latest script to every turtle and reboot them? Turtles on a fleet job update between two steps and carry on with it.")) {
       sendRaw({ type: "cmd", id: "all", action: "update" });
     }
   });

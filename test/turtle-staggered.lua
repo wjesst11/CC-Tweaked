@@ -25,14 +25,18 @@ local function stairZ(step,r)
   return -55+(p<=r and p or 2*r-p)
 end
 
-local function setup(r,yTop,yBottom,first,last)
-  local api,sim,files=miner()
-  local A,low=yTop+2,math.max(yBottom-1,-59)
-  api.config({
+local function fleetConfig()
+  return {
     depot={x=108,y=67,z=-55,junk="down",valuables="north",fuel="west"},refuelTo=10000,
     protect={blocks={"*chest*","*barrel*","create:*","!create:*_ore"},areas={}},
     items={valuables={"*diamond*","*_ore"},fuel={"minecraft:coal"}},veinBlocks={"*_ore"},
-  })
+  }
+end
+
+local function setup(r,yTop,yBottom,first,last)
+  local api,sim,files=miner()
+  local A,low=yTop+2,math.max(yBottom-1,-59)
+  api.config(fleetConfig())
   api.fix({x=0,y=0,z=0},HOME)
   -- Solid stone under the surface, so every tunnel and stair block is dug.
   for x=HOME.x-r-1,HOME.x+r+1 do
@@ -269,6 +273,116 @@ test("a staircase blocked by spawn protection or a claim explains why",function(
   sim.refuse[lkey({x=100,y=64,z=stairZ(3,4)})]="Cannot break protected block"
   local ok,why=pcall(api.row.enter,a)
   assert(not ok and tostring(why):find("spawn protection or a land claim",1,true),tostring(why))
+end)
+
+test("an update mid-job reboots between two steps and the job carries on",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  local source=assert(io.open("turtle/minerdash.lua")):read("a")
+  sim.httpGet=function() return {readAll=function() return source end,close=function() end} end
+  local asked=false
+  sim.afterSave=function()
+    local job=api.state().fleetJob
+    if not asked and job and job.step>=20 then
+      asked=true
+      api.message({type="cmd",action="update"})
+    end
+  end
+  sim.onReboot=function() coroutine.yield("reboot") end
+  local run=coroutine.create(function() api.command({action="fleetJob",args=a}) end)
+  local ok,res=coroutine.resume(run)
+  assert(ok and res=="reboot","did not reboot for the update: "..tostring(res))
+  assert(files["minerdash.lua"]==source,"the downloaded script was not saved")
+  local saved=assert(load("return "..files[".minerdash_state"],"state","t",{}))()
+  assert(saved.fleetJob and not saved.fleetJob.paused and not saved.fleetJob.failed,"startup would not resume the job")
+  assert(not saved.miningRoute.pendingMove,"rebooted in the middle of a move")
+  assert(saved.fleetJob.step>=20)
+  -- Boot again where the turtle physically is, and resume as startup does.
+  local api2,sim2=miner(files)
+  for _,field in ipairs({"blocks","refuse","slots","items","fuel","fuelLimit","selected","chests","deposits"}) do sim2[field]=sim[field] end
+  sim2.pos,sim2.heading={x=sim.pos.x,y=sim.pos.y,z=sim.pos.z},sim.heading
+  api2.config(fleetConfig())
+  api2.fix(api2.state().pos,api2.state().world)
+  api2.lease("granted")
+  sim2.beforeMove=function()
+    local route=api2.state().miningRoute
+    if route and route.phase=="toDepot" then api2.lease("granted") end
+  end
+  api2.command({action="resume"})
+  finished(api2,a)
+  for x=96,104 do
+    for y=a.low,a.y-1 do
+      if tunnel(x,y) then
+        for z=-59,-51 do
+          if inside(x,z,4) then assert(not sim2.blocks[lkey({x=x,y=y,z=z})],"tunnel block left at "..x..","..y..","..z) end
+        end
+      end
+    end
+  end
+end)
+
+test("an update reaches a turtle stuck waiting for a turn at the depot",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  local source=assert(io.open("turtle/minerdash.lua")):read("a")
+  sim.httpGet=function() return {readAll=function() return source end,close=function() end} end
+  -- Nobody ever gets the dock, and its cargo is full from the start.
+  api.lease(nil)
+  sim.beforeMove=nil
+  for slot=1,15 do sim.items[slot],sim.slots[slot]="minecraft:cobblestone",64 end
+  local waits=0
+  sim.onPullEvent=function()
+    waits=waits+1
+    if waits==3 then api.message({type="cmd",action="update"}) end
+    assert(waits<50,"never updated while waiting for the dock")
+  end
+  sim.onReboot=function() coroutine.yield("reboot") end
+  local run=coroutine.create(function() api.command({action="fleetJob",args=a}) end)
+  local ok,res=coroutine.resume(run)
+  assert(ok and res=="reboot","did not reboot for the update: "..tostring(res))
+  local saved=assert(load("return "..files[".minerdash_state"],"state","t",{}))()
+  assert(saved.fleetJob and not saved.fleetJob.paused and not saved.fleetJob.failed,"startup would not resume the job")
+  assert(saved.miningRoute.phase=="toDepot" and not saved.holding,"rebooted somewhere other than the dock queue")
+end)
+
+local function stoppedDeep()
+  local api,sim,files,a=setup(4,60,56,96,104)
+  local stopped=false
+  sim.afterSave=function()
+    local w=api.state().world
+    if not stopped and w and w.y<a.y-3 and w.z>-53 then
+      stopped=true
+      api.message({type="cmd",action="stop"})
+    end
+  end
+  api.command({action="fleetJob",args=a})
+  assert(stopped,"never reached a deep tunnel")
+  sim.afterSave=nil
+  sim.items[1],sim.slots[1]="minecraft:diamond",3
+  return api,sim,files,a
+end
+
+test("go home goes straight home with its cargo when it has the fuel",function()
+  local api,sim,files,a=stoppedDeep()
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(next(sim.deposits)==nil,"called at the depot on the way home")
+  assert(sim.items[1]=="minecraft:diamond" and sim.slots[1]==3,"lost its cargo")
+end)
+
+test("go home calls at the depot first when it hasn't the fuel to get home",function()
+  local api,sim,files,a=stoppedDeep()
+  sim.fuel=30
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(sim.fuel>=10000,"did not refuel at the depot")
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==3,"did not unload at the depot")
+end)
+
+test("a dock turn saved away from the dock is dropped on boot",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  api.lease("granted")
+  api.save()
+  local api2=miner(files)
+  assert(api2.leases().depot==nil,"kept a dock turn at home")
 end)
 
 assert(#failures==0,table.concat(failures,"\n"))

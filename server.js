@@ -420,6 +420,7 @@ function handleTurtle(ws) {
         freshStatus: false,
         pendingFleetUntil: 0,
       });
+      if (turtle.updateFlow?.stage === "updating") turtle.updateFlow.stage = "rebooted";
       send(ws, { type: "welcome" });
 
       // Keep whichever copy of the fleet settings is newest.
@@ -449,9 +450,13 @@ function handleTurtle(ws) {
         if (status.job || status.fleetJob || status.queued > 0) turtle.pendingFleetUntil = 0;
         // Idle turtles re-send the same status every few seconds as a heartbeat.
         const json = JSON.stringify(status);
-        if (json === turtle.statusJson) break;
+        if (json === turtle.statusJson) {
+          advanceUpdate(turtle);
+          break;
+        }
         turtle.statusJson = json;
         turtle.status = status;
+        advanceUpdate(turtle);
         turtle.label = typeof status.label === "string" ? status.label : null;
         broadcast({ type: "turtle", turtle: turtleView(turtle) });
         break;
@@ -461,6 +466,12 @@ function handleTurtle(ws) {
         break;
       case "result":
         if (msg.action === "fleetJob") turtle.pendingFleetUntil = 0;
+        // A failed download leaves the old script running: carry on the job.
+        if (msg.action === "update" && !msg.ok && turtle.updateFlow) {
+          const { resume } = turtle.updateFlow;
+          turtle.updateFlow = null;
+          if (resume) dispatch(turtle, "resume", {});
+        }
         if (!msg.ok || msg.msg) {
           addLog(turtle, msg.ok ? "info" : "error", `${msg.action}: ${msg.msg ?? "failed"}`);
         }
@@ -479,9 +490,10 @@ function handleTurtle(ws) {
     if (!turtle || turtle.socket !== ws) return;
     turtle.socket = null;
     turtle.online = false;
-    // It leaves the queue, but keeps the dock if it holds it: it's physically
-    // there. The dashboard can release the dock by hand.
+    // It leaves the queue. It keeps the dock only if it's physically there;
+    // the dashboard can still release that by hand.
     depot.queue = depot.queue.filter((q) => q !== turtle.id);
+    if (depot.holder === turtle.id && !atDock(turtle.status?.world)) depot.holder = null;
     pumpDepot();
     addLog(turtle, "warn", "Disconnected");
     broadcast({ type: "turtle", turtle: turtleView(turtle) });
@@ -493,6 +505,39 @@ function handleTurtle(ws) {
 
 function dispatch(turtle, action, args) {
   send(turtle.socket, { type: "cmd", action, args });
+}
+
+// Scripts before 2.2.3 refuse an update while busy. Stop the job (it stays
+// saved and resumable), update once the turtle is idle, and resume the job
+// when it reconnects after the reboot.
+function startUpdate(turtle) {
+  const s = turtle.status ?? {};
+  if (!s.job || s.midJobUpdateSupported) {
+    dispatch(turtle, "update", {});
+    return;
+  }
+  turtle.updateFlow = { stage: "stopping", resume: Boolean(s.fleetJob && !s.fleetJob.paused && !s.fleetJob.failed) };
+  addLog(turtle, "info", "Stopping its job to update; it resumes after the update");
+  dispatch(turtle, "stop", {});
+}
+
+function advanceUpdate(turtle) {
+  const flow = turtle.updateFlow, s = turtle.status ?? {};
+  if (!flow || !turtle.socket || !turtle.freshStatus) return;
+  if (flow.stage === "stopping" && !s.job) {
+    flow.stage = "updating";
+    dispatch(turtle, "update", {});
+  } else if (flow.stage === "rebooted") {
+    turtle.updateFlow = null;
+    if (flow.resume && s.fleetJob?.paused && !s.fleetJob.failed) dispatch(turtle, "resume", {});
+  }
+}
+
+// A turtle disconnected inside the space around the dock is physically in
+// the way, so it keeps its turn. Anywhere else, the next turtle goes.
+function atDock(w) {
+  const D = fleet.depot;
+  return Boolean(D && w) && Math.abs(w.x - D.x) <= 2 && Math.abs(w.y - D.y) <= 2 && Math.abs(w.z - D.z) <= 2;
 }
 
 function handleCommand(ws, { id, ids, action, args }) {
@@ -514,12 +559,14 @@ function handleCommand(ws, { id, ids, action, args }) {
       send(ws, { type: "error", msg: `Update ${nameOf(t)}'s script before using Force home.` });
       return;
     }
-    if (queueOwns(t.id) && !["pause", "resume", "stop", "goHome", "forceHome", "setLabel"].includes(action)) {
+    // An update reboots between steps and resumes the same assignment.
+    if (queueOwns(t.id) && !["pause", "resume", "stop", "goHome", "forceHome", "setLabel", "update"].includes(action)) {
       send(ws, { type: "error", msg: `${nameOf(t)} belongs to an active queued job. Cancel that queued job before sending other commands.` });
       return;
     }
     if (["goHome", "forceHome", "quarry", "tunnel"].includes(action)) t.pendingFleetUntil = Date.now() + 10_000;
-    dispatch(t, action, args);
+    if (action === "update") startUpdate(t);
+    else dispatch(t, action, args);
   };
 
   if (id === "all") {
