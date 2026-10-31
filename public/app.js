@@ -1001,6 +1001,7 @@ function ensureWorld() {
     .then(({ createWorld }) => {
       world = createWorld($("#map3d"), {
         onSelect: (id) => select(id),
+        onFollowChange: (on) => $("#map3d-follow").setAttribute("aria-pressed", String(on)),
         onOpen: (id) => {
           select(id);
           setView("turtles");

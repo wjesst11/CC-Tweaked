@@ -77,7 +77,7 @@ function label(text, className = "map3d-label") {
   return new CSS2DObject(div);
 }
 
-export function createWorld(container, { onSelect, onOpen, nameOf }) {
+export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChange = () => {} }) {
   const css = () => getComputedStyle(document.documentElement);
   const cssColor = (name) => new THREE.Color(css().getPropertyValue(name).trim() || "#888888");
 
@@ -577,6 +577,41 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
   let follow = false;
   const shift = new THREE.Vector3();
 
+  // Arrow keys move over the ground while the map is on screen: up and down
+  // along the way the camera looks, left and right sideways, faster the
+  // further out it is zoomed. Typing in a field keeps its arrow keys.
+  const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+  const held = new Set();
+  const onScreen = () => Boolean(container.offsetParent || document.fullscreenElement);
+  addEventListener("keydown", (event) => {
+    if (!ARROWS.has(event.key) || event.ctrlKey || event.metaKey || event.altKey || !onScreen()) return;
+    if (event.target.closest?.("input, select, textarea, [contenteditable]")) return;
+    event.preventDefault();
+    held.add(event.key);
+    if (follow) {
+      follow = false;
+      onFollowChange(false);
+    }
+  });
+  addEventListener("keyup", (event) => held.delete(event.key));
+  addEventListener("blur", () => held.clear());
+  const ahead = new THREE.Vector3(), aside = new THREE.Vector3(), step = new THREE.Vector3();
+  let lastFrame = 0;
+  function moveWithKeys(seconds) {
+    const along = (held.has("ArrowUp") ? 1 : 0) - (held.has("ArrowDown") ? 1 : 0);
+    const across = (held.has("ArrowRight") ? 1 : 0) - (held.has("ArrowLeft") ? 1 : 0);
+    if (!along && !across) return;
+    camera.getWorldDirection(ahead).setY(0);
+    // Looking straight down, "ahead" is the top of the screen.
+    if (ahead.lengthSq() < 1e-6) ahead.set(0, 1, 0).applyQuaternion(camera.quaternion).setY(0);
+    ahead.normalize();
+    aside.crossVectors(ahead, camera.up).normalize();
+    step.copy(ahead).multiplyScalar(along).addScaledVector(aside, across).normalize()
+      .multiplyScalar(camera.position.distanceTo(controls.target) * 0.5 * seconds);
+    camera.position.add(step);
+    controls.target.add(step);
+  }
+
   // Name tags that would overlap one already shown are hidden: the selected
   // turtle's first, then the depot's and protected areas' (always shown), then
   // ones needing attention, then working ones, and so on.
@@ -629,7 +664,10 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
   let fitted = false;
   function frame(now) {
     requestAnimationFrame(frame);
+    const seconds = Math.min(0.1, (now - lastFrame) / 1000);
+    lastFrame = now;
     if (!container.offsetParent && !document.fullscreenElement) return; // hidden
+    moveWithKeys(seconds);
     if (minedDirty && now - lastBuild > 700) {
       rebuildMined();
       lastBuild = now;
