@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.1"
+local VERSION = "2.3.2"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1873,7 +1873,7 @@ function rowRoute.unwind()
   for i = #path, 1, -1 do if samePos(current, path[i]) then index = i break end end
   if not index then
     if rowRoute.opened(current) or rowRoute.inColumns(current) then return end
-    if current.y ~= r.targetY then error("No saved opened vein path back to the safe mining Y", 0) end
+    if current.y ~= r.targetY then rowRoute.rejoin() end
     return
   end
   rowRoute.save("unwinding")
@@ -1902,14 +1902,40 @@ function rowRoute.leaveColumns()
   if not rowRoute.inColumns(w) then return end
   rowRoute.save("toShaft")
   setDetail("Returning to the mining shaft")
-  while w.z ~= c.z do
-    rowRoute.walkStep({ x = w.x, y = w.y, z = w.z + (c.z > w.z and 1 or -1) }, true)
-    w = toWorld(pos)
+  local ok, err = pcall(function()
+    while w.z ~= c.z do
+      rowRoute.walkStep({ x = w.x, y = w.y, z = w.z + (c.z > w.z and 1 or -1) }, true)
+      w = toWorld(pos)
+    end
+    while w.y < miningRoute.targetY do
+      rowRoute.walkStep({ x = w.x, y = w.y + 1, z = w.z }, true)
+      w = toWorld(pos)
+    end
+  end)
+  if ok then return end
+  if err == STOP then error(STOP, 0) end
+  -- Its tunnel or shaft isn't open where it dug it: the world rolled back.
+  log("warn", "Its way out is blocked (" .. tostring(err) .. ")")
+  rowRoute.rejoin()
+end
+
+-- Off every route it saved (the world rolled back after a crash, or it was
+-- moved by hand): dig the shortest way up to its corridor level, inside its
+-- radius and around anything protected, then carry on from there. Normal
+-- returns never do this; they only use the blocks they dug.
+function rowRoute.rejoin()
+  local r, w = miningRoute, toWorld(pos)
+  local target = { x = w.x, y = r.targetY, z = r.columns and r.columns.z or w.z }
+  log("warn", ("Off its saved route at X %d, Y %d, Z %d: digging back up to Y %d"):format(w.x, w.y, w.z, r.targetY))
+  rowRoute.save("rejoining")
+  setDetail("Digging back to its route")
+  local goal = cellGoal(fromWorld(target))
+  goal.allowed = function(x, y, z)
+    local c = toWorld({ x = x, y = y, z = z })
+    return c.y <= r.targetY and rowRoute.withinRadius(c)
   end
-  while w.y < miningRoute.targetY do
-    rowRoute.walkStep({ x = w.x, y = w.y + 1, z = w.z }, true)
-    w = toWorld(pos)
-  end
+  goal.mining, goal.blocked, goal.limit = true, {}, 40000
+  navigate(goal)
 end
 
 -- At the safe mining Y, a staggered job's corridor runs along its shaft row
@@ -1953,15 +1979,21 @@ function rowRoute.findFacing()
       local moved = turtle.forward()
       physicalMove = false
       if moved then
+        local function settle()
+          local wait = os.clock() + 8
+          while not gpsTrusted() and os.clock() < wait do waitSeconds(0.5) end
+        end
         pos.x, pos.z = pos.x + DX[heading], pos.z + DZ[heading]
         saveState()
-        local wait = os.clock() + 8
-        while not gpsTrusted() and os.clock() < wait do waitSeconds(0.5) end
+        settle()
         physicalMove = true
         if turtle.back() then pos.x, pos.z = from.x, from.z end
         physicalMove = false
         saveState()
         changed()
+        -- If it was somewhere else entirely, the first fix only moved it to
+        -- the right place; stepping back then settles the facing.
+        settle()
         if gpsTrusted() then return end
       end
     end

@@ -624,6 +624,41 @@ test("a turtle whose facing is in doubt steps aside to find it with GPS, then go
   assert(sim.digs==digs,"dug to find its facing")
 end)
 
+local function displaced(api,sim,off)
+  -- Physically somewhere else than it believes (a world rollback), with GPS
+  -- reporting the truth.
+  sim.blocks[lkey(off)]=nil
+  sim.pos={x=HOME.x-off.x,y=off.y-HOME.y,z=off.z-HOME.z}
+  api.loseFacing()
+  sim.onSleep=function()
+    api.fix(api.state().pos,{x=HOME.x-sim.pos.x,y=HOME.y+sim.pos.y,z=HOME.z+sim.pos.z})
+  end
+end
+
+test("a turtle off every saved route digs back up to its corridor and goes home",function()
+  local api,sim,files,a=stoppedDeep()
+  local w=api.state().world
+  -- In rock below its lowest tunnel, outside every route it saved, with one
+  -- open block beside it to find its facing.
+  local off={x=w.x,y=a.low-1,z=w.z}
+  sim.blocks[lkey({x=off.x,y=off.y,z=off.z+1})]=nil
+  displaced(api,sim,off)
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(table.concat(sim.prints,"\n"):find("Off its saved route",1,true),"didn't say it was off its route")
+end)
+
+test("a tunnel that is solid again on the way out is dug back through",function()
+  local api,sim,files,a=stoppedDeep()
+  local w=api.state().world
+  -- The block of tunnel between it and its shaft is rock again.
+  local refilled={x=w.x,y=w.y,z=w.z+(w.z>-55 and -1 or 1)}
+  sim.blocks[lkey(refilled)]="minecraft:deepslate"
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(table.concat(sim.prints,"\n"):find("way out is blocked",1,true))
+end)
+
 test("go home drops junk before leaving the mine and keeps its treasure",function()
   local api,sim,files,a=stoppedDeep()
   sim.items[2],sim.slots[2]="minecraft:cobblestone",40
