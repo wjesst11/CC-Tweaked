@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.1.0"
+local VERSION = "2.1.1"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -159,12 +159,17 @@ local function loadState()
 end
 
 local function saveState()
-  local f = fs.open(STATE_FILE, "w")
-  f.write(textutils.serialize({
+  -- Job and independent return paths may share coordinate tables. Repeated
+  -- references are valid; recursive tables are still rejected by textutils.
+  -- Serialize first so an error cannot truncate the last saved home/route.
+  local encoded = textutils.serialize({
     pos = pos, heading = heading, home = home, calib = calib,
     fleetJob = fleetJob, lastFleetResult = lastFleetResult, miningRoute = miningRoute,
     holding = leases.depot == "granted", odometer = odometer,
-  }))
+  }, { allow_repetitions = true })
+  local f, err = fs.open(STATE_FILE, "w")
+  if not f then error("Cannot save turtle state: " .. tostring(err), 0) end
+  f.write(encoded)
   f.close()
 end
 
@@ -1331,7 +1336,9 @@ local function dockWork(minFuel)
     for _, slot in ipairs(slots[cat]) do
       turtle.select(slot)
       dockDrop(D[cat])
-      if turtle.getItemCount(slot) > 0 then full[cat] = true end
+      -- Surplus fuel stays on the turtle if the fuel chest cannot accept it.
+      -- Only mined cargo needs an available deposit chest.
+      if cat ~= "fuel" and turtle.getItemCount(slot) > 0 then full[cat] = true end
     end
   end
   local outOfFuel = false
@@ -1352,10 +1359,10 @@ local function dockWork(minFuel)
   turtle.select(1)
   changed()
   local problems = {}
-  for _, cat in ipairs({ "junk", "valuables", "fuel" }) do
+  for _, cat in ipairs({ "junk", "valuables" }) do
     if full[cat] then problems[#problems + 1] = "the " .. cat .. " chest is full or missing" end
   end
-  if outOfFuel then problems[#problems + 1] = "the fuel chest is empty" end
+  if outOfFuel then problems[#problems + 1] = "the fuel chest is empty or missing usable fuel" end
   return #problems > 0 and table.concat(problems, ", ") or nil
 end
 
@@ -1414,6 +1421,7 @@ function rowRoute.sharedDepotVisit(minFuel, flat)
     -- Whatever happened, step back out so the next turtle can come in.
     local stop = stopRequested
     stopRequested = false
+    setDetail("Leaving the depot")
     local left = pcall(function() go(aroundDock(), "out of the dock") end)
     stopRequested = stopRequested or stop
     if left then release("depot") end
@@ -1663,10 +1671,12 @@ function rowRoute.exit(intent)
   while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
   if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then error("Confirm GPS position and facing before returning on the saved staircase", 0) end
   if intent then miningRoute.intent = intent end
+  setDetail("Returning to the saved staircase")
   rowRoute.reconcile()
   rowRoute.unwind()
   local w = toWorld(pos)
   if w.y == 67 and (rowRoute.surfacePhase() or rowRoute.opened(w)) then
+    setDetail("Returning to the saved home")
     rowRoute.save("toStairHome")
     rowRoute.surface(miningRoute.home)
   else
@@ -1677,6 +1687,7 @@ function rowRoute.exit(intent)
       step, upper = rowRoute.position(toWorld(pos))
     end
     rowRoute.save("climbing")
+    setDetail("Climbing the saved staircase")
     while step > 0 do
       if not upper then
         rowRoute.walkStep({ x = miningRoute.home.x, y = 68 - step, z = -55 + step })
@@ -1690,6 +1701,7 @@ function rowRoute.exit(intent)
 end
 
 function rowRoute.enter(a, service)
+  setDetail("Heading to the mining level")
   rowRoute.ensure(a)
   rowRoute.unwind()
   if not rowRoute.surfacePhase() and toWorld(pos).y == a.y and not rowRoute.position(toWorld(pos)) then
@@ -1708,6 +1720,7 @@ function rowRoute.enter(a, service)
     if not step then error("The turtle is not on its saved staircase", 0) end
     if service and (emptySlots() <= 2 or fuelLevel() < 2 * (distance(w, miningRoute.home) + depotCost(miningRoute.home)) + 100) then
       service()
+      setDetail("Heading to the mining level")
       w = toWorld(pos)
       step, upper = rowRoute.position(w)
       if not step then error("Depot servicing did not return the turtle to its saved home", 0) end
@@ -1742,6 +1755,7 @@ function depotVisit(minFuel)
     flown = rowRoute.sharedDepotVisit(miningRoute.minFuel + depotCost(miningRoute.home) + 64, true)
     rowRoute.save("fromDepot")
   end
+  setDetail("Returning home from the depot")
   rowRoute.surface(miningRoute.home)
   faceCompass(2)
   miningRoute.minFuel = nil
@@ -2159,6 +2173,7 @@ local function fleetWork()
     noteRoute(k, a, depotVisit(need + 200), from)
     if a.routeMode == "southRow" then miningRoute.intent = nil end
     fleetJob.phase = "work"
+    setDetail("Returning to the mine")
     saveState()
     tally()
   end
@@ -2196,6 +2211,7 @@ local function fleetWork()
       checkStop()
       service(cut)
       moveToStep(k, a, fleetJob.step, service)
+      setDetail(k.detail(a, fleetJob.step, fleetJob), fleetJob.step / total)
       if a.routeMode == "southRow" then
         miningRoute.work, miningRoute.veinPath = toWorld(pos), fleetJob.vein
         rowRoute.save("work")

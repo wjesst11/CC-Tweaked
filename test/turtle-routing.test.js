@@ -10,6 +10,7 @@ for (const [script, description, expected] of [
   ["test/turtle-routing.lua", "turtle ore coverage, obstacles, and optimal turn costs", /Passed \d+ turtle routing scenarios/],
   ["test/turtle-row-route.lua", "saved south staircases, return safety, and recovery", /Passed \d+ south-row route scenarios/],
   ["test/turtle-radius.lua", "mining stays inside each original home radius", /Passed \d+ home-radius scenarios/],
+  ["test/turtle-depot.lua", "shared waypoint saves, fuel surplus, and depot status", /Passed \d+ depot scenarios/],
 ]) test(description, {
   skip: interpreter ? false : "Install Lua or set LUA_BIN to run the turtle simulation.",
 }, () => {

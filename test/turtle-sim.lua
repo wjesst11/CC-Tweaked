@@ -17,6 +17,7 @@ return {
   save = saveState,
   lease = function(value) leases.depot = value end,
   depotVisit = function(minFuel) return depotVisit(minFuel) end,
+  dockWork = function(minFuel) return dockWork(minFuel) end,
   recover = function(...) return rowRoute.recover(...) end,
   status = status,
   command = runCommand,
@@ -36,14 +37,24 @@ return {
 ]]
 
 local function key(p) return p.x .. "," .. p.y .. "," .. p.z end
-local function serialize(value)
-  if type(value) ~= "table" then
-    if type(value) == "string" then return string.format("%q", value) end
-    return tostring(value)
+local function serialize(value, options)
+  local seen, active = {}, {}
+  local allowRepetitions = type(options) == "table" and options.allow_repetitions == true
+  local function encode(v)
+    if type(v) ~= "table" then
+      if type(v) == "string" then return string.format("%q", v) end
+      return tostring(v)
+    end
+    if active[v] or (seen[v] and not allowRepetitions) then
+      error("Cannot serialize table with repeated entries", 0)
+    end
+    seen[v], active[v] = true, true
+    local parts = {}
+    for k, item in pairs(v) do parts[#parts + 1] = "[" .. encode(k) .. "]=" .. encode(item) end
+    active[v] = nil
+    return "{" .. table.concat(parts, ",") .. "}"
   end
-  local parts = {}
-  for k, v in pairs(value) do parts[#parts + 1] = "[" .. serialize(k) .. "]=" .. serialize(v) end
-  return "{" .. table.concat(parts, ",") .. "}"
+  return encode(value)
 end
 
 local function miner(files, initial)
@@ -51,7 +62,7 @@ local function miner(files, initial)
   local sim = {
     pos = {x=0,y=0,z=0}, heading = 0, moves = 0, turns = 0, digs = 0,
     blocks = {}, time = 0, history = {}, slots = {}, items = {}, inspected = {},
-    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {},
+    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {},
   }
   local dx, dz = {[0]=0,1,0,-1}, {[0]=1,0,-1,0}
   local function nextCell(direction)
@@ -90,7 +101,7 @@ local function miner(files, initial)
   local function drop(direction)
     local cell = inventory(direction)
     local slot = sim.selected
-    if not cell or (sim.slots[slot] or 0) == 0 then return false end
+    if not cell or sim.fullChests[cell] or (sim.slots[slot] or 0) == 0 then return false end
     local name = sim.items[slot] or "minecraft:cobblestone"
     sim.deposits[cell] = sim.deposits[cell] or {}
     sim.deposits[cell][name] = (sim.deposits[cell][name] or 0) + sim.slots[slot]
@@ -150,8 +161,15 @@ local function miner(files, initial)
     end},
     settings={define=function() end,get=function(k) return k == "minerdash.url" and "ws://localhost/ws/turtle" or "test" end},
     textutils={serialize=serialize,unserialize=function(text) return assert(load("return "..text, "saved", "t", {}))() end},
-    sleep=function(seconds) sim.time=sim.time+math.max(seconds,0.01) end,
-    print=function() end,
+    sleep=function(seconds)
+      sim.time=sim.time+math.max(seconds,0.01)
+      if sim.onSleep then sim.onSleep(seconds) end
+    end,
+    print=function(...)
+      local parts={}
+      for i=1,select("#",...) do parts[i]=tostring(select(i,...)) end
+      sim.prints[#sim.prints+1]=table.concat(parts," ")
+    end,
     term={isColor=function() return false end,setTextColor=function() end},
     colors={white=1,red=2,yellow=3},
     os=setmetatable({clock=function() return sim.time end,queueEvent=function() end,pullEvent=function() end,getComputerLabel=function() return "Test" end}, {__index=os}),

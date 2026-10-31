@@ -38,7 +38,7 @@ Every push to `main` redeploys. Turtles and open dashboards reconnect on their o
 
 ## Set up turtles
 
-Use script **2.1.0** on every mining turtle. Each needs an equipped pickaxe, an equipped wireless or ender modem, starting fuel, and a working GPS network with four host computers running `gps host`.
+Use script **2.1.1** on every mining turtle. Each needs an equipped pickaxe, an equipped wireless or ender modem, starting fuel, and a working GPS network with four host computers running `gps host`.
 
 Set up the home row before starting a level job:
 
@@ -83,7 +83,7 @@ For existing installations, use **Update all scripts** while the turtles are idl
 
 ## Fleet jobs
 
-Update to **2.1.0**, place the selected turtles at their own home-row positions, and wait for GPS. New level jobs start from those homes. Pick the turtles in the fleet picker, then:
+Update to **2.1.1**, place the selected turtles at their own home-row positions, and wait for GPS. New level jobs start from those homes. Pick the turtles in the fleet picker, then:
 
 - **Mine a level.** Choose the ore preset or target **Y**, then the **mining radius**. The form defaults to **256 blocks** and accepts whole numbers from **1 to 1024**. Lane spacing, side checks, and the tunnel endpoint are automatic.
   - **Radius from each own home.** Each turtle has an infinite vertical cylinder centered on its permanent home X/Z. Horizontal straight-line distance determines the limit: a block must satisfy `(x - homeX)^2 + (z - homeZ)^2 <= radius^2`. There is no Y term or vertical radius limit; the same X/Z point is inside or outside at every height. Changing the target Y does not change the radius. This limits excavation; it does not quarry every block inside the cylinder.
@@ -110,6 +110,8 @@ Stair travel never cuts a new way through stone or containers. It may clear only
 
 At the depot it takes on at least that reserve, even if **Refuel to** is set lower.
 
+A full fuel chest is not an unloading error: surplus fuel stays in the turtle's inventory. It can leave once it has enough fuel and working space. An empty or missing fuel supply still requires attention when the turtle needs more fuel.
+
 Before anything starts, the server checks the job. If anything fails, it refuses and tells you why:
 - **Protected areas:** mining slices, ore-check allowances, and flat assembly/return corridors may not enter them. The sole area exception is new initial staircase excavation, as described above.
 - **The depot:** no job or staircase may dig at the depot or where turtles wait for it.
@@ -122,11 +124,13 @@ Before anything starts, the server checks the job. If anything fails, it refuses
 
 If a turtle reboots, its saved phase identifies whether it was opening a forward/down stair half-step, mining, climbing, or visiting the depot. Home and stair data live independently of the job in `.minerdash_state`; a cleared job does not erase them. Interrupted final or recall travel can recover even after job bookkeeping changes. The old `.minerdash_route` breadcrumb journal is no longer used, and its former cell limit does not restrict this route.
 
+Version **2.1.1** fixes shared-waypoint serialization and updates the activity label as turtles leave the depot and resume work. If a 2.1.0 turtle is still online after the serialization error, recall it home before updating so the old client can save its independent route after clearing the failed assignment. Then update and start a new job.
+
 **Force home** follows the same controlled return route. Its mining is confined to the safe mining-level return, followed by the saved stairs and the flat depot/home trip. It does not grant a free three-dimensional mining path or a protected-area exception. Protected blocks and areas remain protected; an obstructed saved staircase still requires attention.
 
 ## Automatic fleet queue
 
-Use **Fleet → Add to queue** to line up level mines or quarries. Select the turtles that should work each area; they can already be busy. The queue runs one fleet job at a time and waits until every selected turtle is online, has reported a fresh GPS position, and has finished its current work. New radius jobs require script **2.1.0** and start from each turtle's saved home; use **Update all scripts** while turtles are idle. Older queued level jobs without a mining radius must be replaced with new radius jobs. Their permanent homes and opened stairs remain saved.
+Use **Fleet → Add to queue** to line up level mines or quarries. Select the turtles that should work each area; they can already be busy. The queue runs one fleet job at a time and waits until every selected turtle is online, has reported a fresh GPS position, and has finished its current work. New radius jobs require script **2.1.1** and start from each turtle's saved home; use **Update all scripts** while turtles are idle. Older queued level jobs without a mining radius must be replaced with new radius jobs. Their permanent homes and opened stairs remain saved.
 
 Before starting, the server checks the area again against the current depot, homes and protected areas. It saves the assignments before sending them. Every assignment carries a unique ID, which the turtle keeps with its progress and completion receipt, so reconnecting or restarting does not cause the same assignment to run twice. The next job waits for all assigned turtles to finish and become idle, including their final unloading and return trip. Closing the dashboard leaves the queue running on the server.
 
