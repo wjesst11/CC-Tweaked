@@ -96,7 +96,7 @@ const contains = (b, p) => intersects(b, box(p.x, p.y, p.z, p.x, p.y, p.z));
 
 // The dock, its chests and the space around it where turtles wait their turn
 // (5 blocks out sideways, 2 up and down, as the turtle script uses): no job
-// digs there, and no shaft comes up where a turtle might be waiting.
+// digs there, and no access stair reaches where a turtle might be waiting.
 function depotBox(D) {
   return box(D.x - 5, D.y - 2, D.z - 5, D.x + 5, D.y + 2, D.z + 5);
 }
@@ -129,6 +129,10 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     if (dir < 0 || [x, z, y, length, spacing, band, goal].includes(null) || !GOAL_ITEMS.includes(goalItem)) {
       return { error: "Check the tunnel settings." };
     }
+    const entryY = params.entryY === undefined ? Math.max(y, fleet.depot.y) : Number(params.entryY);
+    if (params.entryY === null || !Number.isInteger(entryY) || entryY < y || entryY < -64 || entryY > 318) {
+      return { error: "Entrance Y must be a whole number from the mining level up to 318." };
+    }
     const right = (dir + 1) % 4;
     // Each turtle owns a slice of rock: its tunnel line, half the spacing to
     // either side (for veins) and the height band above and below.
@@ -140,13 +144,16 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
       const ex = sx + (length - 1) * CX[dir];
       const ez = sz + (length - 1) * CZ[dir];
       return {
-        args: { kind, x: sx, z: sz, y, dir: COMPASS[dir], length, scan: params.scan !== false, spacing, band, goal, goalItem },
+        args: { kind, x: sx, z: sz, y, dir: COMPASS[dir], length, scan: params.scan !== false, spacing, band, goal, goalItem, access: "stairs", entryY },
         volume: box(
           sx - left * CX[right], y1, sz - left * CZ[right],
           ex + rightSide * CX[right], y2, ez + rightSide * CZ[right],
         ),
-        // The 1x1 shaft down from wherever the column is open above.
-        shaft: box(sx, y + 2, sz, sx, 319, sz),
+        // Exact 2-high staircase columns, descending towards the tunnel start.
+        access: Array.from({ length: entryY - y + 1 }, (_, rise) => {
+          const px = sx - rise * CX[dir], pz = sz - rise * CZ[dir];
+          return box(px, y + rise, pz, px, y + rise + 1, pz);
+        }),
       };
     });
   } else if (kind === "areaQuarry") {
@@ -171,15 +178,17 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     return { error: `Unknown job type ${kind}.` };
   }
 
-  // Where a shaft starts depends on where its column is open (it may be a
-  // cave or room under a base), so only the job itself is checked against
-  // protected areas. Turtles never dig inside one anyway.
+  // Access geometry is known before dispatch, including every headroom block.
+  // Validate each stair column rather than its much larger enclosing box.
   const depot = depotBox(fleet.depot);
   for (const job of jobs) {
-    for (const area of fleet.protect.areas) {
-      if (intersects(job.volume, area)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };
-    }
-    for (const part of [job.volume, job.shaft].filter(Boolean)) {
+    for (const part of [job.volume, ...(job.access ?? [])]) {
+      if ([part.x1, part.x2, part.z1, part.z2].some((value) => coord(value) === null)) {
+        return { error: "The job or its access stairs extend beyond the world coordinate limits." };
+      }
+      for (const area of fleet.protect.areas) {
+        if (intersects(part, area)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };
+      }
       if (intersects(part, depot)) return { error: "The job would dig at the depot, or where turtles wait for it (within 5 blocks)." };
       for (const { name, home } of homes) {
         if (home && contains(part, home)) return { error: `The job would dig out ${name}'s home.` };

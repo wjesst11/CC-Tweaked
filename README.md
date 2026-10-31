@@ -3,13 +3,14 @@
 A web dashboard for running a fleet of CC:Tweaked mining turtles, deployed on DigitalOcean App Platform.
 
 - **Fleet jobs.** Send any group of turtles to mine a Y level until each has brought back a goal, like 64 diamonds, or split a big quarry between them.
+- **Automatic job queue.** Line up mining areas and quarries. Each starts when its selected turtles are ready, after rechecking protection. Assignment receipts prevent duplicate work when connections drop.
 - **3D map.** A map of the world you can spin and zoom, showing every turtle, the depot, protected areas, job areas and every block the fleet has mined, colored by what it was.
 - **Never stranded.** A turtle always keeps enough fuel to get back to where it refuels, judged from the way it would really go. When it runs low on fuel or space, even partway through an ore vein, it unloads and refuels, then goes back to exactly where it left off.
 - **A shared depot.** Every turtle unloads at the same dock with three chests: junk, valuables and fuel. Items are sorted by name patterns you choose. Turtles refuel from the fuel chest and deposit the coal they mine into it.
 - **No collisions.** Turtles take the quickest open route, and the server shares where every turtle is and where it's about to move, so they steer around each other. The lower ID has right of way, and turtles standing still are treated as obstacles. One turtle at a time uses the dock while the others wait a few blocks away. A turtle never digs another one.
 - **Travel never breaks blocks.** Going home, to the depot or to a job, a turtle plans a route through open space and goes around walls, roofs, trees and hills. It prefers ways it has already been, rather than feeling its way along rock it can't see. If there's no open way, it stops and says where it is instead of digging.
 - **Few turns.** A turn takes as long as a move, so routes run straight rather than zig-zag. Turtles also check ore veins and sort at the dock in the order that needs the fewest turns.
-- **Retracing home.** Each turtle remembers the blocks it has moved through since it left home. Going home (when a job ends, is cancelled, or runs into a problem), it goes back that way, clearing only sand, gravel and other blocks that fell into its path.
+- **Smarter returns.** Turtles choose short open routes home, account for turns, and back down straight corridors without turning around. The recorded home route stays available as a fallback, survives reboots, and is preserved when a new job starts somewhere else.
 - **Protection.** Turtles never dig chests, barrels, shulker boxes, hoppers, Create blocks, or any ComputerCraft block such as other turtles and your GPS computers. They never dig or build inside protected areas, like a friend's base. The rules live on every turtle, so they hold even if the server is down.
 - **Pause, Resume, Cancel.** Pause freezes a turtle in place. Cancel stops the job and sends it home. **Pause all**, **Resume all** and **Recall all** act on the whole fleet.
 - **Permanent homes.** A turtle's home is where it first runs the script. Change it from the dashboard any time.
@@ -79,12 +80,12 @@ Pick turtles in the picker (**All ready** selects every online, idle turtle that
   - **Its own slice of rock.** Each turtle digs its own 2-high tunnel, *spacing* blocks apart, and mines any ore veins it sees in the floor and walls.
   - **Height band.** **Stay within** sets how far above and below the level it may go. Once it reaches **Go at most** blocks out, it starts a new tunnel 3 blocks up, and later 3 blocks down, as long as those stay inside the band. It keeps going until it reaches its goal or has mined its whole slice.
   - **What it digs.** Veins are followed only inside the turtle's band and its slice (halfway to the next turtle's tunnel on each side). A vein that runs into a protected area is left there.
-  - **Getting down.** To reach the level, each turtle digs a 1×1 shaft straight down at its start, so pick a start out in the open, away from builds.
+  - **Getting down.** New level jobs use a diagonal staircase: one block forward, one block down, with two blocks of headroom. X/Z specify the tunnel bottom; **Stair entrance Y** sets its top. The entrance is that many blocks behind the tunnel bottom, opposite the mining direction. Choose an entrance that opens into air. The preview and map show it before you start. Existing saved jobs retain their original access route when resumed.
 - **Quarry an area.** Two corners plus top and bottom Y. The area is split into one strip per turtle. Only blocks inside the box are dug: turtles drop in from above through open air, so set the top at ground level. Anything above it, like trees, is left alone. A box whose top is buried is refused rather than dug down to.
 
 The planned area is outlined on the fleet map before you start. Each turtle flies to its spot by the shortest open route without digging, and then works.
 
-**Depot trips.** When a turtle is nearly full or low on fuel, it flies to the depot, waits its turn, sorts its items into the chests, refuels and goes back. This can happen partway through a vein: it remembers the way it dug into the vein and finishes it when it's back. When the job is done (or cancelled, or stopped by a problem), it unloads and refuels at the depot one last time, then retraces its way home.
+**Depot trips.** When a turtle is nearly full or low on fuel, it flies to the depot, waits its turn, sorts its items into the chests, refuels and goes back. This can happen partway through a vein: it remembers the way it dug into the vein and finishes it when it's back. When the job is done (or cancelled, or stopped by a problem), it unloads and refuels at the depot one last time, then heads home.
 
 **Fuel.** A turtle never goes further than it has the fuel to come back from. It always keeps enough for two legs:
 1. back out of the job the way it really goes, through its own tunnels to the shaft;
@@ -93,16 +94,37 @@ The planned area is outlined on the fleet map before you start. Each turtle flie
 It keeps the same again for the trip back out, plus a margin. At the depot it takes on at least that much, even if **Refuel to** is set lower.
 
 Before anything starts, the server checks the job. If anything fails, it refuses and tells you why:
-- **Protected areas:** no turtle's slice, including its height band, may reach into one. A shaft can start in a cave or room under a base, so shafts aren't checked against protected areas; turtles never dig inside one anyway.
-- **The depot:** no job or shaft may dig at the depot or where turtles wait for it.
-- **Homes:** no shaft may come up through a turtle's home.
+- **Protected areas:** no turtle's slice, height band, or access stair may reach into one. Stair headroom is checked too.
+- **The depot:** no job or staircase may dig at the depot or where turtles wait for it.
+- **Homes:** no mining area or staircase may dig out a turtle's home.
 
 - **Pause** stops a turtle where it is. A turtle at the dock finishes its turn first.
 - **Resume** carries on.
-- **Cancel** (or **Go home**, or **Recall** for a group) retraces the turtle's way home.
-- **If something stops a job,** such as a protected block in the way or no open way to the dock, the turtle notes why ("Job stopped: …"), retraces its way home, and waits. Fix the problem and press **Resume**, and it goes back to work.
+- **Cancel** (or **Go home**, or **Recall** for a group) sends the turtle home by a short open route, with its recorded route as a fallback.
+- **If something stops a job,** such as a protected block in the way or no open way to the dock, the turtle notes why ("Job stopped: …"), heads home, and waits. Fix the problem and press **Resume**, and it goes back to work.
 
 If a turtle reboots mid-job, it picks the job back up by itself.
+
+**The home route belongs to home, not to a job.** Script **1.7.1** journals every visited cell in `.minerdash_route` on the turtle. A new job can start away from home without replacing that history; clearing or finishing a job also preserves it until the turtle actually gets home. Reboots and chunk reloads restore the journal. Reaching home starts a fresh route for the next outing. Explicitly changing home or resetting position starts a new route; GPS recalibration also invalidates coordinates when the turtle has been moved by hand. A simple GPS position correction keeps the existing route.
+
+The journal holds 100,000 cells. At that limit the turtle refuses new unexplored moves and keeps its existing return route, rather than deleting it. Home navigation can take open shortcuts, but it never digs a new path: only fallen blocks in cells it previously visited may be cleared, subject to protection rules.
+
+**Force home** is a separate recovery command on the turtle page and in the fleet's picked-turtle controls. It cancels the current job and returns directly home, mining ordinary blocks when needed. Chests, other ComputerCraft blocks, configured protected blocks, restricted areas, and other turtles remain protected; it plans around obstacles it cannot dig. It preserves the saved home and return history. Normal **Go home** and **Recall** continue to use open routes. Update turtles to **1.8.0** for staircase mining and Force home.
+
+## Automatic fleet queue
+
+Use **Fleet → Add to queue** to line up level mines or quarries. Select the turtles that should work each area; they can already be busy. The queue runs one fleet job at a time and waits until every selected turtle is online, has reported a fresh GPS position, and has finished its current work. Each selected turtle needs script **1.7.0** or newer; use **Update all scripts** while turtles are idle.
+
+Before starting, the server checks the area again against the current depot, homes and protected areas. It saves the assignments before sending them. Every assignment carries a unique ID, which the turtle keeps with its progress and completion receipt, so reconnecting or restarting does not cause the same assignment to run twice. The next job waits for all assigned turtles to finish and become idle, including their final unloading and return trip. Closing the dashboard leaves the queue running on the server.
+
+- **Pause queue** stops future dispatches; turtles already mining continue. **Resume queue** allows dispatch again.
+- **Pause all** pauses turtles and the queue. **Recall all** sends turtles home and pauses the queue. **Resume all** resumes paused turtles and allows queue dispatch again.
+- **Cancel** removes a waiting job. Cancelling a running job recalls its assigned turtles and pauses the queue. A turtle that was offline is recalled when it reconnects with that cancelled assignment.
+- A failed assignment or an area that no longer passes the safety checks blocks the job and pauses the queue. Check its reason in the queue card, cancel the blocked entry, fix the issue, and add a replacement job. Resuming the queue alone does not retry a blocked job.
+
+The server stores up to 50 queue entries in `.data/fleet-queue.json` (ignored by Git). To retain the queue across server restarts, keep this directory. Set `FLEET_QUEUE_PATH` to an absolute path on persistent storage to use another location. DigitalOcean App Platform's local filesystem is temporary: redeploying or replacing the container can clear its queue file. Turtle-side progress still survives in Minecraft, but queued future jobs require retained server storage. A malformed queue file stops server startup instead of silently discarding planned work.
+
+Run `npm test` for the queue and WebSocket integration checks. With Lua installed (or `LUA_BIN` set to its executable), it also runs turtle simulations for route persistence, off-home job starts, shortcuts, turn costs, and obstacles. You can run those directly with `lua test/turtle-routing.lua`.
 
 ## 3D map
 
@@ -148,7 +170,7 @@ The **Start a job here** card on a turtle's page runs single-turtle jobs:
 
 The form says exactly which coordinates will be dug, and the map outlines them.
 
-With the depot set up, they unload and refuel there, both partway through and at the end, keeping enough fuel to reach it. Without a depot, they unload into a chest placed directly behind the spot where the job started. Either way, when the job ends the turtle retraces its way home.
+With the depot set up, they unload and refuel there, both partway through and at the end, keeping enough fuel to reach it. Without a depot, they unload into a chest placed directly behind the spot where the job started. Either way, when the job ends the turtle heads home using an open route, with its recorded route as a fallback.
 
 ## Run locally
 
@@ -165,6 +187,7 @@ Then open http://localhost:8080. If you don't set the two variables, the server 
 | --- | --- |
 | `server.js` | HTTP + WebSocket server: auth, turtle state, traffic, the dock queue, fleet settings, command relay, Lua downloads |
 | `fleet.js` | Fleet settings validation and fleet-job planning and safety checks |
+| `fleet-queue.js` | Persistent automatic job scheduling, assignment receipts, pause and cancellation |
 | `public/` | The dashboard (plain HTML/CSS/JS, no build step; `world.js` is the 3D map, using three.js from a CDN) |
 | `turtle/minerdash.lua` | The turtle client (served at `/turtle.lua` with the server's address filled in) |
 | `turtle/install.lua` | The installer disk (served at `/install.lua`) |

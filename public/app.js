@@ -21,15 +21,16 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "1.6.0"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "1.8.0"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
 const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
 const KEYS = { w: "forward", s: "back", a: "turnLeft", d: "turnRight", e: "up", q: "down" };
 const DIGGABLE = new Set(["forward", "up", "down"]);
-const JOB_NAMES = { quarry: "Quarry", tunnel: "Tunnel", goHome: "Going home" };
+const JOB_NAMES = { quarry: "Quarry", tunnel: "Tunnel", goHome: "Going home", forceHome: "Forcing home" };
 const KIND_NAMES = { branchMine: "Mining a level", areaQuarry: "Quarrying an area" };
 const STATE_LABELS = { working: "Working", paused: "Paused", attention: "Needs attention", idle: "Idle", offline: "Offline" };
+const QUEUE_LABELS = { queued: "Queued", running: "Running", blocked: "Blocked", completed: "Completed", cancelled: "Cancelled" };
 
 // Swatches that make valuables easy to spot in the inventory grid.
 const ITEM_COLORS = [
@@ -66,6 +67,9 @@ const state = {
   fleet: null, // shared fleet settings from the server
   fleetDirty: false, // the settings form has unsaved edits
   depot: { holder: null, queue: [] },
+  jobQueue: { paused: false, jobs: [] },
+  queueReady: false,
+  connected: false,
   picked: new Set(), // turtles picked for a fleet job
   ready: false, // received the first snapshot
   ws: null,
@@ -121,7 +125,7 @@ function jobName(status) {
 }
 
 function jobPercent(job) {
-  return job.name === "goHome" ? "" : `${Math.round((job.progress ?? 0) * 100)}%`;
+  return ["goHome", "forceHome"].includes(job.name) ? "" : `${Math.round((job.progress ?? 0) * 100)}%`;
 }
 
 function turtleState(t) {
@@ -142,7 +146,14 @@ function notReady(t) {
   const s = t.status ?? {};
   if (!t.online) return "offline";
   if (!s.gpsTrusted) return "no GPS facing yet";
-  if (s.job) return "busy";
+  if (s.job || s.fleetJob || s.queued > 0) return "busy";
+  return null;
+}
+
+// Busy turtles can join a future job while finishing their current one.
+function notQueueReady(t) {
+  if (!t.online) return "offline";
+  if (!t.status?.gpsTrusted) return "no GPS facing yet";
   return null;
 }
 
@@ -164,6 +175,7 @@ function connect(auth) {
   const old = state.ws;
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/dashboard`);
   state.ws = ws;
+  state.queueReady = false;
   old?.close();
   setConn("connecting");
 
@@ -225,6 +237,8 @@ function handle(msg) {
       state.turtles = new Map(msg.turtles.map((t) => [t.id, t]));
       for (const t of state.turtles.values()) recordTrail(t);
       state.depot = msg.depot ?? state.depot;
+      state.jobQueue = msg.jobQueue ?? { paused: false, jobs: [] };
+      state.queueReady = true;
       state.ready = true;
       state.revealSelected = true;
       ensureSelection();
@@ -294,6 +308,20 @@ function handle(msg) {
       state.depot = msg.depot;
       invalidate("fleet");
       break;
+
+    case "jobQueue":
+      state.jobQueue = msg.queue;
+      state.queueReady = true;
+      invalidate("fleet");
+      break;
+
+    case "queueResult": {
+      const el = $("#job-queue-result");
+      el.hidden = false;
+      el.className = `form-msg ${msg.ok ? "ok" : "error"}`;
+      el.textContent = msg.msg;
+      break;
+    }
 
     case "fleetSaved":
       if (msg.ok) {
@@ -489,9 +517,11 @@ function showLogin(error) {
 }
 
 function setConn(status) {
+  state.connected = status === "online";
   const el = $("#conn");
   el.dataset.state = status;
   el.textContent = { online: "Live", connecting: "Connecting…", offline: "Reconnecting…" }[status];
+  updateQueueControls();
 }
 
 function toast(text, level = "info") {
@@ -721,7 +751,7 @@ function renderJob(s) {
     sub = fj.failed ?? `${KIND_NAMES[fj.kind] ?? "Fleet job"}, ${done}`;
   }
   $("#job-value").textContent = value;
-  $("#job-meter").hidden = !job || job.name === "goHome";
+  $("#job-meter").hidden = !job || ["goHome", "forceHome"].includes(job.name);
   if (job) renderMeter($("#job-meter"), job.progress ?? 0);
   $("#job-sub").textContent = sub;
 }
@@ -859,7 +889,7 @@ function renderLocalPlan(t) {
       : `Digs ${plan.length} blocks straight ahead, ${plan.height} high.`);
 }
 
-// The areas a fleet job started now would dig, in world coordinates.
+// The areas the picked fleet would dig, now or when its queued job starts.
 // The tunnel heights a level job works through (mirrors levelOffsets in the
 // turtle script): its level, then every 3 blocks up and down within the band.
 function levelOffsets(y, band) {
@@ -867,6 +897,31 @@ function levelOffsets(y, band) {
   for (let off = 3; off <= band; off += 3) if (y + off <= 318) list.push(off);
   for (let off = 3; off <= band; off += 3) if (y - off >= -59) list.push(-off);
   return list;
+}
+
+function stairEntrance(params) {
+  const dir = typeof params.dir === "number" ? params.dir : COMPASS.indexOf(params.dir);
+  if (![params.x, params.y, params.z, params.entryY].every(Number.isFinite) || dir < 0 || dir > 3 || params.entryY < params.y) return null;
+  const depth = params.entryY - params.y;
+  return {
+    x: params.x - depth * WORLD_STEP.x[dir],
+    y: params.entryY,
+    z: params.z - depth * WORLD_STEP.z[dir],
+    depth,
+  };
+}
+
+function syncStairEntrance() {
+  const form = $("#fleet-job-form");
+  const target = form.elements.namedItem("y");
+  const entrance = form.elements.namedItem("entryY");
+  const y = target.value === "" ? -64 : Number(target.value);
+  entrance.min = String(Math.max(-64, y));
+  if (entrance.dataset.custom !== "true" || entrance.value === "") {
+    entrance.value = Math.max(y, Math.min(318, state.fleet?.depot?.y ?? 64));
+  } else if (Number(entrance.value) < y) {
+    entrance.value = y;
+  }
 }
 
 function plannedFleetJob() {
@@ -878,15 +933,20 @@ function plannedFleetJob() {
   if ([p.x, p.z, p.length, p.spacing].some((v) => v == null) || !(p.length > 0)) return [];
   const dir = COMPASS.indexOf(p.dir);
   const right = (dir + 1) % 4;
-  const n = Math.max(1, pickedTurtles().filter((t) => !notReady(t)).length);
+  const n = Math.max(1, pickedTurtles().length);
   return Array.from({ length: n }, (_, k) => {
     const x = p.x + k * p.spacing * WORLD_STEP.x[right];
     const z = p.z + k * p.spacing * WORLD_STEP.z[right];
-    return {
+    const tunnel = {
       x1: x, z1: z, x2: x + (p.length - 1) * WORLD_STEP.x[dir], z2: z + (p.length - 1) * WORLD_STEP.z[dir],
       label: `Planned tunnel ${k + 1} at Y ${p.y ?? "?"}`,
     };
-  });
+    const entrance = stairEntrance({ ...p, x, z });
+    return entrance?.depth > 0 ? [tunnel, {
+      x1: entrance.x, z1: entrance.z, x2: x, z2: z, stairs: true,
+      label: `Planned staircase ${k + 1}: ${entrance.x}, ${entrance.y}, ${entrance.z} to ${x}, ${p.y}, ${z}; 1 forward, 1 down`,
+    }] : [tunnel];
+  }).flat();
 }
 
 // 3D map ---------------------------------------------------------------------------
@@ -1140,7 +1200,8 @@ function jobBox(args) {
     const dir = d >= 0 ? d : Number(args.dir) || 0;
     const ex = args.x + (args.length - 1) * [0, 1, 0, -1][dir];
     const ez = args.z + (args.length - 1) * [-1, 0, 1, 0][dir];
-    return { x1: args.x, z1: args.z, x2: ex, z2: ez };
+    const entrance = args.access === "stairs" ? stairEntrance(args) : null;
+    return { x1: entrance?.x ?? args.x, z1: entrance?.z ?? args.z, x2: ex, z2: ez };
   }
   return null;
 }
@@ -1165,6 +1226,7 @@ function renderFleet() {
   renderFleetWarnings(turtles, f);
   renderPicker(turtles);
   renderFleetPreview();
+  renderJobQueue();
   renderDepotStatus();
   renderFleetMap(turtles, f);
 
@@ -1218,12 +1280,13 @@ function renderPicker(turtles) {
       });
     }
     const st = turtleState(t);
-    const reason = notReady(t);
+    const reason = notQueueReady(t);
+    const busy = !reason && Boolean(notReady(t));
     el.classList.toggle("unready", Boolean(reason));
     el.style.setProperty("--tone", `var(--${{ working: "accent", paused: "ink-2", attention: "warning", idle: "good", offline: "muted" }[st.key]})`);
     $(".status-dot", el).innerHTML = ICONS[st.key];
     $(".pick-name", el).textContent = nameOf(t);
-    el.title = `${nameOf(t)}: ${st.label}${reason ? ` (${reason})` : ""}`;
+    el.title = `${nameOf(t)}: ${st.label}${reason ? ` (${reason})` : busy ? " (can join the mining queue)" : " (ready now)"}`;
     $("input", el).checked = state.picked.has(t.id);
     if (box.children[i] !== el) box.insertBefore(el, box.children[i] ?? null);
   });
@@ -1252,35 +1315,122 @@ function fleetParams() {
 function renderFleetPreview() {
   const picked = pickedTurtles();
   const ready = picked.filter((t) => !notReady(t));
-  $("#picker-count").textContent = `${picked.length} picked${picked.length !== ready.length ? `, ${ready.length} ready` : ""}`;
+  const queueable = picked;
+  $("#picker-count").textContent = `${picked.length} picked · ${ready.length} ready now`;
   const { kind, params: p } = fleetParams();
   let text = "";
-  if (!ready.length) {
-    text = "Pick the turtles to send. Only online, idle turtles that know their GPS facing can start.";
+  if (!queueable.length) {
+    text = "Pick turtles for the job. The mining queue waits for their GPS connection and current work.";
   } else if (kind === "branchMine") {
-    if (p.x != null && p.z != null && p.y != null && p.length) {
-      const n = ready.length;
+    const entrance = stairEntrance(p);
+    if (entrance && p.length) {
+      const n = queueable.length;
       const levels = levelOffsets(p.y, p.band ?? 0).map((off) => p.y + off);
       const item = $("#fleet-job-form").elements.namedItem("goalItem").selectedOptions[0]?.textContent.toLowerCase();
-      text = `${n} turtle${n === 1 ? "" : "s"} heading ${p.dir} from ${p.x}, ${p.z}` +
+      text = `${n} turtle${n === 1 ? "" : "s"} heading ${p.dir}` +
         (n > 1 ? `, ${p.spacing} apart going ${COMPASS[(COMPASS.indexOf(p.dir) + 1) % 4]}` : "") +
-        `, tunnelling at Y ${levels.join(", ")} up to ${p.length} blocks out. ` +
+        `. ${n > 1 ? "First entrance" : "Entrance"} X ${entrance.x}, Y ${entrance.y}, Z ${entrance.z} → bottom X ${p.x}, Y ${p.y}, Z ${p.z}. ` +
+        (entrance.depth ? `${entrance.depth}-step staircase (1 forward, 1 down), then ` : "No descent needed; ") +
+        `tunnelling at Y ${levels.join(", ")} up to ${p.length} blocks out. ` +
         (p.goal > 0 ? `Each comes back once it has ${p.goal} ${item}.` : "Each mines its whole area.");
     } else {
-      text = "Fill in the start position and level.";
+      text = p.entryY != null && p.y != null && p.entryY < p.y
+        ? "Stair entrance Y must be at or above the target level."
+        : "Fill in the tunnel bottom position, target level and stair entrance Y.";
     }
   } else if ([p.x1, p.z1, p.x2, p.z2, p.yTop, p.yBottom].every((v) => v != null)) {
     const w = Math.abs(p.x2 - p.x1) + 1;
     const l = Math.abs(p.z2 - p.z1) + 1;
     const h = Math.abs(p.yTop - p.yBottom) + 1;
-    const strips = Math.min(ready.length, Math.max(w, l));
+    const strips = Math.min(queueable.length, Math.max(w, l));
     text = `Digs X ${span(p.x1, p.x2)}, Z ${span(p.z1, p.z2)}, from Y ${Math.max(p.yTop, p.yBottom)} down to Y ${Math.min(p.yTop, p.yBottom)}: ` +
       `${w} × ${l} × ${h} (${fmt(w * l * h)} blocks), split into ${strips} strip${strips === 1 ? "" : "s"}. Outlined on the map.`;
   } else {
     text = "Set both corners (stand a turtle on each and click At turtle) and the top and bottom Y.";
   }
+  const busy = picked.filter((t) => !notQueueReady(t) && notReady(t)).length;
+  if (busy) text += ` ${busy} picked turtle${busy === 1 ? " is" : "s are"} busy; queue the job to wait for them.`;
+  const unavailable = picked.filter(notQueueReady).length;
+  if (unavailable) text += ` ${unavailable} picked turtle${unavailable === 1 ? " needs" : "s need"} an online GPS connection.`;
   $("#fleet-job-preview").textContent = text;
   if (!$("#bulk-rename").hidden) renderBulkRenamePreview();
+}
+
+function updateQueueControls() {
+  for (const button of $$("[data-queue-mutation]")) {
+    button.disabled = !state.connected || !state.queueReady;
+  }
+}
+
+function queuedJobLocation(job) {
+  const p = job.params ?? {};
+  if (job.kind === "branchMine") {
+    const entrance = stairEntrance(p);
+    return `Bottom X ${p.x}, Y ${p.y}, Z ${p.z} · ${p.dir} · ${p.length} blocks` +
+      (entrance ? ` · Stair entrance ${entrance.x}, ${entrance.y}, ${entrance.z}` : "");
+  }
+  if (job.kind === "areaQuarry") {
+    return `X ${span(p.x1, p.x2)}, Z ${span(p.z1, p.z2)} · Y ${span(p.yTop, p.yBottom)}`;
+  }
+  return "";
+}
+
+function renderJobQueue() {
+  const { paused, jobs = [], error } = state.jobQueue ?? {};
+  const counts = Object.fromEntries(Object.keys(QUEUE_LABELS).map((key) => [key, jobs.filter((job) => job.state === key).length]));
+  const summary = [paused ? "Queue paused" : "Automatic dispatch on"];
+  if (counts.queued) summary.push(`${counts.queued} waiting`);
+  if (counts.running) summary.push(`${counts.running} running`);
+  if (counts.blocked) summary.push(`${counts.blocked} blocked`);
+  if (counts.completed) summary.push(`${counts.completed} completed`);
+  if (counts.cancelled) summary.push(`${counts.cancelled} cancelled`);
+  $("#job-queue-summary").textContent = state.queueReady ? summary.join(" · ") : "Waiting for server…";
+  $("#job-queue-error").textContent = error ?? "";
+  $("#job-queue-error").hidden = !error;
+  $("#btn-pause-queue").textContent = paused ? "Resume queue" : "Pause queue";
+  $("#btn-pause-queue").setAttribute("aria-pressed", String(Boolean(paused)));
+  $("#job-queue-empty").hidden = jobs.length > 0;
+
+  const list = $("#job-queue-list");
+  const existing = new Map([...list.children].map((el) => [el.dataset.id, el]));
+  jobs.forEach((job, index) => {
+    const key = String(job.id);
+    let el = existing.get(key);
+    existing.delete(key);
+    if (!el) {
+      el = document.createElement("li");
+      el.className = "queued-job";
+      el.dataset.id = key;
+      el.innerHTML = '<div class="queued-job-head"><h3></h3><span class="queue-state"></span></div><p class="queued-job-location"></p><p class="queued-job-progress"></p><p class="queued-job-message"></p><button type="button" class="btn ghost sm" data-queue-mutation data-cancel-job>Cancel</button>';
+    }
+    const knownState = Object.hasOwn(QUEUE_LABELS, job.state) ? job.state : "queued";
+    const assignments = job.assignments ?? [];
+    const turtleCount = job.ids?.length ?? assignments.length;
+    const done = assignments.filter((assignment) => assignment.done).length;
+    const active = ["queued", "running", "blocked"].includes(job.state);
+    $("h3", el).textContent = KIND_NAMES[job.kind] ?? "Fleet job";
+    const badge = $(".queue-state", el);
+    badge.dataset.state = knownState;
+    badge.textContent = QUEUE_LABELS[knownState];
+    $(".queued-job-location", el).textContent = queuedJobLocation(job);
+    $(".queued-job-progress", el).textContent = `${turtleCount} turtle${turtleCount === 1 ? "" : "s"}` +
+      (assignments.length ? ` · ${done} of ${assignments.length} assignments finished` : active ? " · Waiting for assignment" : "");
+    const fallback = job.state === "queued"
+      ? paused ? "Waiting for the queue to resume." : "Waiting for earlier jobs and all selected turtles to be idle."
+      : job.state === "running" ? "Waiting for every assigned turtle to finish."
+      : job.state === "blocked" ? "Needs attention. Check the assigned turtles or cancel this job."
+      : "";
+    const message = $(".queued-job-message", el);
+    message.textContent = job.message || fallback;
+    message.hidden = !message.textContent;
+    const cancel = $("[data-cancel-job]", el);
+    cancel.dataset.cancelJob = key;
+    cancel.hidden = !active;
+    cancel.setAttribute("aria-label", `Cancel ${KIND_NAMES[job.kind] ?? "fleet job"} at position ${index + 1}`);
+    if (list.children[index] !== el) list.insertBefore(el, list.children[index] ?? null);
+  });
+  for (const el of existing.values()) el.remove();
+  updateQueueControls();
 }
 
 // How turtles get into the dock, from the sides picked in the form.
@@ -1330,7 +1480,11 @@ function renderFleetMap(turtles, f) {
     out += rect(v, a.x1, a.z1, a.x2, a.z2, "area", `Protected: ${a.name || "unnamed"} (Y ${a.y1} to ${a.y2})`);
     out += `<text class="area-label" x="${v.sx(Math.min(a.x1, a.x2) - 0.5)}" y="${v.sy(Math.min(a.z1, a.z2) - 0.5) - 4}">${escapeXml(a.name || "")}</text>`;
   }
-  for (const p of plans) out += rect(v, p.x1, p.z1, p.x2, p.z2, "plan", p.label);
+  for (const p of plans) {
+    out += p.stairs
+      ? `<line class="plan-stairs" x1="${v.sx(p.x1)}" y1="${v.sy(p.z1)}" x2="${v.sx(p.x2)}" y2="${v.sy(p.z2)}"><title>${escapeXml(p.label)}</title></line>`
+      : rect(v, p.x1, p.z1, p.x2, p.z2, "plan", p.label);
+  }
   for (const { t, box } of jobs) {
     const a = t.status.fleetJob.args;
     out += rect(v, box.x1, box.z1, box.x2, box.z2, "job-area", `${nameOf(t)}: ${KIND_NAMES[a.kind]} (${a.kind === "branchMine" ? `Y ${a.y}` : `Y ${a.yTop} to ${a.yBottom}`})`);
@@ -1357,6 +1511,7 @@ function renderFleetMap(turtles, f) {
 function setFleet(fleet) {
   if (!fleet) return;
   state.fleet = fleet;
+  syncStairEntrance();
   if (!state.fleetDirty) fillFleetForm();
 }
 
@@ -1450,6 +1605,7 @@ function setFleetTab(name) {
     for (const input of $$("input, select", el)) input.disabled = el.hidden;
   }
   store.set("fleetTab", name);
+  syncStairEntrance();
   renderFleetPreview();
 }
 
@@ -1595,7 +1751,12 @@ function bindEvents() {
     form.hidden = true;
   });
 
-  for (const btn of $$("[data-cmd]")) btn.addEventListener("click", () => command(btn.dataset.cmd));
+  for (const btn of $$("[data-cmd]")) {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.cmd === "forceHome" && !confirm("Cancel this job and mine a route home? Protected blocks, areas and other turtles stay protected; the route may detour.")) return;
+      command(btn.dataset.cmd);
+    });
+  }
   for (const tab of $$(".tab[data-tab]")) {
     tab.addEventListener("click", () => {
       setTab(tab.dataset.tab);
@@ -1627,6 +1788,7 @@ function bindEvents() {
   jobForm.addEventListener("input", (event) => {
     const { name, value } = event.target;
     const presets = { preset: "y", bottomPreset: "yBottom" };
+    if (name === "entryY") event.target.dataset.custom = "true";
     if (presets[name] && value !== "") jobForm.elements[presets[name]].value = value;
     const goal = name === "preset" && event.target.selectedOptions[0]?.dataset.goal;
     if (goal) jobForm.elements.namedItem("goalItem").value = goal;
@@ -1636,6 +1798,7 @@ function bindEvents() {
         select.value = [...select.options].some((o) => o.value === value) ? value : "";
       }
     }
+    if (name === "y" || name === "preset") syncStairEntrance();
     renderFleetPreview();
     invalidate("fleet");
   });
@@ -1648,7 +1811,27 @@ function bindEvents() {
       return;
     }
     $("#fleet-job-result").hidden = true;
-    sendRaw({ type: "fleetJob", kind, ids, params });
+    const queued = event.submitter?.value === "queue";
+    if (!queued && pickedTurtles().some(notReady)) {
+      toast("Some picked turtles are not ready. Add the job to the queue, or use All ready.", "warn");
+      return;
+    }
+    if (queued) $("#job-queue-result").hidden = true;
+    sendRaw({ type: queued ? "queueFleetJob" : "fleetJob", kind, ids, params });
+  });
+  $("#btn-pause-queue").addEventListener("click", () => {
+    $("#job-queue-result").hidden = true;
+    sendRaw({ type: "pauseJobQueue", paused: !state.jobQueue.paused });
+  });
+  $("#job-queue-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-cancel-job]");
+    if (!button || button.disabled) return;
+    const job = state.jobQueue.jobs.find((candidate) => String(candidate.id) === button.dataset.cancelJob);
+    if (!job || !["queued", "running", "blocked"].includes(job.state)) return;
+    const assigned = job.state === "running" || (job.state === "blocked" && job.assignments?.length);
+    if (assigned && !confirm("Cancel this mining job? Assigned turtles will be recalled and the queue will pause.")) return;
+    $("#job-queue-result").hidden = true;
+    sendRaw({ type: "cancelQueuedJob", id: job.id });
   });
   for (const btn of $$("[data-use-pos]")) {
     btn.addEventListener("click", () => {
@@ -1680,6 +1863,7 @@ function bindEvents() {
       const action = btn.dataset.bulk;
       const n = `${ids.length} turtle${ids.length === 1 ? "" : "s"}`;
       if (action === "goHome" && !confirm(`Cancel the jobs of ${n} and send them home?`)) return;
+      if (action === "forceHome" && !confirm(`Cancel the jobs of ${n} and mine routes home? Protected blocks, areas and other turtles stay protected; routes may detour.`)) return;
       if (action === "setHome" && !confirm(`Make the current spot of each of ${n} its new home?`)) return;
       sendRaw({ type: "cmd", ids, action, args: {} });
     });

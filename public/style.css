@@ -483,6 +483,7 @@ textarea {
 .map .area-label { fill: var(--critical); font: 600 10px var(--font); }
 .map .job-area { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: var(--accent); stroke-width: 1; }
 .map .plan { fill: color-mix(in srgb, var(--accent) 8%, transparent); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 3; }
+.map .plan-stairs { fill: none; stroke: var(--accent); stroke-width: 3; stroke-dasharray: 2 3; stroke-linecap: round; }
 .map .home-dot { fill: none; stroke: var(--ink-2); stroke-width: 1.5; }
 .map .selected-ring { fill: none; stroke: var(--ink); stroke-width: 1.5; }
 .map .map-label { fill: var(--ink); font: 600 11px var(--font); paint-order: stroke; stroke: var(--page); stroke-width: 3px; }
@@ -575,6 +576,23 @@ textarea {
 .form-msg.error { border-left: 3px solid var(--critical); }
 .callout.warn { margin: 0; border-left: 3px solid var(--warning); color: var(--ink); }
 .fleet-map { max-width: none; }
+.job-queue { display: grid; gap: 12px; }
+.job-queue .card-head { margin-bottom: 0; flex-wrap: wrap; }
+.queue-summary { margin: 0; font-size: 13px; }
+.job-queue-list { display: grid; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.queued-job { display: grid; gap: 6px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.queued-job-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.queued-job-head h3 { font-size: 13px; }
+.queued-job p { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.queued-job-location { color: var(--ink-2); font-family: var(--mono); }
+.queued-job-progress { color: var(--muted); }
+.queued-job-message { color: var(--ink-2); }
+.queued-job > .btn { justify-self: end; }
+.queue-state { flex: none; padding: 2px 7px; border-radius: 20px; background: var(--surface); color: var(--ink-2); font-size: 11px; font-weight: 600; }
+.queue-state[data-state="running"] { color: var(--accent); }
+.queue-state[data-state="blocked"] { color: var(--warning); }
+.queue-state[data-state="completed"] { color: var(--good); }
+.queue-state[data-state="cancelled"] { color: var(--muted); }
 
 .settings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .settings .card { display: grid; gap: 12px; }

@@ -275,10 +275,12 @@
                 <p id="home-line" class="home-line"></p>
                 <div class="row">
                   <button class="btn needs-online" data-cmd="goHome" title="Cancels any running job">Go home</button>
+                  <button class="btn needs-online" data-cmd="forceHome" title="Cancel the job and return directly, mining ordinary blocks. Protected blocks, areas and other turtles stay protected; the route may detour.">Force home</button>
                   <button class="btn needs-idle" data-cmd="setHome">Set home here</button>
                   <button id="btn-home-coords" class="btn ghost needs-idle">Set home to…</button>
                   <button id="btn-reset-pos" class="btn ghost needs-idle" title="Use after moving the turtle by hand">Reset position</button>
                 </div>
+                <p class="hint">Force home cancels the job and returns by mining ordinary blocks. Protected blocks, areas and other turtles stay protected; the route may detour.</p>
                 <form id="home-form" class="home-form" hidden>
                   <div class="fields">
                     <label class="field"><span>X</span><input name="x" type="number" required></label>
@@ -386,14 +388,15 @@
                           <option value="">Custom level</option>
                         </select>
                       </label>
-                      <label class="field"><span>Level (Y)</span><input name="y" type="number" min="-64" max="319" value="-59" required></label>
+                      <label class="field"><span>Level (Y)</span><input name="y" type="number" min="-64" max="318" value="-59" required></label>
+                      <label class="field"><span>Stair entrance Y</span><input name="entryY" type="number" min="-59" max="318" value="64" required></label>
                       <label class="field"><span>Direction</span>
                         <select name="dir"><option>north</option><option selected>east</option><option>south</option><option>west</option></select>
                       </label>
                     </div>
                     <div class="fields">
-                      <label class="field"><span>Start X</span><input name="x" type="number" required></label>
-                      <label class="field"><span>Start Z</span><input name="z" type="number" required></label>
+                      <label class="field"><span>Tunnel bottom X</span><input name="x" type="number" required></label>
+                      <label class="field"><span>Tunnel bottom Z</span><input name="z" type="number" required></label>
                       <label class="field"><span>Spacing</span><input name="spacing" type="number" min="2" max="16" value="3" required></label>
                     </div>
                     <div class="fields">
@@ -416,10 +419,10 @@
                       <label class="field"><span>Go at most (blocks)</span><input name="length" type="number" min="1" max="1024" value="128" required></label>
                     </div>
                     <div class="row between">
-                      <button type="button" class="btn sm" data-use-pos="x,z">Start at selected turtle</button>
+                      <button type="button" class="btn sm" data-use-pos="x,z">Bottom at selected turtle</button>
                       <label class="check"><input name="scan" type="checkbox" checked><span>Mine ore veins in the walls</span></label>
                     </div>
-                    <p class="hint flush">Each turtle keeps mining until it has brought back its goal (0 means no goal), adding tunnels 3 blocks above and below its level while they stay within the height you set. When it's low on fuel or space, even partway through a vein, it goes to the depot and comes back to where it left off. It digs a 1×1 shaft straight down at its start, so pick a start out in the open, away from builds.</p>
+                    <p class="hint flush">Each turtle enters by a staircase, moving 1 block forward and 1 down toward the tunnel bottom. The entrance lies behind the bottom in the chosen direction; every block down needs one block of horizontal space. Pick an entrance in the open, away from builds. Turtles mine until they bring back their goal (0 means no goal), adding tunnels 3 blocks above and below within the height you set. When fuel or space runs low, they go to the depot and return to where they left off.</p>
                   </div>
                   <div data-kind="areaQuarry" hidden>
                     <div class="corner-row">
@@ -459,14 +462,16 @@
                   <p id="fleet-job-preview" class="hint"></p>
                   <p id="fleet-job-result" class="form-msg" role="status" hidden></p>
                   <div class="row">
-                    <button class="btn primary" type="submit">Start fleet job</button>
+                    <button class="btn primary" type="submit" name="dispatch" value="now">Start fleet job</button>
+                    <button id="btn-queue-job" class="btn" type="submit" name="dispatch" value="queue" data-queue-mutation disabled>Add to queue</button>
                     <button type="button" class="btn" data-bulk="pause">Pause</button>
                     <button type="button" class="btn" data-bulk="resume">Resume</button>
                     <button type="button" class="btn" data-bulk="goHome">Recall</button>
+                    <button type="button" class="btn" data-bulk="forceHome" title="Cancel picked turtles' jobs and return directly, mining ordinary blocks. Protected blocks, areas and other turtles stay protected; routes may detour.">Force home</button>
                     <button type="button" class="btn ghost" data-bulk="setHome">Set homes here</button>
                     <button type="button" class="btn ghost" id="btn-bulk-rename">Rename…</button>
                   </div>
-                  <p class="hint">The buttons next to Start act on the turtles picked above. Each turtle gets its own tunnel or strip, flies at its own height, and takes turns at the depot.</p>
+                  <p class="hint">Start fleet job needs every picked turtle ready now. Add to queue waits for busy or offline turtles and their GPS connection. Pause, Resume and Recall act on the picked turtles. Each turtle gets its own tunnel or strip and takes turns at the depot.</p>
                 </form>
                 <form id="bulk-rename" class="bulk-rename" hidden>
                   <h3>Rename the picked turtles</h3>
@@ -480,6 +485,19 @@
                     <button class="btn ghost sm" type="button" id="bulk-rename-cancel">Cancel</button>
                   </div>
                 </form>
+              </section>
+
+              <section class="card job-queue" aria-labelledby="job-queue-title">
+                <div class="card-head">
+                  <h2 id="job-queue-title">Mining queue</h2>
+                  <button id="btn-pause-queue" type="button" class="btn sm" data-queue-mutation disabled>Pause queue</button>
+                </div>
+                <p id="job-queue-summary" class="muted queue-summary" role="status">Waiting for server…</p>
+                <p id="job-queue-error" class="form-msg error" role="alert" hidden></p>
+                <p class="hint flush">Jobs run one at a time, once all their selected turtles are idle. Closing the browser keeps the server queue running. Pausing the queue holds the next job; it leaves the current job running.</p>
+                <p id="job-queue-result" class="form-msg" role="status" hidden></p>
+                <ol id="job-queue-list" class="job-queue-list"></ol>
+                <p id="job-queue-empty" class="hint flush">No mining jobs queued.</p>
               </section>
             </div>
 

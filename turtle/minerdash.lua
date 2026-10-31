@@ -20,10 +20,12 @@
 --    Turtles share where they are, so they steer around each other.
 -- Protected blocks and areas are never dug or built in, by any job or command.
 
-local VERSION = "1.6.0"
+local VERSION = "1.8.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
+local ROUTE_FILE = ".minerdash_route"
+local MAX_TRAIL = 100000
 local STOP = setmetatable({}, { __tostring = function() return "Stopped" end })
 
 if not turtle then error("MinerDash must run on a turtle", 0) end
@@ -111,12 +113,14 @@ local gpsState = "none" -- "none" (no wireless modem), "nofix" or "ok"
 local gpsChecked = false -- a GPS fix has been attempted since boot
 local leases = {} -- resource -> "granted" | "waiting"
 local fleetJob    -- { kind, args, step, phase, paused, failed } for the current fleet job
+local lastFleetResult -- durable receipt for an automatically queued assignment
 local blocked, blockedCount = {}, 0 -- blocks found in the way while travelling (local coords)
 local traffic, trafficCount = {}, 0 -- blocks moving turtles are in or about to enter -> until when
 local parked = {}                   -- blocks turtles are standing still in -> until when
 local homesNear = {}                -- other turtles' homes nearby -> until when
 local trail, trailSize = {}, 0      -- every block moved through since last home (local coords)
 local trailRoot, trailLo, trailHi   -- where the trail starts, and its bounding box
+local forgetTrail, remember       -- also used when the user changes home or GPS changes frame
 local travelNext                    -- the block this turtle is about to move into
 local odometer = 0                  -- blocks moved, ever (to measure real trip lengths)
 
@@ -145,6 +149,7 @@ local function loadState()
   if type(data) == "table" and data.pos then
     pos, heading, home, calib = data.pos, data.heading, data.home, data.calib
     fleetJob = data.fleetJob
+    lastFleetResult = data.lastFleetResult
     odometer = tonumber(data.odometer) or 0
     if data.holding then leases.depot = "granted" end
   end
@@ -154,7 +159,8 @@ local function saveState()
   local f = fs.open(STATE_FILE, "w")
   f.write(textutils.serialize({
     pos = pos, heading = heading, home = home, calib = calib,
-    fleetJob = fleetJob, holding = leases.depot == "granted", odometer = odometer,
+    fleetJob = fleetJob, lastFleetResult = lastFleetResult,
+    holding = leases.depot == "granted", odometer = odometer,
   }))
   f.close()
 end
@@ -190,6 +196,8 @@ end
 
 local function setHome()
   home = here()
+  forgetTrail()
+  remember(pos)
   saveState()
   changed()
 end
@@ -308,10 +316,12 @@ local function onFix(l, w)
     -- obstacles remembered relative to it.
     if job then stopRequested = true end
     blocked, blockedCount = {}, 0
-    trail, trailSize, trailRoot, trailLo, trailHi = {}, 0, nil, nil, nil
     if not slip then
       -- First assume only the position slipped (e.g. the server stopped mid-move).
       pos = fromWorld(w)
+      -- A corrected position keeps the same coordinate frame and home. Keep
+      -- the old route, adding the corrected cell rather than replacing it.
+      remember(pos)
       calib.slip = { x = pos.x, z = pos.z }
       saveState()
       changed()
@@ -322,6 +332,7 @@ local function onFix(l, w)
     -- hand. Recalibrate, but keep home at its real location.
     log("warn", "Turtle was moved. Move it one block to recalibrate GPS.")
     savedHome = { w = toWorld(home), compass = (calib.f0 + home.heading) % 4 }
+    forgetTrail()
   elseif calib and (l.x ~= calib.l.x or l.z ~= calib.l.z) then
     for f0 = 0, 3 do
       calib.f0 = f0
@@ -330,6 +341,8 @@ local function onFix(l, w)
           home = fromWorld(savedHome.w)
           home.heading = (savedHome.compass - f0) % 4
           calib.home = nil
+          forgetTrail()
+          remember(pos)
         end
         saveState()
         changed()
@@ -409,7 +422,8 @@ end
 local function neighbour(dir)
   if dir == "up" then return { x = pos.x, y = pos.y + 1, z = pos.z } end
   if dir == "down" then return { x = pos.x, y = pos.y - 1, z = pos.z } end
-  return { x = pos.x + DX[heading], y = pos.y, z = pos.z + DZ[heading] }
+  local sign = dir == "back" and -1 or 1
+  return { x = pos.x + DX[heading] * sign, y = pos.y, z = pos.z + DZ[heading] * sign }
 end
 
 -- Blocks dug, waiting to be reported for the dashboard's 3D map:
@@ -453,16 +467,28 @@ local function cellKey(x, y, z)
   return x .. "," .. y .. "," .. z
 end
 
-local function forgetTrail()
+forgetTrail = function()
+  local f, err = fs.open(ROUTE_FILE, "w")
+  if not f then error("Cannot save home route: " .. tostring(err), 0) end
+  f.writeLine(("v1 %d %d %d %d"):format(home.x, home.y, home.z, home.heading))
+  f.close()
   trail, trailSize, trailRoot, trailLo, trailHi = {}, 0, nil, nil, nil
 end
 
--- Remember every block moved through since the turtle was last home, so it
--- can always retrace its way back.
-local function remember(p)
-  if samePos(p, home) or trailSize >= 100000 then forgetTrail() end
+-- This belongs to home, not to a job's start. Append cells as they are visited;
+-- starting another job elsewhere never replaces the way back. A journal avoids
+-- rewriting the entire route on every move and survives a reboot/chunk unload.
+remember = function(p, loading)
+  if not loading and samePos(p, home) then forgetTrail() end
   local k = cellKey(p.x, p.y, p.z)
   if trail[k] then return end
+  if trailSize >= MAX_TRAIL then error("Home route memory full; return home before exploring further", 0) end
+  if not loading then
+    local f, err = fs.open(ROUTE_FILE, "a")
+    if not f then error("Cannot save home route: " .. tostring(err), 0) end
+    f.writeLine(k)
+    f.close()
+  end
   trail[k], trailSize = true, trailSize + 1
   if not trailRoot then
     trailRoot = { x = p.x, y = p.y, z = p.z }
@@ -474,6 +500,22 @@ local function remember(p)
   end
 end
 
+local function loadTrail()
+  if not fs.exists(ROUTE_FILE) then forgetTrail(); return end
+  local f, err = fs.open(ROUTE_FILE, "r")
+  if not f then error("Cannot read home route: " .. tostring(err), 0) end
+  local header = ("v1 %d %d %d %d"):format(home.x, home.y, home.z, home.heading)
+  if f.readLine() ~= header then f.close(); forgetTrail(); return end
+  while true do
+    local line = f.readLine()
+    if not line then break end
+    local x, y, z = line:match("^(-?%d+),(-?%d+),(-?%d+)$")
+    if x then remember({ x = tonumber(x), y = tonumber(y), z = tonumber(z) }, true) end
+    if trailSize > 0 and trailSize % 500 == 0 then sleep(0) end
+  end
+  f.close()
+end
+
 local SIDES = {
   forward = { move = turtle.forward, dig = turtle.dig, attack = turtle.attack, inspect = turtle.inspect },
   up = { move = turtle.up, dig = turtle.digUp, attack = turtle.attackUp, inspect = turtle.inspectUp },
@@ -482,6 +524,10 @@ local SIDES = {
 }
 
 local function move(dir)
+  local destination = neighbour(dir)
+  if trailSize >= MAX_TRAIL and not trail[cellKey(destination.x, destination.y, destination.z)] and not samePos(destination, home) then
+    error("Home route memory full; return home before exploring further", 0)
+  end
   local ok, err = SIDES[dir].move()
   if ok then
     if dir == "up" then
@@ -493,6 +539,7 @@ local function move(dir)
       pos.x, pos.z = pos.x + DX[heading] * s, pos.z + DZ[heading] * s
     end
     odometer = odometer + 1
+    blocked[cellKey(pos.x, pos.y, pos.z)] = nil
     remember(pos)
     saveState()
     changed()
@@ -623,10 +670,11 @@ end
 -- Where moving turtles are (or are about to be) only counts when planning
 -- normally; a lenient plan ignores it and waits if one is really there.
 -- Turtles standing still, and turtles bumped into recently, always count.
-local function isOpen(x, y, z, lenient)
+local function isOpen(x, y, z, lenient, mining)
   local k = cellKey(x, y, z)
   local now = os.clock()
   local t, p, b = traffic[k], parked[k], blocked[k]
+  if mining then b = nil end -- ordinary obstacles may be mined on Force home
   if (not lenient and t and t > now) or (p and p > now) then return false end
   return b == nil or (b ~= true and b < now)
 end
@@ -703,9 +751,10 @@ local function findPath(goal, lenient)
   -- Routes kept to blocks it knows keep out of it altogether: they'd often go
   -- back through it the way they came. (Without one, it's still avoided.)
   local keepOut = dock and goal.keepOut and not inDockRoom(dock, c.x, c.y, c.z)
-  local startKey = cellKey(from.x, from.y, from.z)
+  -- The cheapest onward route depends on facing as well as position.
+  local startKey = cellKey(from.x, from.y, from.z) .. ":" .. heading
   local g, came, closed, open = { [startKey] = 0 }, {}, {}, {}
-  heapPush(open, { x = from.x, y = from.y, z = from.z, k = startKey, h = heading }, goal.estimate(from.x, from.y, from.z))
+  heapPush(open, { x = from.x, y = from.y, z = from.z, k = startKey, h = heading, cost = 0 }, goal.estimate(from.x, from.y, from.z))
   local expanded, limit = 0, goal.limit or 8000
   while #open > 0 do
     local cur = heapPop(open)
@@ -729,16 +778,23 @@ local function findPath(goal, lenient)
         local x, y, z = cur.x + d[1], cur.y + d[2], cur.z + d[3]
         local k = cellKey(x, y, z)
         -- A turtle standing on the goal itself is waited for, not avoided.
-        if not closed[k] and (isOpen(x, y, z, lenient) or (goal.reached(x, y, z) and blocked[k] == nil))
+        if (isOpen(x, y, z, lenient, goal.mining) or (goal.reached(x, y, z) and blocked[k] == nil))
+          and not (goal.blocked and (goal.blocked[k] == true or (tonumber(goal.blocked[k]) or 0) > os.clock()))
           and x >= lo.x and x <= hi.x and y >= lo.y and y <= hi.y and z >= lo.z and z <= hi.z
           and (not goal.allowed or goal.allowed(x, y, z))
           and not (dock and x == dock.x and y == dock.y and z == dock.z)
           and not (keepOut and inDockRoom(dock, x, y, z)) then
           local h = d[4] or cur.h
-          local ng = g[cur.k] + 1 + turnsTo(h, cur.h) + ((dock and inDockRoom(dock, x, y, z)) and 4 or 0)
-          if ng < (g[k] or math.huge) then
-            g[k], came[k] = ng, cur
-            heapPush(open, { x = x, y = y, z = z, k = k, h = h }, ng + goal.estimate(x, y, z))
+          -- Either approach can be quickest once the next turn is considered.
+          for variant = 1, d[4] ~= nil and 2 or 1 do
+            local back = variant == 2
+            local facing = back and (h + 2) % 4 or h
+            local stateKey = k .. ":" .. facing
+            local ng = g[cur.k] + 1 + turnsTo(facing, cur.h) + ((dock and inDockRoom(dock, x, y, z)) and 4 or 0)
+            if not closed[stateKey] and ng < (g[stateKey] or math.huge) then
+              g[stateKey], came[stateKey] = ng, cur
+              heapPush(open, { x = x, y = y, z = z, k = stateKey, h = facing, back = back, cost = ng }, ng + goal.estimate(x, y, z))
+            end
           end
         end
       end
@@ -756,23 +812,39 @@ local function hasFallen(name)
 end
 
 -- One step to a neighbouring cell: true, or false and why.
-local function stepTo(n)
+local function stepTo(n, mining)
   local dir = n.y > pos.y and "up" or n.y < pos.y and "down" or "forward"
   if dir == "forward" then
-    for h = 0, 3 do
-      if pos.x + DX[h] == n.x and pos.z + DZ[h] == n.z then face(h) end
+    if n.back then face(n.h or heading) end
+    if n.back and pos.x - DX[heading] == n.x and pos.z - DZ[heading] == n.z then
+      dir = "back"
+    else
+      for h = 0, 3 do
+        if pos.x + DX[h] == n.x and pos.z + DZ[h] == n.z then face(h) end
+      end
     end
   end
   for _ = 1, 20 do
     local ok, err = move(dir)
     if ok then return true end
     if err == "Out of fuel" then error("Out of fuel", 0) end
+    if dir == "back" then
+      -- There is no rear inspection API. Face a blocked step before applying
+      -- the same safety checks used by forward travel.
+      face((heading + 2) % 4)
+      dir = "forward"
+    end
     local found, block = SIDES[dir].inspect()
     if found and isTurtleBlock(block.name) then return false, "turtle" end
     if found and not LIQUIDS[block.name] then
-      local fellIn = trail[cellKey(n.x, n.y, n.z)] and hasFallen(block.name) and not protection(dir, block)
-      if not fellIn then return false, "block" end
-      if SIDES[dir].dig() then noteDug(dir, block.name) end
+      if mining then
+        local cleared, why = clear(dir)
+        if not cleared then return false, why == "another turtle is in the way" and "turtle" or "block" end
+      else
+        local fellIn = trail[cellKey(n.x, n.y, n.z)] and hasFallen(block.name) and not protection(dir, block)
+        if not fellIn then return false, "block" end
+        if SIDES[dir].dig() then noteDug(dir, block.name) end
+      end
     elseif not SIDES[dir].attack() then
       sleep(0.2) -- a mob in the way
     end
@@ -809,39 +881,55 @@ end
 -- there's no open way.
 local function navigate(goal)
   local tries, waits = 0, 0
-  local tryKnown = trailSize > 0 and not goal.onTrail
+  local tryKnown = trailSize > 0 and not goal.onTrail and not goal.mining
   while not goal.reached(pos.x, pos.y, pos.z) do
     checkStop()
     -- The way it knows, unless that's a long way round.
     local path = tryKnown and findPath(knownGoal(goal))
-    if path and #path - 1 > 2 * goal.estimate(pos.x, pos.y, pos.z) + 16 then path = nil end
+    local direct = goal.estimate(pos.x, pos.y, pos.z)
+    if path then
+      local cost = goal.homeRoute and path[#path].cost or #path - 1
+      local limit = goal.homeRoute and direct + math.max(8, math.floor(direct / 5)) or 2 * direct + 16
+      if cost > limit then path = nil end
+    end
     tryKnown = path ~= nil
     -- If other turtles leave no way through, plan as if they weren't there:
     -- they move on, and bumping into one just means waiting.
     path = path or findPath(goal) or findPath(goal, true)
     if not path then
       travelNext = nil
-      error(("Found no open way to %s without digging"):format(describe(goal.centre)), 0)
+      error((goal.mining and "Found no safe mining route to %s" or "Found no open way to %s without digging"):format(describe(goal.centre)), 0)
     end
     for i = 2, #path do
       travelNext = path[i]
-      local ok, why = stepTo(path[i])
+      local ok, why = stepTo(path[i], goal.mining)
       if not ok then
         if why == "turtle" then
           -- Another turtle in the way: wait, then go around if it stays put.
           waits = waits + 1
-          if waits % 10 == 0 then markBlocked(path[i], os.clock() + 20) end
+          if waits % 10 == 0 then
+            markBlocked(path[i], os.clock() + 20)
+            if goal.mining then
+              goal.blocked = goal.blocked or {}
+              goal.blocked[cellKey(path[i].x, path[i].y, path[i].z)] = os.clock() + 20
+            end
+          end
           sleep(0.5)
         else
           markBlocked(path[i])
+          if goal.mining then
+            goal.blocked = goal.blocked or {}
+            goal.blocked[cellKey(path[i].x, path[i].y, path[i].z)] = true
+          end
         end
         break
       end
+      if heading ~= path[i].h then break end -- inspecting behind changed the approach; replan
     end
     tries = tries + 1
     if tries > 600 then
       travelNext = nil
-      error(("Gave up finding an open way to %s"):format(describe(goal.centre)), 0)
+      error((goal.mining and "Gave up finding a safe mining route to %s" or "Gave up finding an open way to %s"):format(describe(goal.centre)), 0)
     end
   end
   travelNext = nil
@@ -867,21 +955,27 @@ local function trailGoal(t)
   return goal
 end
 
--- Go home the way the turtle came: back through blocks it already passed
--- through (taking shortcuts along its own trail), clearing only things that
--- fell into the way. If something else blocks the trail, find any other open
--- route instead.
+-- Prefer a short open route home. The recorded trail is a fallback when the
+-- broader search cannot find a way; travel still never digs new blocks.
 local function retraceHome()
   if samePos(pos, home) then return end
-  setDetail("Retracing its way home")
+  setDetail("Heading home")
+  local goal = cellGoal(home)
+  goal.homeRoute = true
+  local ok, err = pcall(navigate, goal)
+  if ok then return end
+  if err == STOP then error(STOP, 0) end
   if trailSize > 0 then
     for _, target in ipairs({ home, trailRoot }) do
-      local ok, err = pcall(navigate, trailGoal(target))
-      if not ok and err == STOP then error(STOP, 0) end
-      if ok then break end
+      local retraced, why = pcall(navigate, trailGoal(target))
+      if not retraced and why == STOP then error(STOP, 0) end
+      if retraced then
+        if not samePos(pos, home) then navigate(goal) end
+        return
+      end
     end
   end
-  navigate(cellGoal(home))
+  error(err, 0)
 end
 
 -- Inventory & fuel ----------------------------------------------------------
@@ -1565,9 +1659,32 @@ local function goalOf(a)
   return GOAL_ITEMS[a.goalItem] or GOAL_ITEMS.valuables
 end
 
+local function branchEntry(a)
+  local depth = a.access == "stairs" and a.entryY - a.y or 0
+  return { x = a.x - depth * CX[a.dir], y = a.y + depth, z = a.z - depth * CZ[a.dir] }
+end
+
+-- A stair column has a foot cell and the head cell used between its forward
+-- and down moves. Both are recognized after a reboot halfway through a step.
+local function branchStairPosition(a, w)
+  if a.access ~= "stairs" or across(a, w) ~= 0 then return nil end
+  local rise = -along(a, w)
+  if rise < 0 or rise > a.entryY - a.y then return nil end
+  local footY = a.y + rise
+  if w.y == footY or w.y == footY + 1 then return rise, w.y > footY end
+end
+
+local function branchClearHeadroom()
+  local ok, reason = clear("up")
+  if not ok then error("Can't clear tunnel headroom: " .. tostring(reason), 0) end
+end
+
 KINDS.branchMine = {
   total = function(a) return a.length * #levelsOf(a) end,
-  entry = function(a) return { x = a.x, y = a.y, z = a.z } end,
+  entry = branchEntry,
+  accessCost = function(a, w)
+    return a.access == "stairs" and not KINDS.branchMine.inside(a, w) and 2 * (a.entryY - a.y) or 0
+  end,
   cell = tunnelCell,
   -- On the tunnels' line within the height band: in a tunnel, or in a link
   -- between two. (Vein detours always come back to the tunnel before a step
@@ -1595,7 +1712,7 @@ KINDS.branchMine = {
   -- Both walls, the nearer first: four turns a block, whichever way along the
   -- tunnel it's going.
   work = function(a, i, veins)
-    clear("up")
+    branchClearHeadroom()
     if not a.scan then return true end
     if veins.resume then resumeVein(veins, veins.resume) end
     mineVein("down", veins, 0)
@@ -1621,9 +1738,40 @@ KINDS.branchMine = {
     end
     return "Tunnel at " .. where
   end,
-  -- Fly without digging to open air above the tunnels' start, then dig the
-  -- 1x1 shaft down: the only digging a level job does outside its slice.
-  enter = function(a)
+  -- New jobs reach their level along a 2-high diagonal staircase. Saved jobs
+  -- without an access marker retain the route their original plan allowed.
+  enter = function(a, service)
+    if a.access == "stairs" then
+      local top = branchEntry(a)
+      while true do
+        checkStop()
+        local rise, upper = branchStairPosition(a, toWorld(pos))
+        if rise == nil then
+          local ok, err = pcall(flyTo, top)
+          if not ok then
+            if err == STOP then error(STOP, 0) end
+            error("Can't reach the staircase entrance without digging. Set Entrance Y to an open surface or room: " .. tostring(err), 0)
+          end
+          rise, upper = a.entryY - a.y, false
+        end
+        if service and (emptySlots() <= 2 or fuelLevel() <
+          2 * (distance(toWorld(pos), top) + depotCost(top, fleetJob and fleetJob.route)) + 100) then
+          service()
+          -- Servicing can leave us at the depot. Re-read the saved geometric
+          -- position instead of continuing from a stale staircase index.
+          rise, upper = branchStairPosition(a, toWorld(pos))
+        end
+        if rise ~= nil then
+          if upper then digMove("down") end
+          branchClearHeadroom()
+          if rise == 0 then return end
+          faceCompass(a.dir)
+          digMove("forward")
+          digMove("down")
+          branchClearHeadroom()
+        end
+      end
+    end
     local w = toWorld(pos)
     if w.x ~= a.x or w.z ~= a.z then
       local s = fromWorld({ x = a.x, y = a.y, z = a.z })
@@ -1631,8 +1779,19 @@ KINDS.branchMine = {
     end
     goWorld({ y = a.y }, "y")
   end,
-  -- Back through the tunnels to the bottom of the shaft; the way up is open.
+  -- Exit only through open cells; constructions added to the stairs are never
+  -- treated as permission to excavate a fresh way out.
   exit = function(a)
+    if a.access == "stairs" then
+      local target = fromWorld(branchEntry(a))
+      if trailSize > 0 then
+        local ok, err = pcall(navigate, trailGoal(target))
+        if ok then return end
+        if err == STOP then error(STOP, 0) end
+      end
+      navigate(cellGoal(target))
+      return
+    end
     if KINDS.branchMine.inside(a, toWorld(pos)) then KINDS.branchMine.walk(a, { x = a.x, y = a.y, z = a.z }) end
   end,
 }
@@ -1698,7 +1857,9 @@ KINDS.areaQuarry = {
 -- with a margin.
 local function roundTrip(k, a, extra)
   local e = k.entry(a)
-  return 2 * (distance(toWorld(pos), e) + (extra or 0) + depotCost(e, fleetJob.route)) + 100
+  local w = toWorld(pos)
+  local access = k.accessCost and k.accessCost(a, w) or 0
+  return 2 * (distance(w, e) + access + (extra or 0) + depotCost(e, fleetJob.route)) + 100
 end
 
 -- Remember the longest real flight between the depot and the job, from one of
@@ -1708,10 +1869,10 @@ local function noteRoute(k, a, flown, w)
 end
 
 -- From anywhere to step i. Coming in from the depot, it measures the flight.
-local function moveToStep(k, a, i)
+local function moveToStep(k, a, i, service)
   if not k.inside(a, toWorld(pos)) then
     local from, start = toWorld(pos), odometer
-    k.enter(a)
+    k.enter(a, service)
     if atDepot(from) then noteRoute(k, a, odometer - start, toWorld(pos)) end
   end
   k.walk(a, k.cell(a, i))
@@ -1780,7 +1941,7 @@ local function fleetWork()
     while not done() do
       checkStop()
       service(cut)
-      moveToStep(k, a, fleetJob.step)
+      moveToStep(k, a, fleetJob.step, service)
       veins.left, veins.path, veins.cut, veins.resume = 32, {}, nil, fleetJob.vein
       cut = k.work(a, fleetJob.step, veins) == false
       -- A vein it had to leave is finished from where it left off.
@@ -1824,6 +1985,7 @@ local function fleetWork()
   end
   setDetail("Job done, unloading")
   visit()
+  if fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = true } end
   fleetJob = nil
   saveState()
   comeHome()
@@ -1834,6 +1996,10 @@ local function toCompass(v)
 end
 
 function jobs.fleetJob(a)
+  -- The server can resend after a lost connection. A saved receipt prevents
+  -- completed assignments from being mined twice, including after a reboot.
+  if a.queueId and lastFleetResult and lastFleetResult.id == a.queueId then return end
+  if fleetJob then error("Resume or cancel the saved fleet job first", 0) end
   local args
   if a.kind == "branchMine" then
     args = {
@@ -1843,6 +2009,13 @@ function jobs.fleetJob(a)
       spacing = clampInt(a.spacing, 2, 16, 3), band = a.band ~= nil and clampInt(a.band, 0, 16, 0) or nil,
       goal = clampInt(a.goal, 0, 100000, 0), goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
     }
+    if a.access == "stairs" then
+      local entryY = tonumber(a.entryY)
+      if not entryY or entryY ~= math.floor(entryY) or entryY < args.y or entryY < -64 or entryY > 318 then
+        error("Entrance Y must be a whole number from the mining level up to 318", 0)
+      end
+      args.access, args.entryY = "stairs", entryY
+    end
     args.levels = levelOffsets(args.y, args.band or 0)
   elseif a.kind == "areaQuarry" then
     local x1, x2 = clampInt(a.x1, -3e7, 3e7, 0), clampInt(a.x2, -3e7, 3e7, 0)
@@ -1856,6 +2029,7 @@ function jobs.fleetJob(a)
     error("Unknown fleet job " .. tostring(a.kind), 0)
   end
   fleetJob = { kind = args.kind, args = args, step = 0, phase = "work" }
+  if type(a.queueId) == "string" and #a.queueId <= 96 then fleetJob.queueId = a.queueId end
   saveState()
   log("info", "Starting fleet job: " .. args.kind)
   fleetWork()
@@ -1880,6 +2054,7 @@ function jobs.goHome()
   end
   if fleetJob then
     local k, a = KINDS[fleetJob.kind], fleetJob.args
+    if fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning home" } end
     fleetJob = nil
     saveState()
     -- Drop off what it mined (and refuel) on the way home.
@@ -1889,6 +2064,25 @@ function jobs.goHome()
     end
   end
   comeHome()
+end
+
+-- Explicit recovery: cancel the job and dig a short route home. Every dig
+-- still goes through clear/protection; restricted or unbreakable obstacles
+-- are remembered for this trip so the planner detours instead of retrying.
+function jobs.forceHome()
+  setDetail("Force home: mining a route")
+  pendingTrip = nil
+  if fleetJob and fleetJob.queueId then
+    lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; forcing home" }
+  end
+  fleetJob = nil
+  saveState()
+  refuelFromInventory(distance(pos, home) + 64)
+  local goal = cellGoal(home)
+  goal.mining, goal.blocked = true, {}
+  navigate(goal)
+  face(home.heading)
+  release("depot")
 end
 
 -- Manual actions (run when no job is active) ------------------------------------
@@ -1961,6 +2155,8 @@ actions.setHome = function(a)
     local w = { x = clampInt(a.x, -3e7, 3e7, 0), y = clampInt(a.y, -64, 320, 64), z = clampInt(a.z, -3e7, 3e7, 0) }
     home = fromWorld(w)
     home.heading = (toCompass(a.facing or "north") - calib.f0) % 4
+    forgetTrail()
+    remember(pos)
     saveState()
     changed()
     return true, ("Home set to %d, %d, %d"):format(w.x, w.y, w.z)
@@ -2020,6 +2216,7 @@ end
 local function runCommand(cmd)
   local name = cmd.action
   local a = type(cmd.args) == "table" and cmd.args or {}
+  local queueId = name == "fleetJob" and a.queueId or (name == "resume" and fleetJob and fleetJob.queueId)
   local isJob = jobs[name] ~= nil
   local fn = jobs[name] or actions[name]
   if not fn then
@@ -2029,7 +2226,7 @@ local function runCommand(cmd)
 
   stopRequested, pauseRequested = false, false
   if isJob then
-    if name ~= "goHome" then pendingTrip = nil end
+    if name ~= "goHome" and name ~= "forceHome" then pendingTrip = nil end
     job = { name = name, detail = "Starting", progress = 0 }
     around = nil
     changed()
@@ -2039,6 +2236,11 @@ local function runCommand(cmd)
   travelNext = nil
   local success = ok and res ~= false
   if not ok then msg = res == STOP and "Cancelled" or tostring(res) end
+  local resumableStop = res == STOP and fleetJob and fleetJob.queueId == queueId and fleetJob.paused and not fleetJob.failed
+  if queueId and not success and not resumableStop then
+    lastFleetResult = { id = queueId, ok = false, msg = tostring(msg or "Failed") }
+    saveState()
+  end
 
   if isJob then
     job = nil
@@ -2084,6 +2286,7 @@ local function status()
     fj = {
       kind = fleetJob.kind, step = fleetJob.step, total = k and k.total(fleetJob.args),
       paused = fleetJob.paused, failed = fleetJob.failed, args = fleetJob.args, found = fleetJob.found,
+      queueId = fleetJob.queueId,
     }
   end
   return {
@@ -2110,6 +2313,10 @@ local function status()
     fleetAt = fleet.updatedAt,
     around = around,
     queued = #queue,
+    queueSupported = true,
+    staircaseSupported = true,
+    forceHomeSupported = true,
+    lastFleetResult = lastFleetResult,
   }
 end
 
@@ -2165,7 +2372,7 @@ local function handleMessage(msg)
       local label = type(msg.args) == "table" and tostring(msg.args.label or "") or ""
       os.setComputerLabel(label ~= "" and label:sub(1, 32) or nil)
       changed()
-    elseif name == "goHome" and job then
+    elseif (name == "goHome" or name == "forceHome") and job then
       -- Cancel whatever is running; goHome then backs out of it and heads home.
       queue = { msg }
       stopRequested, pauseRequested = true, false
@@ -2297,6 +2504,7 @@ term.setCursorPos(1, 1)
 print(("MinerDash %s | turtle #%d %s"):format(VERSION, os.getComputerID(), os.getComputerLabel() or ""))
 loadState()
 loadFleet()
+loadTrail()
 remember(pos)
 refreshSurroundings()
 -- Pick an interrupted fleet job back up after a reboot or chunk reload.

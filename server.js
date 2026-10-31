@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -7,11 +7,13 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
 import { DEFAULT_FLEET, planFleetJob, sanitizeFleet, validateFleet } from "./fleet.js";
+import { FleetJobQueue } from "./fleet-queue.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8080;
 // Optional: force the URL baked into /turtle.lua (e.g. a custom domain).
 const PUBLIC_URL = process.env.PUBLIC_URL?.replace(/\/+$/, "");
+const QUEUE_PATH = path.resolve(process.env.FLEET_QUEUE_PATH || path.join(ROOT, ".data", "fleet-queue.json"));
 
 const DASHBOARD_PASSWORD = secretFromEnv("DASHBOARD_PASSWORD");
 const TURTLE_TOKEN = secretFromEnv("TURTLE_TOKEN");
@@ -24,7 +26,7 @@ const TURTLE_TIMEOUT_MS = 30_000;
 const MAX_LOGS = 200;
 const SNAPSHOT_LOGS = 50;
 // Actions the dashboard may send to every turtle at once.
-const BROADCAST_ACTIONS = new Set(["stop", "pause", "resume", "goHome", "update"]);
+const BROADCAST_ACTIONS = new Set(["stop", "pause", "resume", "goHome", "forceHome", "update"]);
 // After a restart, give turtles that held the dock time to reconnect and
 // reclaim it before anyone else gets a turn.
 const LEASE_GRACE_MS = 20_000;
@@ -144,7 +146,7 @@ const startedAt = Date.now();
 const INSTANCE = crypto.randomBytes(4).toString("hex");
 const BUILD = crypto
   .createHash("sha1")
-  .update(["server.js", "fleet.js", ...readdirSync(path.join(ROOT, "public")).map((f) => `public/${f}`)]
+  .update(["server.js", "fleet.js", "fleet-queue.js", ...readdirSync(path.join(ROOT, "public")).map((f) => `public/${f}`)]
     .map((f) => readFileSync(path.join(ROOT, f))).join("\0"))
   .digest("hex")
   .slice(0, 8);
@@ -187,6 +189,87 @@ function addLog(t, level, msg) {
 }
 
 const nameOf = (t) => t.label || `Turtle #${t.id}`;
+
+// Queued work outlives browser sessions and server restarts. Persist before
+// sending commands, so reconnects can safely retry the same assignment ID.
+let savedQueue;
+try {
+  savedQueue = JSON.parse(readFileSync(QUEUE_PATH, "utf8"));
+} catch (err) {
+  if (err.code !== "ENOENT") throw new Error(`Cannot load fleet queue: ${err.message}`);
+}
+const jobQueue = new FleetJobQueue({
+  state: savedQueue,
+  persist(state) {
+    mkdirSync(path.dirname(QUEUE_PATH), { recursive: true });
+    writeFileSync(`${QUEUE_PATH}.tmp`, JSON.stringify(state), { mode: 0o600 });
+    renameSync(`${QUEUE_PATH}.tmp`, QUEUE_PATH);
+  },
+  plan(kind, params, ids) {
+    const selected = ids.map((id) => ({ id, name: turtles.get(id) ? nameOf(turtles.get(id)) : `Turtle #${id}` }));
+    const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.homeWorld }));
+    return planFleetJob(fleet, kind, params, selected, homes);
+  },
+  inspect(id) {
+    const t = turtles.get(id);
+    return t && {
+      online: Boolean(t.socket),
+      fresh: t.freshStatus && !(t.pendingFleetUntil > Date.now()),
+      label: nameOf(t),
+      status: t.status,
+    };
+  },
+  dispatch(id, args, action = "fleetJob") {
+    const t = turtles.get(id);
+    if (t?.socket) dispatch(t, action, args);
+  },
+});
+let queueStorageError = null;
+let lastQueueJson;
+let queueEmergencyHold = false;
+
+function queueView() {
+  const queue = jobQueue.snapshot();
+  return { ...queue, paused: queue.paused || queueEmergencyHold, error: queueStorageError };
+}
+
+function broadcastJobQueue() {
+  const queue = queueView();
+  const json = JSON.stringify(queue);
+  if (json === lastQueueJson) return;
+  lastQueueJson = json;
+  broadcast({ type: "jobQueue", queue });
+}
+
+function queueAction(ws, action) {
+  try {
+    const result = action();
+    queueStorageError = null;
+    broadcastJobQueue();
+    send(ws, { type: "queueResult", ok: result.ok, msg: result.msg });
+    return result;
+  } catch (err) {
+    queueStorageError = `Could not save the fleet queue: ${err.message}`;
+    broadcastJobQueue();
+    send(ws, { type: "queueResult", ok: false, msg: queueStorageError });
+    return { ok: false };
+  }
+}
+
+function pauseJobQueue(ws, paused) {
+  // Keep emergency controls working even if the queue file cannot be written.
+  if (paused) queueEmergencyHold = true;
+  const result = queueAction(ws, () => jobQueue.pause(paused));
+  if (result.ok) queueEmergencyHold = false;
+  else queueStorageError = result.msg;
+  broadcastJobQueue();
+  return result;
+}
+
+function queueOwns(id) {
+  return jobQueue.snapshot().jobs.some((job) =>
+    ["running", "blocked"].includes(job.state) && job.assignments.some((a) => a.id === id && !a.done));
+}
 
 // ---------------------------------------------------------------------------
 // Fleet: settings and the dock
@@ -241,7 +324,7 @@ function handleLease(turtle, msg) {
 }
 
 // Turtles that can take a fleet job right now.
-function readyTurtles(ids) {
+function readyTurtles(ids, kind) {
   const ready = [];
   const skipped = [];
   for (const id of ids) {
@@ -249,8 +332,10 @@ function readyTurtles(ids) {
     if (!t) continue;
     const s = t.status ?? {};
     if (!t.socket) skipped.push(`${nameOf(t)} is offline`);
+    else if (!t.freshStatus) skipped.push(`${nameOf(t)} is still reporting its status`);
     else if (!s.gpsTrusted) skipped.push(`${nameOf(t)} doesn't know its GPS facing yet`);
-    else if (s.job) skipped.push(`${nameOf(t)} is busy`);
+    else if (kind === "branchMine" && !s.staircaseSupported) skipped.push(`${nameOf(t)} needs the latest script for staircase mining`);
+    else if (s.job || s.fleetJob || s.queued > 0 || t.pendingFleetUntil > Date.now() || queueOwns(t.id)) skipped.push(`${nameOf(t)} is busy or has saved work`);
     else ready.push({ id: t.id, name: nameOf(t) });
   }
   return { ready: ready.sort((a, b) => a.id - b.id), skipped };
@@ -258,14 +343,18 @@ function readyTurtles(ids) {
 
 function startFleetJob(ws, { kind, ids, params }) {
   if (!Array.isArray(ids) || typeof kind !== "string") return;
-  const { ready, skipped } = readyTurtles(ids);
+  const { ready, skipped } = readyTurtles([...new Set(ids.slice(0, 256).map(Number))], kind);
   const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.homeWorld }));
   const plan = planFleetJob(fleet, kind, params ?? {}, ready, homes);
   if (plan.error) {
     send(ws, { type: "fleetJobResult", ok: false, msg: [plan.error, ...skipped].join(" ") });
     return;
   }
-  for (const { id, args } of plan.assignments) dispatch(turtles.get(id), "fleetJob", args);
+  for (const { id, args } of plan.assignments) {
+    const t = turtles.get(id);
+    t.pendingFleetUntil = Date.now() + 10_000;
+    dispatch(t, "fleetJob", args);
+  }
   const msg = `Started ${plan.assignments.length} turtle${plan.assignments.length === 1 ? "" : "s"}.`;
   send(ws, { type: "fleetJobResult", ok: true, msg: [msg, ...skipped].join(" ") });
 }
@@ -302,6 +391,8 @@ function handleTurtle(ws) {
         label: typeof msg.label === "string" ? msg.label : null,
         version: msg.version ?? null,
         lastSeen: Date.now(),
+        freshStatus: false,
+        pendingFleetUntil: 0,
       });
       send(ws, { type: "welcome" });
 
@@ -328,6 +419,8 @@ function handleTurtle(ws) {
     switch (msg.type) {
       case "status": {
         const { type, ...status } = msg;
+        turtle.freshStatus = true;
+        if (status.job || status.fleetJob || status.queued > 0) turtle.pendingFleetUntil = 0;
         // Idle turtles re-send the same status every few seconds as a heartbeat.
         const json = JSON.stringify(status);
         if (json === turtle.statusJson) break;
@@ -341,6 +434,7 @@ function handleTurtle(ws) {
         addLog(turtle, ["warn", "error"].includes(msg.level) ? msg.level : "info", msg.msg);
         break;
       case "result":
+        if (msg.action === "fleetJob") turtle.pendingFleetUntil = 0;
         if (!msg.ok || msg.msg) {
           addLog(turtle, msg.ok ? "info" : "error", `${msg.action}: ${msg.msg ?? "failed"}`);
         }
@@ -379,16 +473,39 @@ function handleCommand(ws, { id, ids, action, args }) {
   if (typeof action !== "string" || action.length > 32) return;
   args = args && typeof args === "object" ? args : {};
 
+  // A fleet-wide halt must also prevent the scheduler from starting more work.
+  if (id === "all" && ["pause", "stop", "goHome", "forceHome", "resume"].includes(action)) {
+    pauseJobQueue(ws, action !== "resume");
+    if (action === "goHome" || action === "forceHome") {
+      for (const job of jobQueue.snapshot().jobs.filter((job) => ["running", "blocked"].includes(job.state))) {
+        queueAction(ws, () => jobQueue.cancel(job.id));
+      }
+    }
+  }
+
+  const controlled = (t) => {
+    if (action === "forceHome" && !t.status?.forceHomeSupported) {
+      send(ws, { type: "error", msg: `Update ${nameOf(t)}'s script before using Force home.` });
+      return;
+    }
+    if (queueOwns(t.id) && !["pause", "resume", "stop", "goHome", "forceHome", "setLabel"].includes(action)) {
+      send(ws, { type: "error", msg: `${nameOf(t)} belongs to an active queued job. Cancel that queued job before sending other commands.` });
+      return;
+    }
+    if (["goHome", "forceHome", "quarry", "tunnel"].includes(action)) t.pendingFleetUntil = Date.now() + 10_000;
+    dispatch(t, action, args);
+  };
+
   if (id === "all") {
     if (!BROADCAST_ACTIONS.has(action)) return;
-    for (const t of turtles.values()) if (t.socket) dispatch(t, action, args);
+    for (const t of turtles.values()) if (t.socket) controlled(t);
     return;
   }
   // An explicit selection of turtles from the fleet page.
   if (Array.isArray(ids)) {
     for (const tid of ids.slice(0, 256)) {
       const t = turtles.get(Number(tid));
-      if (t?.socket) dispatch(t, action, args);
+      if (t?.socket) controlled(t);
     }
     return;
   }
@@ -398,7 +515,7 @@ function handleCommand(ws, { id, ids, action, args }) {
     send(ws, { type: "error", msg: `Turtle ${id} is offline` });
     return;
   }
-  dispatch(turtle, action, args);
+  controlled(turtle);
 }
 
 function handleDashboard(ws) {
@@ -432,6 +549,7 @@ function handleDashboard(ws) {
         type: "snapshot",
         turtles: [...turtles.values()].map((t) => turtleView(t, true)),
         fleet,
+        jobQueue: queueView(),
         depot: depotView(),
         server: { instance: INSTANCE, build: BUILD, startedAt },
       });
@@ -458,6 +576,21 @@ function handleDashboard(ws) {
       send(ws, { type: "fleetSaved", ok: true });
     } else if (msg.type === "fleetJob") {
       startFleetJob(ws, msg);
+    } else if (msg.type === "queueFleetJob") {
+      queueAction(ws, () => jobQueue.add(msg));
+    } else if (msg.type === "pauseJobQueue" && typeof msg.paused === "boolean") {
+      pauseJobQueue(ws, msg.paused);
+    } else if (msg.type === "cancelQueuedJob") {
+      const job = jobQueue.snapshot().jobs.find((job) => job.id === msg.id);
+      const result = queueAction(ws, () => jobQueue.cancel(msg.id));
+      if (result.ok) for (const id of result.recall ?? []) {
+        const t = turtles.get(id);
+        const assignment = job.assignments.find((a) => a.id === id);
+        const status = t?.status;
+        const matches = status?.fleetJob?.queueId === assignment.queueId;
+        const awaiting = status && !status.job && !status.fleetJob && status.lastFleetResult?.id !== assignment.queueId;
+        if (t?.socket && (matches || awaiting)) dispatch(t, "goHome", {});
+      }
     } else if (msg.type === "releaseDepot") {
       if (depot.holder !== null) releaseDepot(depot.holder);
     } else if (msg.type === "mined") {
@@ -596,6 +729,20 @@ setInterval(() => {
 setInterval(() => {
   if (depot.holder === null && depot.queue.length) pumpDepot();
 }, 2_000);
+
+setInterval(() => {
+  try {
+    if (!queueEmergencyHold) {
+      jobQueue.tick();
+      queueStorageError = null;
+    }
+  } catch (err) {
+    const message = `Could not save the fleet queue: ${err.message}`;
+    if (message !== queueStorageError) console.error("[error]", message);
+    queueStorageError = message;
+  }
+  broadcastJobQueue();
+}, 1_000);
 
 process.on("uncaughtException", (err) => console.error("[error] uncaught:", err));
 process.on("unhandledRejection", (err) => console.error("[error] unhandled rejection:", err));
