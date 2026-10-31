@@ -3,7 +3,10 @@ import test from "node:test";
 import { FleetJobQueue } from "../fleet-queue.js";
 
 function ready(label = "Miner") {
-  return { online: true, fresh: true, label, status: { queueSupported: true, staircaseSupported: true, oreScanSupported: true, gpsTrusted: true, queued: 0 } };
+  return { online: true, fresh: true, label, status: {
+    queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: true, radiusSupported: true,
+    gpsTrusted: true, queued: 0, world: { x: label === "Two" ? 2 : 1, y: 67, z: -55 },
+  } };
 }
 
 function setup(state) {
@@ -39,7 +42,10 @@ function setup(state) {
     failWrites: (value) => { failWrites = value; },
     add: (ids = [1], params = {}) => queue.add({ kind: "branchMine", params, ids }),
     finish: (id, queueId, extra = {}) => {
-      turtles.get(id).status = { queueSupported: true, staircaseSupported: true, oreScanSupported: true, gpsTrusted: true, lastFleetResult: { id: queueId, ok: true }, ...extra };
+      turtles.get(id).status = {
+        ...ready(id === 2 ? "Two" : "One").status,
+        lastFleetResult: { id: queueId, ok: true }, ...extra,
+      };
     },
   };
 }
@@ -73,10 +79,15 @@ test("waits for every selected turtle to be online, fresh, updated, GPS ready, a
     ["missing turtle", null],
     ["offline", { online: false }],
     ["stale status", { fresh: false }],
-    ["old script", { status: { gpsTrusted: true } }],
+    ["old script", { status: { queueSupported: false } }],
     ["no staircase support", { status: { queueSupported: true, staircaseSupported: false, gpsTrusted: true } }],
     ["no all-side scan support", { status: { queueSupported: true, staircaseSupported: true, oreScanSupported: false, gpsTrusted: true } }],
-    ["untrusted GPS", { status: { queueSupported: true, gpsTrusted: false } }],
+    ["no fixed row support", { status: { queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: false, gpsTrusted: true } }],
+    ["no home radius support", { status: { radiusSupported: false } }],
+    ["untrusted GPS", { status: { queueSupported: true, gpsTrusted: false, world: null } }],
+    ["saved route with unconfirmed facing", { status: { gpsTrusted: false, miningRoute: { home: { x: 2, y: 67, z: -55 } } } }],
+    ["away from saved home", { status: { miningRoute: { home: { x: 3, y: 67, z: -55 } } } }],
+    ["pending return after job cleared", { status: { miningRoute: { home: { x: 2, y: 67, z: -55 }, intent: "home" } } }],
     ["active job", { status: { queueSupported: true, gpsTrusted: true, job: { name: "quarry" } } }],
     ["saved fleet job", { status: { queueSupported: true, gpsTrusted: true, fleetJob: {} } }],
     ["queued command", { status: { queueSupported: true, gpsTrusted: true, queued: 1 } }],
@@ -85,7 +96,10 @@ test("waits for every selected turtle to be online, fresh, updated, GPS ready, a
     await t.test(name, () => {
       const h = setup();
       h.add([1, 2]);
-      if (update) Object.assign(h.turtles.get(2), update);
+      if (update) {
+        const current = h.turtles.get(2);
+        Object.assign(current, update, update.status ? { status: { ...current.status, ...update.status } } : {});
+      }
       else h.turtles.delete(2);
       h.queue.tick();
       assert.equal(h.sends.length, 0);
@@ -96,6 +110,14 @@ test("waits for every selected turtle to be online, fresh, updated, GPS ready, a
       assert.equal(h.sends.length, 2);
     });
   }
+});
+
+test("first row placement supplies south orientation once without a calibration move", () => {
+  const h = setup();
+  h.turtles.get(1).status.gpsTrusted = false;
+  h.add();
+  h.queue.tick();
+  assert.equal(h.sends.length, 1);
 });
 
 test("initial plan errors reject the job; changed safety checks block and pause before dispatch", () => {

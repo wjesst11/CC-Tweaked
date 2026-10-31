@@ -8,8 +8,8 @@
 -- wireless/ender modem and a GPS network, the turtle also works out its world
 -- coordinates and compass facing.
 --
--- Each turtle has a permanent home: where it first ran this script, or wherever
--- it's set from the dashboard. Cancelling a job brings it back there.
+-- Row miners capture their own home at Y=67, Z=-55 before their first job.
+-- A saved south staircase and bottom waypoint are their only mining-home route.
 --
 -- Two kinds of jobs:
 --  * Local jobs (quarry, tunnel) unload into a chest placed directly behind
@@ -18,14 +18,14 @@
 --    depot: a dock block with junk, valuables and fuel chests next to it. The
 --    server gives turtles turns at the dock; the others wait a few blocks away.
 --    Turtles share where they are, so they steer around each other.
--- Protected blocks and areas are never dug or built in, by any job or command.
+-- Protected blocks are never dug. Only initial south-stair excavation may
+-- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "1.9.0"
+local VERSION = "2.1.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
-local ROUTE_FILE = ".minerdash_route"
-local MAX_TRAIL = 100000
+local MAX_VISITED = 10000 -- optional obstacle cache, never authority for a home route
 local STOP = setmetatable({}, { __tostring = function() return "Stopped" end })
 
 if not turtle then error("MinerDash must run on a turtle", 0) end
@@ -114,14 +114,16 @@ local gpsChecked = false -- a GPS fix has been attempted since boot
 local leases = {} -- resource -> "granted" | "waiting"
 local fleetJob    -- { kind, args, step, phase, paused, failed } for the current fleet job
 local lastFleetResult -- durable receipt for an automatically queued assignment
+local miningRoute -- fixed row home and opened south staircase, independent of a job
+local rowRoute = {}
 local blocked, blockedCount = {}, 0 -- blocks found in the way while travelling (local coords)
 local traffic, trafficCount = {}, 0 -- blocks moving turtles are in or about to enter -> until when
 local parked = {}                   -- blocks turtles are standing still in -> until when
 local homesNear = {}                -- other turtles' homes nearby -> until when
-local trail, trailSize = {}, 0      -- every block moved through since last home (local coords)
-local trailRoot, trailLo, trailHi   -- where the trail starts, and its bounding box
-local forgetTrail, remember       -- also used when the user changes home or GPS changes frame
+local visited, visitedCount = {}, 0 -- bounded cache for fallen blocks during ordinary travel
+local forgetVisited, remember
 local travelNext                    -- the block this turtle is about to move into
+local physicalMove = false          -- GPS must not change pos during a yielding move API
 local odometer = 0                  -- blocks moved, ever (to measure real trip lengths)
 
 -- Shared fleet settings from the dashboard. These defaults apply until the
@@ -150,6 +152,7 @@ local function loadState()
     pos, heading, home, calib = data.pos, data.heading, data.home, data.calib
     fleetJob = data.fleetJob
     lastFleetResult = data.lastFleetResult
+    miningRoute = data.miningRoute
     odometer = tonumber(data.odometer) or 0
     if data.holding then leases.depot = "granted" end
   end
@@ -159,7 +162,7 @@ local function saveState()
   local f = fs.open(STATE_FILE, "w")
   f.write(textutils.serialize({
     pos = pos, heading = heading, home = home, calib = calib,
-    fleetJob = fleetJob, lastFleetResult = lastFleetResult,
+    fleetJob = fleetJob, lastFleetResult = lastFleetResult, miningRoute = miningRoute,
     holding = leases.depot == "granted", odometer = odometer,
   }))
   f.close()
@@ -196,7 +199,7 @@ end
 
 local function setHome()
   home = here()
-  forgetTrail()
+  forgetVisited()
   remember(pos)
   saveState()
   changed()
@@ -303,7 +306,21 @@ local function onFix(l, w)
   local savedHome = calib and calib.home
   if calib and calib.f0 then
     local slip = calib.slip
+    local pending = miningRoute and miningRoute.pendingMove
+    -- A reboot can land between the physical move and its position save.
+    -- Accept only that exact, durably intended adjacent destination.
+    if pending and samePos(toWorld(l), pending.from) and samePos(w, pending.to) and distance(pending.from, pending.to) == 1 then
+      pos = fromWorld(w)
+      odometer = odometer + 1
+      miningRoute.pendingMove, calib.slip = nil, nil
+      remember(pos)
+      saveState()
+      rowRoute.reconcile()
+      changed()
+      return
+    end
     if samePos(toWorld(l), w) then
+      if pending and samePos(w, pending.from) then miningRoute.pendingMove = nil; saveState() end
       -- A matching fix after a sideways move confirms the heading as well.
       if slip and (l.x ~= slip.x or l.z ~= slip.z) then
         calib.slip = nil
@@ -319,8 +336,7 @@ local function onFix(l, w)
     if not slip then
       -- First assume only the position slipped (e.g. the server stopped mid-move).
       pos = fromWorld(w)
-      -- A corrected position keeps the same coordinate frame and home. Keep
-      -- the old route, adding the corrected cell rather than replacing it.
+      -- A corrected position keeps the same coordinate frame and saved home.
       remember(pos)
       calib.slip = { x = pos.x, z = pos.z }
       saveState()
@@ -332,7 +348,7 @@ local function onFix(l, w)
     -- hand. Recalibrate, but keep home at its real location.
     log("warn", "Turtle was moved. Move it one block to recalibrate GPS.")
     savedHome = { w = toWorld(home), compass = (calib.f0 + home.heading) % 4 }
-    forgetTrail()
+    forgetVisited()
   elseif calib and (l.x ~= calib.l.x or l.z ~= calib.l.z) then
     for f0 = 0, 3 do
       calib.f0 = f0
@@ -341,7 +357,7 @@ local function onFix(l, w)
           home = fromWorld(savedHome.w)
           home.heading = (savedHome.compass - f0) % 4
           calib.home = nil
-          forgetTrail()
+          forgetVisited()
           remember(pos)
         end
         saveState()
@@ -445,17 +461,26 @@ end
 
 -- Why the block on side `dir` (forward/up/down) must not be dug or built in, or
 -- nil if it may. ComputerCraft blocks (turtles, GPS hosts) are always protected.
-local function protection(dir, block)
+local function protection(dir, block, context)
   if block then
     local name = block.name:lower()
     if name:find("^computercraft:") or matches(name, compiled.protect) then
       return "protected block " .. block.name
     end
   end
+  if miningRoute and miningRoute.radius then
+    if not gpsTrusted() then return "GPS position unknown, so the home mining radius can't be checked" end
+    if not rowRoute.withinRadius(toWorld(neighbour(dir))) then return "outside the mining radius from the saved home" end
+  end
   local areas = fleet.protect and fleet.protect.areas or {}
   if #areas == 0 then return nil end
   if not gpsTrusted() then return "GPS position unknown, so protected areas can't be checked" end
   local w = toWorld(neighbour(dir))
+  -- The sole area exception is the next saved cell of initial staircase
+  -- excavation. Block patterns and ComputerCraft protection ran above first.
+  if context == "initialStair" and rowRoute.initialCell(w) then
+    return nil
+  end
   for _, a in ipairs(areas) do
     if inBox(w, a) then return "protected area " .. tostring(a.name or "") end
   end
@@ -467,53 +492,17 @@ local function cellKey(x, y, z)
   return x .. "," .. y .. "," .. z
 end
 
-forgetTrail = function()
-  local f, err = fs.open(ROUTE_FILE, "w")
-  if not f then error("Cannot save home route: " .. tostring(err), 0) end
-  f.writeLine(("v1 %d %d %d %d"):format(home.x, home.y, home.z, home.heading))
-  f.close()
-  trail, trailSize, trailRoot, trailLo, trailHi = {}, 0, nil, nil, nil
+forgetVisited = function()
+  visited, visitedCount = {}, 0
 end
 
--- This belongs to home, not to a job's start. Append cells as they are visited;
--- starting another job elsewhere never replaces the way back. A journal avoids
--- rewriting the entire route on every move and survives a reboot/chunk unload.
-remember = function(p, loading)
-  if not loading and samePos(p, home) then forgetTrail() end
+-- A bounded in-memory cache helps ordinary travel recognize fallen blocks.
+-- It is never persisted or consulted to choose a route home.
+remember = function(p)
   local k = cellKey(p.x, p.y, p.z)
-  if trail[k] then return end
-  if trailSize >= MAX_TRAIL then error("Home route memory full; return home before exploring further", 0) end
-  if not loading then
-    local f, err = fs.open(ROUTE_FILE, "a")
-    if not f then error("Cannot save home route: " .. tostring(err), 0) end
-    f.writeLine(k)
-    f.close()
-  end
-  trail[k], trailSize = true, trailSize + 1
-  if not trailRoot then
-    trailRoot = { x = p.x, y = p.y, z = p.z }
-    trailLo, trailHi = { x = p.x, y = p.y, z = p.z }, { x = p.x, y = p.y, z = p.z }
-  end
-  for _, axis in ipairs({ "x", "y", "z" }) do
-    trailLo[axis] = math.min(trailLo[axis], p[axis])
-    trailHi[axis] = math.max(trailHi[axis], p[axis])
-  end
-end
-
-local function loadTrail()
-  if not fs.exists(ROUTE_FILE) then forgetTrail(); return end
-  local f, err = fs.open(ROUTE_FILE, "r")
-  if not f then error("Cannot read home route: " .. tostring(err), 0) end
-  local header = ("v1 %d %d %d %d"):format(home.x, home.y, home.z, home.heading)
-  if f.readLine() ~= header then f.close(); forgetTrail(); return end
-  while true do
-    local line = f.readLine()
-    if not line then break end
-    local x, y, z = line:match("^(-?%d+),(-?%d+),(-?%d+)$")
-    if x then remember({ x = tonumber(x), y = tonumber(y), z = tonumber(z) }, true) end
-    if trailSize > 0 and trailSize % 500 == 0 then sleep(0) end
-  end
-  f.close()
+  if visited[k] then return end
+  if visitedCount >= MAX_VISITED then forgetVisited() end
+  visited[k], visitedCount = true, visitedCount + 1
 end
 
 local SIDES = {
@@ -524,11 +513,19 @@ local SIDES = {
 }
 
 local function move(dir)
-  local destination = neighbour(dir)
-  if trailSize >= MAX_TRAIL and not trail[cellKey(destination.x, destination.y, destination.z)] and not samePos(destination, home) then
-    error("Home route memory full; return home before exploring further", 0)
+  if miningRoute and miningRoute.radius then
+    if not gpsTrusted() then return false, "GPS position unknown" end
+    local current, target = toWorld(pos), toWorld(neighbour(dir))
+    local surfaceTravel = rowRoute.surfacePhase() and current.y == 67 and target.y == 67
+    if not surfaceTravel and not rowRoute.withinRadius(target) then return false, "Outside mining radius" end
   end
+  if miningRoute and gpsTrusted() then
+    miningRoute.pendingMove = { from = toWorld(pos), to = toWorld(neighbour(dir)) }
+    saveState()
+  end
+  physicalMove = true
   local ok, err = SIDES[dir].move()
+  physicalMove = false
   if ok then
     if dir == "up" then
       pos.y = pos.y + 1
@@ -541,9 +538,11 @@ local function move(dir)
     odometer = odometer + 1
     blocked[cellKey(pos.x, pos.y, pos.z)] = nil
     remember(pos)
+    if miningRoute then miningRoute.pendingMove = nil end
     saveState()
     changed()
   end
+  if not ok and miningRoute then miningRoute.pendingMove = nil; saveState() end
   return ok, err
 end
 
@@ -569,13 +568,13 @@ end
 
 -- Dig until the space is empty. Returns false (and a reason) if it can't be or
 -- mustn't be.
-local function clear(dir)
+local function clear(dir, context)
   local side = SIDES[dir]
   for _ = 1, 64 do
     local found, block = side.inspect()
     if not found or LIQUIDS[block.name] then return true end
     if isTurtleBlock(block.name) then return false, "another turtle is in the way" end
-    local reason = protection(dir, block)
+    local reason = protection(dir, block, context)
     if reason then return false, reason end
     local ok, err = side.dig()
     if ok then noteDug(dir, block.name) end
@@ -591,13 +590,14 @@ end
 
 -- Move one block, digging or attacking whatever is in the way. Another turtle
 -- in the way is only passing through, so wait for it rather than dig.
-local function digMove(dir)
+local function digMove(dir, context)
   local side = SIDES[dir]
   local waited = 0
   for _ = 1, 400 do
     checkStop()
     local ok, err = move(dir)
     if ok then return end
+    if err == "Outside mining radius" then error(err, 0) end
     if err == "Out of fuel" then error("Out of fuel", 0) end
     local found, block = side.inspect()
     if found and isTurtleBlock(block.name) then
@@ -605,7 +605,7 @@ local function digMove(dir)
       if waited > 120 then error("Blocked by another turtle for a minute", 0) end
       sleep(0.5)
     elseif found and not LIQUIDS[block.name] then
-      local cleared, why = clear(dir)
+      local cleared, why = clear(dir, context)
       if not cleared and why ~= "another turtle is in the way" then
         error(("Can't dig %s: %s"):format(block.name, why or "unknown"), 0)
       end
@@ -807,8 +807,8 @@ end
 -- and only from blocks the turtle has already passed through.
 local function hasFallen(name)
   return name ~= "minecraft:soul_sand"
-    and (name:find("sand$") or name:find("gravel$") or name:find("concrete_powder$") or name:find("anvil$")
-      or name == "minecraft:pointed_dripstone") ~= nil
+    and not not (name:find("sand$") or name:find("gravel$") or name:find("concrete_powder$") or name:find("anvil$")
+      or name == "minecraft:pointed_dripstone")
 end
 
 -- One step to a neighbouring cell: true, or false and why.
@@ -827,6 +827,7 @@ local function stepTo(n, mining)
   for _ = 1, 20 do
     local ok, err = move(dir)
     if ok then return true end
+    if err == "Outside mining radius" then return false, "block" end
     if err == "Out of fuel" then error("Out of fuel", 0) end
     if dir == "back" then
       -- There is no rear inspection API. Face a blocked step before applying
@@ -841,7 +842,7 @@ local function stepTo(n, mining)
         local cleared, why = clear(dir)
         if not cleared then return false, why == "another turtle is in the way" and "turtle" or "block" end
       else
-        local fellIn = trail[cellKey(n.x, n.y, n.z)] and hasFallen(block.name) and not protection(dir, block)
+        local fellIn = visited[cellKey(n.x, n.y, n.z)] and hasFallen(block.name) and not protection(dir, block)
         if not fellIn then return false, "block" end
         if SIDES[dir].dig() then noteDug(dir, block.name) end
       end
@@ -850,26 +851,6 @@ local function stepTo(n, mining)
     end
   end
   return false, "block"
-end
-
--- The way it already knows: blocks it has moved through since it was last
--- home, plus the space right around the goal. The turtle treats blocks it
--- hasn't seen as open, so without this it can spend a long time feeling its
--- way along solid rock.
-local function knownGoal(goal)
-  local c, known = goal.centre, {}
-  for key, v in pairs(goal) do known[key] = v end
-  known.allowed = function(x, y, z)
-    local near = math.abs(x - c.x) <= 6 and math.abs(z - c.z) <= 6 and math.abs(y - c.y) <= 3
-    return (near or trail[cellKey(x, y, z)]) and (not goal.allowed or goal.allowed(x, y, z))
-  end
-  known.bounds = {
-    lo = { x = math.min(trailLo.x, c.x - 6), y = math.min(trailLo.y, c.y - 3), z = math.min(trailLo.z, c.z - 6) },
-    hi = { x = math.max(trailHi.x, c.x + 6), y = math.max(trailHi.y, c.y + 3), z = math.max(trailHi.z, c.z + 6) },
-  }
-  known.limit = 20000
-  known.keepOut = true
-  return known
 end
 
 local function describe(p)
@@ -881,21 +862,11 @@ end
 -- there's no open way.
 local function navigate(goal)
   local tries, waits = 0, 0
-  local tryKnown = trailSize > 0 and not goal.onTrail and not goal.mining
   while not goal.reached(pos.x, pos.y, pos.z) do
     checkStop()
-    -- The way it knows, unless that's a long way round.
-    local path = tryKnown and findPath(knownGoal(goal))
-    local direct = goal.estimate(pos.x, pos.y, pos.z)
-    if path then
-      local cost = goal.homeRoute and path[#path].cost or #path - 1
-      local limit = goal.homeRoute and direct + math.max(8, math.floor(direct / 5)) or 2 * direct + 16
-      if cost > limit then path = nil end
-    end
-    tryKnown = path ~= nil
     -- If other turtles leave no way through, plan as if they weren't there:
     -- they move on, and bumping into one just means waiting.
-    path = path or findPath(goal) or findPath(goal, true)
+    local path = findPath(goal) or findPath(goal, true)
     if not path then
       travelNext = nil
       error((goal.mining and "Found no safe mining route to %s" or "Found no open way to %s without digging"):format(describe(goal.centre)), 0)
@@ -935,47 +906,11 @@ local function navigate(goal)
   travelNext = nil
 end
 
--- Fly by the shortest open route to a world position.
-local function flyTo(w)
-  navigate(cellGoal(fromWorld(w)))
-end
-
--- A goal that only uses blocks on the trail (plus the target itself).
-local function trailGoal(t)
-  local goal = cellGoal(t)
-  goal.allowed = function(x, y, z)
-    return trail[cellKey(x, y, z)] or (x == t.x and y == t.y and z == t.z)
-  end
-  goal.bounds = {
-    lo = { x = math.min(trailLo.x, t.x), y = math.min(trailLo.y, t.y), z = math.min(trailLo.z, t.z) },
-    hi = { x = math.max(trailHi.x, t.x), y = math.max(trailHi.y, t.y), z = math.max(trailHi.z, t.z) },
-  }
-  goal.limit = 200000
-  goal.onTrail, goal.keepOut = true, true
-  return goal
-end
-
--- Prefer a short open route home. The recorded trail is a fallback when the
--- broader search cannot find a way; travel still never digs new blocks.
-local function retraceHome()
-  if samePos(pos, home) then return end
+-- Ordinary local jobs use open-space navigation. Row miners use only their
+-- saved staircase, even after the current assignment has been cleared.
+local function travelHome()
   setDetail("Heading home")
-  local goal = cellGoal(home)
-  goal.homeRoute = true
-  local ok, err = pcall(navigate, goal)
-  if ok then return end
-  if err == STOP then error(STOP, 0) end
-  if trailSize > 0 then
-    for _, target in ipairs({ home, trailRoot }) do
-      local retraced, why = pcall(navigate, trailGoal(target))
-      if not retraced and why == STOP then error(STOP, 0) end
-      if retraced then
-        if not samePos(pos, home) then navigate(goal) end
-        return
-      end
-    end
-  end
-  error(err, 0)
+  if miningRoute then rowRoute.exit() else navigate(cellGoal(home)) end
 end
 
 -- Inventory & fuel ----------------------------------------------------------
@@ -1169,17 +1104,17 @@ local function finishJob(trip, ok, err)
   if ok then
     trip.toBase()
     unloadAt(trip, false)
-    retraceHome()
+    travelHome()
     face(home.heading)
     return
   end
-  -- Something stopped the job: unload if it can, then retrace its way home.
+  -- Something stopped the job: unload if it can, then head home.
   log("warn", ("Stopped: %s. Heading home."):format(tostring(err)))
   pcall(function()
     trip.toBase()
     unloadAt(trip, false)
   end)
-  pcall(retraceHome)
+  pcall(travelHome)
   error(err, 0)
 end
 
@@ -1319,9 +1254,9 @@ local function atDepot(w)
   return D ~= nil and math.max(math.abs(w.x - D.x), math.abs(w.z - D.z)) <= DOCK_ROOM + 3 and math.abs(w.y - D.y) <= 2
 end
 
--- Retrace the way home and settle facing the way home was set.
+-- Return home and settle facing the saved direction.
 local function comeHome()
-  retraceHome()
+  travelHome()
   face(home.heading)
   release("depot")
 end
@@ -1437,7 +1372,7 @@ end
 -- space around the dock until it's its turn, goes in by any open way, and
 -- steps back out before the next turtle's turn. Retries until it has room and
 -- at least minFuel. Returns how many blocks it flew to get to the depot.
-function depotVisit(minFuel)
+function rowRoute.sharedDepotVisit(minFuel, flat)
   local D = fleet.depot
   if not D then error("Set up the depot on the dashboard first", 0) end
   local start, flown = odometer, nil
@@ -1450,6 +1385,12 @@ function depotVisit(minFuel)
   end
   -- Never digging: if there's no open way, say so.
   local function go(goal, where)
+    if flat then
+      local allowed = goal.allowed
+      local level = fromWorld({ x = D.x, y = 67, z = D.z }).y
+      goal.allowed = function(x, y, z) return y == level and (not allowed or allowed(x, y, z)) end
+      goal.limit = 40000
+    end
     local ok, err = pcall(navigate, goal)
     if ok then return end
     if err == STOP then error(STOP, 0) end
@@ -1473,7 +1414,7 @@ function depotVisit(minFuel)
     -- Whatever happened, step back out so the next turtle can come in.
     local stop = stopRequested
     stopRequested = false
-    local left = pcall(navigate, aroundDock())
+    local left = pcall(function() go(aroundDock(), "out of the dock") end)
     stopRequested = stopRequested or stop
     if left then release("depot") end
     if not ok then error(err, 0) end
@@ -1484,6 +1425,339 @@ function depotVisit(minFuel)
     setDetail("Waiting: " .. (problem or "not enough fuel at the depot"))
     waitSeconds(30)
   end
+end
+
+-- The mining route is geometric and durable. The visited-cell cache above is
+-- deliberately irrelevant to these stairs, their home, and their recovery.
+function rowRoute.save(phase)
+  if phase then miningRoute.phase = phase end
+  saveState()
+  changed()
+end
+
+function rowRoute.surfacePhase()
+  local phase = miningRoute and miningRoute.phase
+  return phase == "home" or phase == "toStairHome" or phase == "toDepot" or phase == "fromDepot"
+end
+
+function rowRoute.inCircle(w, center, radius)
+  return (w.x - center.x)^2 + (w.z - center.z)^2 <= radius^2
+end
+
+function rowRoute.withinRadius(w)
+  return not miningRoute.radius or rowRoute.inCircle(w, miningRoute.home, miningRoute.radius)
+end
+
+function rowRoute.position(w)
+  if not miningRoute or w.x ~= miningRoute.home.x then return nil end
+  local step = w.z - miningRoute.home.z
+  if step < 0 or step ~= math.floor(step) then return nil end
+  local footY = 67 - step
+  if w.y == footY then return step, false end
+  if step > 0 and w.y == footY + 1 then return step, true end
+end
+
+function rowRoute.initialCell(w)
+  local r = miningRoute
+  local p = r and r.stair.pending
+  if not r or r.phase ~= "building" or not p or not samePos(w, p.to) or not samePos(toWorld(pos), p.from) then return false end
+  return p.step == r.stair.completed + 1 and p.step <= 67 - r.targetY
+    and w.x == r.home.x and w.z == -55 + p.step
+    and w.y == 67 - p.step + (p.leg == "forward" and 1 or 0)
+    and (p.leg == "forward" or p.leg == "down")
+end
+
+function rowRoute.reconcile()
+  local r = miningRoute
+  local p = r and r.stair.pending
+  if not p or not gpsTrusted() then return end
+  if samePos(toWorld(pos), p.to) then
+    if p.leg == "down" then
+      r.stair.completed = math.max(r.stair.completed, p.step)
+      r.stair.half = false
+    elseif p.step == r.stair.completed + 1 then
+      r.stair.half = true
+    end
+    r.stair.pending = nil
+    rowRoute.save()
+  end
+end
+
+function rowRoute.opened(w)
+  local step, upper = rowRoute.position(w)
+  if not step then return false end
+  return step <= miningRoute.stair.completed or (upper and step == miningRoute.stair.completed + 1 and miningRoute.stair.half)
+end
+
+-- Exact opened-cell travel has no detour and never clears new stone. Only
+-- sand/gravel which fell into these specific saved cells may be removed.
+function rowRoute.walkStep(w, known)
+  if not known and not rowRoute.opened(w) then error("That staircase step has not been opened", 0) end
+  local current = toWorld(pos)
+  if distance(current, w) ~= 1 then error("Saved route contains a non-adjacent step", 0) end
+  local dir = w.y > current.y and "up" or w.y < current.y and "down" or "forward"
+  if dir == "forward" then
+    faceCompass(w.x ~= current.x and (w.x > current.x and 1 or 3) or (w.z > current.z and 2 or 0))
+  end
+  for _ = 1, 120 do
+    checkStop()
+    travelNext = fromWorld(w)
+    local ok, err = move(dir)
+    if ok then travelNext = nil return end
+    if err == "Outside mining radius" then error(err, 0) end
+    if err == "Out of fuel" then error(err, 0) end
+    local found, block = SIDES[dir].inspect()
+    if found and isTurtleBlock(block.name) then sleep(0.5)
+    elseif found and not LIQUIDS[block.name] then
+      local reason = protection(dir, block)
+      if reason then error("Saved route blocked: " .. reason, 0) end
+      if block.name ~= "minecraft:sand" and block.name ~= "minecraft:gravel" then
+        error("Saved route blocked by " .. block.name .. "; it will not dig a new stair route", 0)
+      end
+      local dug, why = SIDES[dir].dig()
+      if not dug then error("Can't clear fallen block: " .. tostring(why), 0) end
+      noteDug(dir, block.name)
+    elseif not SIDES[dir].attack() then sleep(0.2) end
+  end
+  error("Saved route blocked by another turtle or entity", 0)
+end
+
+function rowRoute.surface(target)
+  if not gpsTrusted() then error("GPS is required for the saved row route", 0) end
+  if target.y ~= 67 or toWorld(pos).y ~= 67 then error("Depot travel must remain at Y 67", 0) end
+  local goal = cellGoal(fromWorld(target))
+  local level = fromWorld(target).y
+  goal.allowed = function(_, y) return y == level end
+  goal.limit = 40000
+  navigate(goal)
+end
+
+function rowRoute.validate(a)
+  if a.routeMode ~= "southRow" or a.access ~= "southStairs" then
+    error("Old branch jobs are paused. Start a new south-row mining job.", 0)
+  end
+  local function integer(n, lo, hi) return type(n) == "number" and n == math.floor(n) and n >= lo and n <= hi end
+  local h, b = a.routeHome, a.stairBottom
+  if type(h) ~= "table" or not integer(h.x, -3e7, 3e7) or h.y ~= 67 or h.z ~= -55 or h.facing ~= "south" then
+    error("Invalid saved south-facing home row", 0)
+  end
+  if not integer(a.y, -64, 67) or not integer(a.x, -3e7, 3e7) or not integer(a.z, -3e7, 3e7)
+    or (a.band or 0) ~= 0 or (a.dir ~= "south" and a.dir ~= 2) then
+    error("South-row mining requires one safe target Y and south-facing lanes", 0)
+  end
+  if type(b) ~= "table" or b.x ~= h.x or b.y ~= a.y or b.z ~= -55 + 67 - a.y or a.z ~= b.z then
+    error("The staircase bottom must match the saved home and target Y", 0)
+  end
+  if not integer(a.radius, 1, 1024) then error("Set a mining radius from 1 to 1024 blocks", 0) end
+  if not rowRoute.inCircle(b, h, a.radius) or not rowRoute.inCircle({ x = a.x, z = a.z }, h, a.radius) then
+    error("The radius must reach the staircase bottom and assigned mining lane from the original home", 0)
+  end
+end
+
+function rowRoute.ensure(a)
+  rowRoute.validate(a)
+  if not fleet.depot or fleet.depot.y ~= 67 then error("The shared depot dock must be at Y 67 for row mining", 0) end
+  local deadline = os.clock() + 10
+  while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
+  if not miningRoute then
+    local w = worldPos()
+    if gpsState ~= "ok" or not w or w.y ~= 67 or w.z ~= -55 or w.x ~= a.routeHome.x then
+      error("Place the turtle at its home row (Y 67, Z -55), facing south, with a GPS fix", 0)
+    end
+    -- At first setup the user supplies the known south facing. No calibration
+    -- movement is needed, and the captured home never follows later jobs.
+    calib = { l = { x = pos.x, y = pos.y, z = pos.z }, w = { x = w.x, y = 67, z = -55 }, f0 = (2 - heading) % 4 }
+    blocked, blockedCount, traffic, trafficCount, parked, homesNear = {}, 0, {}, 0, {}, {}
+    forgetVisited()
+    remember(pos)
+    saveState()
+  elseif not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
+    error("Confirm GPS position and facing before using the saved staircase", 0)
+  end
+  local w = toWorld(pos)
+  if not miningRoute then
+    if not samePos(w, a.routeHome) then error("The first row job must start at the turtle's own saved row position", 0) end
+    faceCompass(2)
+    home = fromWorld(a.routeHome)
+    home.heading = (2 - calib.f0) % 4
+    miningRoute = {
+      version = 1, home = { x = a.routeHome.x, y = 67, z = -55, facing = "south" },
+      bottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }, targetY = a.y,
+      radius = a.radius,
+      stair = { completed = 0, half = false, complete = a.y == 67 },
+      bottomSaved = a.y == 67, phase = "home",
+    }
+    rowRoute.save()
+  elseif not samePos(miningRoute.home, a.routeHome) then
+    error("A later job cannot replace this turtle's saved home", 0)
+  end
+  if miningRoute.radius ~= a.radius then
+    if not samePos(w, miningRoute.home) then error("Return to the saved home before changing the mining radius", 0) end
+    miningRoute.radius = a.radius
+    rowRoute.save()
+  end
+  if miningRoute.targetY ~= a.y then
+    if not samePos(w, miningRoute.home) then error("Return to the saved home before changing the mining level", 0) end
+    miningRoute.targetY = a.y
+    miningRoute.bottom = { x = miningRoute.home.x, y = a.y, z = -55 + 67 - a.y }
+    miningRoute.stair.complete = miningRoute.stair.completed >= 67 - a.y
+    miningRoute.bottomSaved = miningRoute.stair.complete
+    miningRoute.work, miningRoute.veinPath = nil, nil
+    rowRoute.save("home")
+  end
+  rowRoute.reconcile()
+end
+
+function rowRoute.buildLeg(dir, target, leg, step)
+  faceCompass(2)
+  miningRoute.stair.pending = { from = toWorld(pos), to = target, leg = leg, step = step }
+  rowRoute.save("building")
+  if not rowRoute.initialCell(target) then error("Invalid initial stair excavation", 0) end
+  digMove(dir, "initialStair")
+  rowRoute.reconcile()
+end
+
+function rowRoute.flatMine(target)
+  local w = toWorld(pos)
+  if w.y ~= miningRoute.targetY or target.y ~= miningRoute.targetY then
+    error("Mining return travel must stay at the saved safe mining Y", 0)
+  end
+  if not rowRoute.withinRadius(w) or not rowRoute.withinRadius(target) then
+    error("Mining return waypoints must stay inside the radius from the original home", 0)
+  end
+  -- A short mined route at the safe level may detour around restricted
+  -- blocks. It can never turn a horizontal return into a shaft to home.
+  local goal = cellGoal(fromWorld(target))
+  local level = fromWorld(target).y
+  goal.allowed = function(x, y, z) return y == level and rowRoute.withinRadius(toWorld({ x = x, y = y, z = z })) end
+  goal.mining, goal.blocked, goal.limit = true, {}, 40000
+  navigate(goal)
+end
+
+function rowRoute.unwind()
+  local r = miningRoute
+  if not r.work or rowRoute.surfacePhase() then return end
+  local current = toWorld(pos)
+  if samePos(current, r.work) then return end
+  local path = r.veinPath or (fleetJob and fleetJob.vein) or {}
+  local index
+  for i = #path, 1, -1 do if samePos(current, path[i]) then index = i break end end
+  if not index then
+    if rowRoute.opened(current) then return end
+    if current.y ~= r.targetY then error("No saved opened vein path back to the safe mining Y", 0) end
+    return
+  end
+  rowRoute.save("unwinding")
+  while index > 0 do
+    rowRoute.walkStep(index > 1 and path[index - 1] or r.work, true)
+    index = index - 1
+    r.unwindIndex = index
+    rowRoute.save()
+  end
+  r.unwindIndex = nil
+end
+
+function rowRoute.exit(intent)
+  if not miningRoute then error("No saved south-row route. Start a new row job first.", 0) end
+  local deadline = os.clock() + 10
+  while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
+  if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then error("Confirm GPS position and facing before returning on the saved staircase", 0) end
+  if intent then miningRoute.intent = intent end
+  rowRoute.reconcile()
+  rowRoute.unwind()
+  local w = toWorld(pos)
+  if w.y == 67 and (rowRoute.surfacePhase() or rowRoute.opened(w)) then
+    rowRoute.save("toStairHome")
+    rowRoute.surface(miningRoute.home)
+  else
+    local step, upper = rowRoute.position(w)
+    if not step or not rowRoute.opened(w) then
+      rowRoute.save("toBottom")
+      rowRoute.flatMine(miningRoute.bottom)
+      step, upper = rowRoute.position(toWorld(pos))
+    end
+    rowRoute.save("climbing")
+    while step > 0 do
+      if not upper then
+        rowRoute.walkStep({ x = miningRoute.home.x, y = 68 - step, z = -55 + step })
+      end
+      rowRoute.walkStep({ x = miningRoute.home.x, y = 68 - step, z = -56 + step })
+      step, upper = step - 1, false
+    end
+  end
+  faceCompass(2)
+  rowRoute.save("home")
+end
+
+function rowRoute.enter(a, service)
+  rowRoute.ensure(a)
+  rowRoute.unwind()
+  if not rowRoute.surfacePhase() and toWorld(pos).y == a.y and not rowRoute.position(toWorld(pos)) then
+    rowRoute.save("toWork")
+    rowRoute.flatMine({ x = a.x, y = a.y, z = a.z })
+    rowRoute.save("work")
+    return
+  end
+  if toWorld(pos).y == 67 and not rowRoute.position(toWorld(pos)) then rowRoute.surface(miningRoute.home) end
+  local depth = 67 - a.y
+  while true do
+    checkStop()
+    rowRoute.reconcile()
+    local w = toWorld(pos)
+    local step, upper = rowRoute.position(w)
+    if not step then error("The turtle is not on its saved staircase", 0) end
+    if service and (emptySlots() <= 2 or fuelLevel() < 2 * (distance(w, miningRoute.home) + depotCost(miningRoute.home)) + 100) then
+      service()
+      w = toWorld(pos)
+      step, upper = rowRoute.position(w)
+      if not step then error("Depot servicing did not return the turtle to its saved home", 0) end
+    end
+    if step == depth and not upper then break end
+    if upper then
+      local target = { x = w.x, y = 67 - step, z = w.z }
+      if step <= miningRoute.stair.completed then rowRoute.save("descending"); rowRoute.walkStep(target)
+      else rowRoute.buildLeg("down", target, "down", step) end
+    else
+      local nextStep = step + 1
+      local target = { x = w.x, y = w.y, z = w.z + 1 }
+      if nextStep <= miningRoute.stair.completed or (nextStep == miningRoute.stair.completed + 1 and miningRoute.stair.half) then
+        rowRoute.save("descending"); rowRoute.walkStep(target)
+      else rowRoute.buildLeg("forward", target, "forward", nextStep) end
+    end
+  end
+  miningRoute.stair.complete, miningRoute.bottomSaved = true, true
+  rowRoute.save("toWork")
+  rowRoute.flatMine({ x = a.x, y = a.y, z = a.z })
+  rowRoute.save("work")
+end
+
+function depotVisit(minFuel)
+  if not miningRoute then return rowRoute.sharedDepotVisit(minFuel, false) end
+  if not fleet.depot or fleet.depot.y ~= 67 then error("The shared depot dock must be at Y 67", 0) end
+  miningRoute.minFuel = math.max(miningRoute.minFuel or 0, minFuel or 0)
+  local flown = 0
+  if miningRoute.phase ~= "fromDepot" then
+    if miningRoute.phase ~= "toDepot" then rowRoute.exit() end
+    rowRoute.save("toDepot")
+    flown = rowRoute.sharedDepotVisit(miningRoute.minFuel + depotCost(miningRoute.home) + 64, true)
+    rowRoute.save("fromDepot")
+  end
+  rowRoute.surface(miningRoute.home)
+  faceCompass(2)
+  miningRoute.minFuel = nil
+  rowRoute.save("home")
+  return flown
+end
+
+-- A cancelled assignment can be cleared before the return finishes. Keep
+-- that obligation on the permanent route so a reboot still completes it.
+function rowRoute.recover()
+  if not miningRoute then error("No saved south staircase to recover", 0) end
+  if miningRoute.service or miningRoute.intent == "service" then depotVisit(miningRoute.minFuel or 0)
+  else rowRoute.exit() end
+  miningRoute.intent, miningRoute.service = nil, nil
+  rowRoute.save("home")
+  release("depot")
 end
 
 local function isVein(block)
@@ -1639,11 +1913,7 @@ end
 -- at any step and pick up where it left off.
 local KINDS = {}
 
--- Mine a level: 2-high tunnels from x/z heading `dir`, at most `length`
--- blocks out, mining ore veins in the floor and walls. With a height band it
--- then works back and forth through more tunnels 3 blocks above and below
--- (a.levels), each linked to the last at one end, all in this turtle's own
--- slice of rock. With a goal it stops as soon as it has collected that many.
+-- Mine one target level in parallel, two-high, fully inspected tunnels.
 
 -- How far along the tunnels, and how far to their right, world block w is.
 local function along(a, w) return (w.x - a.x) * CX[a.dir] + (w.z - a.z) * CZ[a.dir] end
@@ -1652,45 +1922,12 @@ local function across(a, w)
   return (w.x - a.x) * CX[r] + (w.z - a.z) * CZ[r]
 end
 
--- Tunnel heights: its own level, then every 3 blocks up, then down, while the
--- tunnel stays within `band` blocks of it and above the bedrock layers.
-local function levelOffsets(y, band)
-  local list = { 0 }
-  for off = 3, band, 3 do
-    if y + off <= 318 then list[#list + 1] = off end
-  end
-  for off = 3, band, 3 do
-    if y - off >= -59 then list[#list + 1] = -off end
-  end
-  return list
-end
-
-local function levelsOf(a) return a.levels or { 0 } end
-
--- Step i: tunnel n = i / length, every other one running back towards the start.
 local function tunnelCell(a, i)
-  local n, j = math.floor(i / a.length), i % a.length
-  if n % 2 == 1 then j = a.length - 1 - j end
-  return { x = a.x + j * CX[a.dir], y = a.y + levelsOf(a)[n + 1], z = a.z + j * CZ[a.dir] }
+  return { x = a.x + i * CX[a.dir], y = a.y, z = a.z + i * CZ[a.dir] }
 end
 
 local function goalOf(a)
   return GOAL_ITEMS[a.goalItem] or GOAL_ITEMS.valuables
-end
-
-local function branchEntry(a)
-  local depth = a.access == "stairs" and a.entryY - a.y or 0
-  return { x = a.x - depth * CX[a.dir], y = a.y + depth, z = a.z - depth * CZ[a.dir] }
-end
-
--- A stair column has a foot cell and the head cell used between its forward
--- and down moves. Both are recognized after a reboot halfway through a step.
-local function branchStairPosition(a, w)
-  if a.access ~= "stairs" or across(a, w) ~= 0 then return nil end
-  local rise = -along(a, w)
-  if rise < 0 or rise > a.entryY - a.y then return nil end
-  local footY = a.y + rise
-  if w.y == footY or w.y == footY + 1 then return rise, w.y > footY end
 end
 
 local function branchClearHeadroom()
@@ -1699,38 +1936,25 @@ local function branchClearHeadroom()
 end
 
 KINDS.branchMine = {
-  total = function(a) return a.length * #levelsOf(a) end,
-  entry = branchEntry,
-  accessCost = function(a, w)
-    -- Ore detours inside the planned work region are not another stair entry.
-    if a.coverage == "allSides" and type(a.veinBounds) == "table" and inBox(w, a.veinBounds) then return 0 end
-    return a.access == "stairs" and not KINDS.branchMine.inside(a, w) and 2 * (a.entryY - a.y) or 0
-  end,
+  total = function(a) return a.length end,
+  entry = function(a) return a.routeHome end,
   cell = tunnelCell,
-  -- On the tunnels' line within the height band: in a tunnel, or in a link
-  -- between two. (Vein detours always come back to the tunnel before a step
-  -- ends, so between steps the turtle is on the line.)
   inside = function(a, w)
-    local band, d = a.band or 0, along(a, w)
-    return across(a, w) == 0 and d >= 0 and d < a.length and w.y >= a.y - band and w.y <= a.y + 1 + band
+    local d = along(a, w)
+    return across(a, w) == 0 and d >= 0 and d < a.length and w.y == a.y
+      and (not a.radius or rowRoute.inCircle(w, a.routeHome, a.radius))
   end,
   -- Veins stay within the band and this turtle's slice: up to halfway to the
   -- next turtle's tunnel on either side.
   mayDig = function(a, w)
+    if a.radius and not rowRoute.inCircle(w, a.routeHome, a.radius) then return false end
     if a.coverage == "allSides" then return type(a.veinBounds) == "table" and inBox(w, a.veinBounds) end
     if a.band == nil then return true end -- a job from before height bands
     local s, x, d = a.spacing or 3, across(a, w), along(a, w)
     return w.y >= a.y - a.band and w.y <= a.y + 1 + a.band and d >= 0 and d < a.length
       and x >= -math.floor((s - 1) / 2) and x <= math.ceil((s - 1) / 2)
   end,
-  -- Along the tunnel it's in, then up or down to the target's tunnel. From a
-  -- tunnel above or below, it goes up or down first and comes back along the
-  -- main level, which is always finished first, so it never digs through a
-  -- tunnel before mining it.
-  walk = function(a, t)
-    local ax = CX[a.dir] ~= 0 and "x" or "z"
-    goWorld(t, toWorld(pos).y == a.y and ax .. "y" or "y" .. ax)
-  end,
+  walk = function(a, t) rowRoute.flatMine(t) end,
   -- Both walls, the nearer first: four turns a block, whichever way along the
   -- tunnel it's going.
   work = function(a, i, veins)
@@ -1786,69 +2010,15 @@ KINDS.branchMine = {
     return { count = a.goal, name = g.name, patterns = g.match and compileList(g.match) or compiled.valuables }
   end,
   detail = function(a, i, fj)
-    local c = tunnelCell(a, math.min(i, a.length * #levelsOf(a) - 1))
+    local c = tunnelCell(a, math.min(i, a.length - 1))
     local where = ("Y %d, %d of %d blocks out"):format(c.y, along(a, c) + 1, a.length)
     if (a.goal or 0) > 0 then
       return ("Found %d of %d %s (%s)"):format(fj.found or 0, a.goal, goalOf(a).name, where)
     end
     return "Tunnel at " .. where
   end,
-  -- New jobs reach their level along a 2-high diagonal staircase. Saved jobs
-  -- without an access marker retain the route their original plan allowed.
-  enter = function(a, service)
-    if a.access == "stairs" then
-      local top = branchEntry(a)
-      while true do
-        checkStop()
-        local rise, upper = branchStairPosition(a, toWorld(pos))
-        if rise == nil then
-          local ok, err = pcall(flyTo, top)
-          if not ok then
-            if err == STOP then error(STOP, 0) end
-            error("Can't reach the staircase entrance without digging. Set Entrance Y to an open surface or room: " .. tostring(err), 0)
-          end
-          rise, upper = a.entryY - a.y, false
-        end
-        if service and (emptySlots() <= 2 or fuelLevel() <
-          2 * (distance(toWorld(pos), top) + depotCost(top, fleetJob and fleetJob.route)) + 100) then
-          service()
-          -- Servicing can leave us at the depot. Re-read the saved geometric
-          -- position instead of continuing from a stale staircase index.
-          rise, upper = branchStairPosition(a, toWorld(pos))
-        end
-        if rise ~= nil then
-          if upper then digMove("down") end
-          branchClearHeadroom()
-          if rise == 0 then return end
-          faceCompass(a.dir)
-          digMove("forward")
-          digMove("down")
-          branchClearHeadroom()
-        end
-      end
-    end
-    local w = toWorld(pos)
-    if w.x ~= a.x or w.z ~= a.z then
-      local s = fromWorld({ x = a.x, y = a.y, z = a.z })
-      navigate(columnsGoal({ x1 = s.x, x2 = s.x, z1 = s.z, z2 = s.z }, s.y + 2, true))
-    end
-    goWorld({ y = a.y }, "y")
-  end,
-  -- Exit only through open cells; constructions added to the stairs are never
-  -- treated as permission to excavate a fresh way out.
-  exit = function(a)
-    if a.access == "stairs" then
-      local target = fromWorld(branchEntry(a))
-      if trailSize > 0 then
-        local ok, err = pcall(navigate, trailGoal(target))
-        if ok then return end
-        if err == STOP then error(STOP, 0) end
-      end
-      navigate(cellGoal(target))
-      return
-    end
-    if KINDS.branchMine.inside(a, toWorld(pos)) then KINDS.branchMine.walk(a, { x = a.x, y = a.y, z = a.z }) end
-  end,
+  enter = function(a, service) rowRoute.enter(a, service) end,
+  exit = function() rowRoute.exit() end,
 }
 
 -- The quarry's columns and top height in local coordinates.
@@ -1911,6 +2081,10 @@ KINDS.areaQuarry = {
 -- `extra` for a detour it's on), the flight from there, and the same back,
 -- with a margin.
 local function roundTrip(k, a, extra)
+  if a.routeMode == "southRow" and miningRoute then
+    return 2 * (distance(toWorld(pos), miningRoute.bottom) + 2 * (67 - a.y)
+      + (extra or 0) + depotCost(miningRoute.home, fleetJob.route)) + 100
+  end
   local e = k.entry(a)
   local w = toWorld(pos)
   local access = k.accessCost and k.accessCost(a, w) or 0
@@ -1920,11 +2094,16 @@ end
 -- Remember the longest real flight between the depot and the job, from one of
 -- `flown` blocks that started or ended at world position w.
 local function noteRoute(k, a, flown, w)
+  if a.routeMode == "southRow" then
+    fleetJob.route = math.max(fleetJob.route or 0, flown)
+    return
+  end
   fleetJob.route = math.max(fleetJob.route or 0, flown + distance(w, k.entry(a)))
 end
 
 -- From anywhere to step i. Coming in from the depot, it measures the flight.
 local function moveToStep(k, a, i, service)
+  if a.routeMode == "southRow" then rowRoute.unwind() end
   if not k.inside(a, toWorld(pos)) then
     local from, start = toWorld(pos), odometer
     k.enter(a, service)
@@ -1942,8 +2121,8 @@ local function fleetWork()
   local k = KINDS[fleetJob.kind]
   if not k then error("Unknown fleet job " .. tostring(fleetJob.kind), 0) end
   if not fleet.depot then error("Set up the depot on the dashboard first", 0) end
-  ensureCalibrated()
   local a = fleetJob.args
+  if fleetJob.kind == "branchMine" then rowRoute.ensure(a) else ensureCalibrated() end
   local total = k.total(a)
   local goal = k.goal and k.goal(a)
 
@@ -1972,9 +2151,13 @@ local function fleetWork()
     local need = continuationFuel()
     fleetJob.phase = "depot"
     saveState()
-    leaveWork(k, a)
+    if a.routeMode == "southRow" then
+      miningRoute.intent = "service"
+      rowRoute.save()
+    else leaveWork(k, a) end
     local from = toWorld(pos)
     noteRoute(k, a, depotVisit(need + 200), from)
+    if a.routeMode == "southRow" then miningRoute.intent = nil end
     fleetJob.phase = "work"
     saveState()
     tally()
@@ -2000,6 +2183,7 @@ local function fleetWork()
       if not fleetJob then return end
       local path = veins.cut or veins.resume or veins.path
       fleetJob.vein = path and { table.unpack(path) } or nil
+      if a.routeMode == "southRow" then miningRoute.veinPath = path and { table.unpack(path) } or nil end
       saveState()
     end
   end
@@ -2012,10 +2196,15 @@ local function fleetWork()
       checkStop()
       service(cut)
       moveToStep(k, a, fleetJob.step, service)
+      if a.routeMode == "southRow" then
+        miningRoute.work, miningRoute.veinPath = toWorld(pos), fleetJob.vein
+        rowRoute.save("work")
+      end
       veins.left, veins.path, veins.cut, veins.resume = 32, {}, nil, fleetJob.vein
       cut = k.work(a, fleetJob.step, veins) == false
       -- A vein it had to leave is finished from where it left off.
       fleetJob.vein = cut and veins.cut or nil
+      if a.routeMode == "southRow" then miningRoute.veinPath = fleetJob.vein end
       if not cut then fleetJob.step = fleetJob.step + 1 end
       tally()
       saveState()
@@ -2039,7 +2228,7 @@ local function fleetWork()
       log("warn", ("Stopped: %s. Heading home."):format(tostring(err)))
       pcall(function()
         if depotReady() then
-          leaveWork(k, a)
+          if a.routeMode ~= "southRow" then leaveWork(k, a) end
           depotVisit(0)
         end
       end)
@@ -2072,20 +2261,18 @@ function jobs.fleetJob(a)
   if fleetJob then error("Resume or cancel the saved fleet job first", 0) end
   local args
   if a.kind == "branchMine" then
+    rowRoute.validate(a)
     args = {
       kind = a.kind, x = clampInt(a.x, -3e7, 3e7, 0), z = clampInt(a.z, -3e7, 3e7, 0),
-      y = clampInt(a.y, -64, 320, -58), dir = toCompass(a.dir),
-      length = clampInt(a.length, 1, 1024, 64), scan = a.scan ~= false,
-      spacing = clampInt(a.spacing, 2, 16, 3), band = a.band ~= nil and clampInt(a.band, 0, 16, 0) or nil,
-      goal = clampInt(a.goal, 0, 100000, 0), goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
+      y = a.y, dir = 2,
+      radius = a.radius,
+      length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (67 - a.y) + 1, scan = true,
+      spacing = 2, band = 0,
+      goal = 0, goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
     }
-    if a.access == "stairs" then
-      local entryY = tonumber(a.entryY)
-      if not entryY or entryY ~= math.floor(entryY) or entryY < args.y or entryY < -64 or entryY > 318 then
-        error("Entrance Y must be a whole number from the mining level up to 318", 0)
-      end
-      args.access, args.entryY = "stairs", entryY
-    end
+    args.routeMode, args.access, args.entryY = "southRow", "southStairs", 67
+    args.routeHome = { x = a.routeHome.x, y = 67, z = -55, facing = "south" }
+    args.stairBottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }
     if a.coverage == "allSides" then
       local bounds = a.veinBounds
       if type(bounds) ~= "table" then error("All-side scanning needs planned vein bounds", 0) end
@@ -2101,8 +2288,7 @@ function jobs.fleetJob(a)
         error("Invalid planned vein bounds", 0)
       end
       args.coverage, args.veinBounds = "allSides", validated
-    end
-    args.levels = levelOffsets(args.y, args.band or 0)
+    else error("Radius mining requires all-side ore coverage", 0) end
   elseif a.kind == "areaQuarry" then
     local x1, x2 = clampInt(a.x1, -3e7, 3e7, 0), clampInt(a.x2, -3e7, 3e7, 0)
     local z1, z2 = clampInt(a.z1, -3e7, 3e7, 0), clampInt(a.z2, -3e7, 3e7, 0)
@@ -2114,6 +2300,7 @@ function jobs.fleetJob(a)
   else
     error("Unknown fleet job " .. tostring(a.kind), 0)
   end
+  if miningRoute and args.kind ~= "branchMine" then error("This row miner uses its saved staircase. Start a south-row level job.", 0) end
   fleetJob = { kind = args.kind, args = args, step = 0, phase = "work" }
   if type(a.queueId) == "string" and #a.queueId <= 96 then fleetJob.queueId = a.queueId end
   saveState()
@@ -2128,10 +2315,20 @@ function jobs.resume()
   fleetWork()
 end
 
--- Cancel and come home. A cancelled job backs out the way it came in first:
--- a local job through its own dug corridor, a fleet job out through its shaft.
+-- Cancel without losing the independent home, bottom, or opened vein exit.
 function jobs.goHome()
   setDetail("Returning home")
+  if miningRoute then
+    miningRoute.service = miningRoute.service or emptySlots() < 16 or miningRoute.intent == "service"
+      or miningRoute.phase == "toDepot" or miningRoute.phase == "fromDepot"
+      or fuelLevel() < (fleet.refuelTo or 10000)
+    miningRoute.intent = "home"
+    if fleetJob and fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning by saved staircase" } end
+    fleetJob, pendingTrip = nil, nil
+    rowRoute.save()
+    rowRoute.recover()
+    return
+  end
   if pendingTrip then
     local trip = pendingTrip
     pendingTrip = nil
@@ -2152,24 +2349,14 @@ function jobs.goHome()
   comeHome()
 end
 
--- Explicit recovery: cancel the job and dig a short route home. Every dig
--- still goes through clear/protection; restricted or unbreakable obstacles
--- are remembered for this trip so the planner detours instead of retrying.
+-- Force Home can mine only at the saved safe Y. The ascent and surface
+-- portion have the same restrictions as every other saved-stair return.
 function jobs.forceHome()
-  setDetail("Force home: mining a route")
-  pendingTrip = nil
-  if fleetJob and fleetJob.queueId then
-    lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; forcing home" }
-  end
-  fleetJob = nil
-  saveState()
-  refuelFromInventory(distance(pos, home) + 64)
-  local goal = cellGoal(home)
-  goal.mining, goal.blocked = true, {}
-  navigate(goal)
-  face(home.heading)
-  release("depot")
+  if not miningRoute then error("No saved south staircase. Line up at Y 67, Z -55 and start a new row job first.", 0) end
+  jobs.goHome()
 end
+
+function jobs.recoverRoute() rowRoute.recover() end
 
 -- Manual actions (run when no job is active) ------------------------------------
 -- Each returns ok[, message] like the turtle API does.
@@ -2236,12 +2423,13 @@ end
 -- Home is set once on first run; this moves it, either to the current spot or
 -- to world coordinates (x, y, z and a facing).
 actions.setHome = function(a)
+  if miningRoute then return false, "The mining home is saved permanently with its staircase" end
   if a.x ~= nil then
     if not gpsTrusted() then return false, "Needs GPS to set home by coordinates" end
     local w = { x = clampInt(a.x, -3e7, 3e7, 0), y = clampInt(a.y, -64, 320, 64), z = clampInt(a.z, -3e7, 3e7, 0) }
     home = fromWorld(w)
     home.heading = (toCompass(a.facing or "north") - calib.f0) % 4
-    forgetTrail()
+    forgetVisited()
     remember(pos)
     saveState()
     changed()
@@ -2253,9 +2441,10 @@ actions.setHome = function(a)
 end
 
 actions.resetPosition = function()
+  if miningRoute then return false, "The saved mining route requires its existing GPS coordinate frame" end
   pos, heading, calib = { x = 0, y = 0, z = 0 }, 0, nil
   blocked, blockedCount = {}, 0
-  forgetTrail()
+  forgetVisited()
   setHome()
   return true, "Position reset to 0, 0, 0"
 end
@@ -2307,6 +2496,10 @@ local function runCommand(cmd)
   local fn = jobs[name] or actions[name]
   if not fn then
     send({ type = "result", action = tostring(name), ok = false, msg = "Unknown action" })
+    return
+  end
+  if miningRoute and (name == "tunnel" or name == "quarry") then
+    send({ type = "result", action = name, ok = false, msg = "This turtle uses its saved south staircase. Start a level mining job." })
     return
   end
 
@@ -2403,6 +2596,14 @@ local function status()
     oreScanSupported = true,
     staircaseSupported = true,
     forceHomeSupported = true,
+    southRowSupported = true,
+    radiusSupported = true,
+    miningRoute = miningRoute and {
+      home = miningRoute.home, bottom = miningRoute.bottom, targetY = miningRoute.targetY,
+      radius = miningRoute.radius,
+      bottomSaved = miningRoute.bottomSaved, stair = miningRoute.stair,
+      phase = miningRoute.phase, intent = miningRoute.intent,
+    } or nil,
     lastFleetResult = lastFleetResult,
   }
 end
@@ -2498,7 +2699,7 @@ local function updateGps(fixPos)
     local x, y, z = gps.locate(1)
     gpsState = x and "ok" or "nofix"
     -- Ignore fixes that straddled a move.
-    if x and samePos(fixPos, pos) then
+    if x and not physicalMove and samePos(fixPos, pos) then
       onFix(fixPos, { x = math.floor(x + 0.5), y = math.floor(y + 0.5), z = math.floor(z + 0.5) })
     end
   end
@@ -2591,11 +2792,18 @@ term.setCursorPos(1, 1)
 print(("MinerDash %s | turtle #%d %s"):format(VERSION, os.getComputerID(), os.getComputerLabel() or ""))
 loadState()
 loadFleet()
-loadTrail()
 remember(pos)
 refreshSurroundings()
--- Pick an interrupted fleet job back up after a reboot or chunk reload.
-if fleetJob and not fleetJob.paused and not fleetJob.failed then
+-- A recall survives even if the assignment was already cleared. An old
+-- branch layout stays paused until replaced; never guess a staircase for it.
+if miningRoute and miningRoute.intent == "home" then
+  queue[1] = { action = "recoverRoute" }
+elseif fleetJob and fleetJob.kind == "branchMine" and (fleetJob.args.routeMode ~= "southRow" or not fleetJob.args.radius) then
+  fleetJob.paused, fleetJob.failed = true, "Old mining layout: return to the saved home and create a new radius mining job"
+  saveState()
+elseif fleetJob and not fleetJob.paused and not fleetJob.failed then
   queue[1] = { action = "resume" }
+elseif miningRoute and miningRoute.intent and not fleetJob then
+  queue[1] = { action = "recoverRoute" }
 end
 parallel.waitForAny(connection, worker, gpsLoop)

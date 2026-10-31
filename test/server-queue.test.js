@@ -14,11 +14,11 @@ import { DEFAULT_FLEET } from "../fleet.js";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const FLEET = {
   ...structuredClone(DEFAULT_FLEET), updatedAt: 1,
-  depot: { x: 0, y: 64, z: 0, junk: "down", valuables: "north", fuel: "west" },
+  depot: { x: 0, y: 67, z: 0, junk: "down", valuables: "north", fuel: "west" },
 };
 const PARAMS = { x1: 100, x2: 103, z1: 100, z2: 103, yTop: 64, yBottom: 62 };
 const IDLE = {
-  label: "Test miner", queueSupported: true, staircaseSupported: true, oreScanSupported: true, forceHomeSupported: true, gpsTrusted: true, queued: 0,
+  label: "Test miner", queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: true, radiusSupported: true, forceHomeSupported: true, gpsTrusted: true, queued: 0,
   job: null, fleetJob: null, fuel: 10000,
   world: { x: 30, y: 64, z: 30 }, homeWorld: { x: 30, y: 64, z: 30 },
 };
@@ -116,7 +116,7 @@ async function harness(t) {
   };
   const turtle = async (status = IDLE, report = true) => {
     const peer = await connect("turtle");
-    await peer.exchange({ type: "hello", token: "turtle-test", id: 7, label: "Test miner", version: "1.9.0", fleet: FLEET }, (msg) => msg.type === "welcome");
+    await peer.exchange({ type: "hello", token: "turtle-test", id: 7, label: "Test miner", version: "2.1.0", fleet: FLEET }, (msg) => msg.type === "welcome");
     if (report) peer.send({ type: "status", ...status });
     return peer;
   };
@@ -267,19 +267,26 @@ test("Force home can interrupt a queued assignment and its cancellation pauses t
 test("new level jobs wait for all-side support and send the checked ore bounds", { timeout: 15000 }, async (t) => {
   const app = await harness(t);
   const dashboard = await app.dashboard();
-  const turtle = await app.turtle({ ...IDLE, oreScanSupported: false });
+  const initial = { ...IDLE, world: { x: 100, y: 67, z: -55 }, homeWorld: null, gpsTrusted: false };
+  const turtle = await app.turtle({ ...initial, oreScanSupported: false });
   const result = await dashboard.exchange({
     type: "queueFleetJob", kind: "branchMine", ids: [7],
-    params: { x: 100, y: 50, z: 100, dir: "east", length: 5, entryY: 54 },
+    params: { routeMode: "southRow", y: 50, radius: 21 },
   }, (msg) => msg.type === "queueResult");
   assert.equal(result.ok, true);
   await dashboard.wait((msg) => queueMessage("queued")(msg) && /every side/.test(msg.queue.jobs[0].message));
   assert.equal(turtle.messages.some(command), false);
-  turtle.send({ type: "status", ...IDLE });
+  turtle.send({ type: "status", ...initial });
   const { args } = await turtle.wait(command);
   assert.equal(args.spacing, 2);
+  assert.equal(args.radius, 21);
+  assert.equal(args.length, 5);
   assert.equal(args.band, 0);
   assert.equal(args.goal, 0);
   assert.equal(args.coverage, "allSides");
-  assert.deepEqual(args.veinBounds, { x1: 99, y1: 49, z1: 99, x2: 105, y2: 52, z2: 101 });
+  assert.deepEqual(args.routeHome, { x: 100, y: 67, z: -55, facing: "south" });
+  assert.deepEqual(args.stairBottom, { x: 100, y: 50, z: -38 });
+  assert.equal(args.dir, "south");
+  assert.equal(args.access, "southStairs");
+  assert.deepEqual(args.veinBounds, { x1: 99, y1: 49, z1: -39, x2: 101, y2: 52, z2: -33 });
 });

@@ -1,98 +1,140 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COMPASS, DEFAULT_FLEET, planFleetJob } from "../fleet.js";
+import { DEFAULT_FLEET, planFleetJob } from "../fleet.js";
 
 function fleet() {
   return {
     ...structuredClone(DEFAULT_FLEET),
-    depot: { x: 1000, y: 64, z: 1000, junk: "down", valuables: "north", fuel: "west" },
+    depot: { x: 1000, y: 67, z: 1000, junk: "down", valuables: "north", fuel: "west" },
   };
 }
 
-const settings = { x: 100, y: 50, z: 100, dir: "north", length: 10, entryY: 54, spacing: 3 };
-const ready = [{ id: 1, name: "One" }, { id: 2, name: "Two" }];
+const settings = { routeMode: "southRow", y: 50, radius: 26 };
+const turtle = (id, x) => ({ id, name: `Miner ${id}`, home: { x, y: 67, z: -55, facing: "south" } });
+const ready = [turtle(1, 100), turtle(2, 107)];
 const point = (x, y, z, name = "Protected") => ({ name, x1: x, x2: x, y1: y, y2: y, z1: z, z2: z });
 const plan = (f = fleet(), params = settings, selected = ready.slice(0, 1), homes = []) =>
   planFleetJob(f, "branchMine", params, selected, homes);
 
-test("new branch assignments carry deterministic staircase access and preserve tunnel bottom coordinates", () => {
+test("assigns southbound lanes in home-X order while retaining each turtle's own staircase", () => {
   const result = plan(fleet(), settings, ready);
   assert.equal(result.error, undefined);
   assert.deepEqual(result.assignments.map(({ id, args }) => ({
-    id, x: args.x, y: args.y, z: args.z, access: args.access, entryY: args.entryY,
+    id, x: args.x, y: args.y, z: args.z, dir: args.dir, routeMode: args.routeMode,
+    access: args.access, entryY: args.entryY, routeHome: args.routeHome, stairBottom: args.stairBottom,
   })), [
-    { id: 1, x: 100, y: 50, z: 100, access: "stairs", entryY: 54 },
-    { id: 2, x: 103, y: 50, z: 100, access: "stairs", entryY: 54 },
+    { id: 2, x: 107, y: 50, z: -38, dir: "south", routeMode: "southRow", access: "southStairs", entryY: 67,
+      routeHome: ready[1].home, stairBottom: { x: 107, y: 50, z: -38 } },
+    { id: 1, x: 105, y: 50, z: -38, dir: "south", routeMode: "southRow", access: "southStairs", entryY: 67,
+      routeHome: ready[0].home, stairBottom: { x: 100, y: 50, z: -38 } },
   ]);
-  assert.deepEqual(result.assignments[0].volume, { x1: 99, x2: 101, y1: 49, y2: 52, z1: 90, z2: 101 });
+  assert.deepEqual(result.assignments[0].volume, { x1: 106, x2: 108, y1: 49, y2: 52, z1: -39, z2: -28 });
+  assert.deepEqual(ready.map(({ id }) => id), [1, 2], "planning must not reorder the input list");
+  result.assignments[0].args.routeHome.x = 0;
+  assert.equal(ready[1].home.x, 107, "assigned home is an independent saved coordinate");
 });
 
-test("defaults entrance Y to the depot level, or the target level when higher", () => {
-  const params = { ...settings };
-  delete params.entryY;
-  assert.equal(plan(fleet(), params).assignments[0].args.entryY, 64);
-  assert.equal(plan(fleet(), { ...params, y: 70 }).assignments[0].args.entryY, 70);
-});
-
-test("validates entrance Y including whole numbers, headroom, and target level", () => {
-  for (const entryY of [49, 319, -65, 51.5, NaN, Infinity, null]) {
-    assert.match(plan(fleet(), { ...settings, entryY }).error, /Entrance Y/);
+test("computes staircase bottoms from the surface home at every supported mining level", () => {
+  for (const y of [-64, -59, 0, 50, 66, 67]) {
+    const result = plan(fleet(), { ...settings, y, radius: 256 });
+    assert.equal(result.error, undefined, `Y=${y}`);
+    const { args } = result.assignments[0];
+    assert.deepEqual(args.stairBottom, { x: 100, y, z: -55 + 67 - y });
+    assert.equal(args.entryY, 67);
   }
-  assert.equal(plan(fleet(), { ...settings, entryY: 50 }).error, undefined);
-  assert.equal(plan(fleet(), { ...settings, y: 318, entryY: 318 }).error, undefined);
-  assert.match(plan(fleet(), { ...settings, y: 319, entryY: 319 }).error, /Entrance Y/);
+  for (const y of [-65, 68, 50.5, NaN, Infinity, null, undefined]) {
+    assert.match(plan(fleet(), { ...settings, y }).error, /tunnel settings/, `invalid Y=${y}`);
+  }
 });
 
-test("checks every foot and headroom cell of all four staircase directions", () => {
-  const dx = [0, 1, 0, -1], dz = [-1, 0, 1, 0];
-  for (const [index, dir] of COMPASS.entries()) {
-    for (let rise = 0; rise <= 4; rise++) {
+test("requires the new layout explicitly so saved old jobs cannot silently change their route", () => {
+  for (const routeMode of [undefined, null, "stairs", "other"]) {
+    assert.match(plan(fleet(), { ...settings, routeMode }).error, /old route layout/);
+  }
+  const { args } = plan(fleet(), { ...settings, x: 999, z: 999, dir: "north", entryY: 20 }).assignments[0];
+  assert.equal(args.x, 100);
+  assert.equal(args.z, -38);
+  assert.equal(args.dir, "south");
+  assert.equal(args.entryY, 67);
+});
+
+test("requires real saved homes in the south-facing Y=67, Z=-55 surface row", () => {
+  const invalid = [undefined, { x: 100, y: 66, z: -55, facing: "south" },
+    { x: 100, y: 67, z: -54, facing: "south" }, { x: 100, y: 67, z: -55, facing: "north" },
+    { x: 100.5, y: 67, z: -55, facing: "south" }, { x: 30_000_001, y: 67, z: -55, facing: "south" }];
+  for (const home of invalid) {
+    assert.match(plan(fleet(), settings, [{ ...ready[0], home, position: ready[0].home }]).error, /confirmed south-facing home/);
+  }
+  assert.match(plan(fleet(), settings, [ready[0], turtle(3, 100)]).error, /own X position/);
+  const f = fleet();
+  f.depot.y = 66;
+  assert.match(plan(f).error, /depot must be at Y=67/);
+});
+
+test("allows protected areas on every initial stair foot and headroom cell away from the work volume", () => {
+  // The last stair columns also touch the regular mining/ore-check volume.
+  // They retain regular work protection rather than extending the exemption.
+  for (let step = 1; step <= 14; step++) {
+    for (let head = 0; head <= 1; head++) {
+      const f = fleet();
+      f.protect.areas = [point(100, 67 - step + head, -55 + step)];
+      assert.equal(plan(f).error, undefined, `step ${step}, head ${head}`);
+    }
+  }
+});
+
+test("keeps normal mining and assembly corridors outside protected areas", () => {
+  const f = fleet();
+  f.protect.areas = [point(100, 50, -38, "Tunnel bottom")];
+  assert.match(plan(f).error, /Tunnel bottom/);
+  // Miner 1's bottom is X=100; its assigned lane is X=105. X=101 lies
+  // outside all assigned work slices and is checked as assembly access.
+  f.protect.areas = [point(101, 50, -38, "Assembly wall")];
+  assert.equal(plan(f, settings, [ready[1]]).error, undefined);
+  assert.match(plan(f, settings, ready).error, /Assembly wall/);
+});
+
+test("does not reserve untouched blocks in the staircase's enclosing rectangle", () => {
+  const f = fleet();
+  f.protect.areas = [point(100, 50, -50), point(100, 66, -38)];
+  assert.equal(plan(f).error, undefined);
+});
+
+test("validates all initial stair foot and headroom cells against other homes", () => {
+  for (const miner of ready) {
+    for (let step = 1; step <= 17; step++) {
       for (let head = 0; head <= 1; head++) {
-        const f = fleet();
-        f.protect.areas = [point(100 - rise * dx[index], 50 + rise + head, 100 - rise * dz[index])];
-        assert.match(plan(f, { ...settings, dir }).error, /protected area/, `${dir}, rise ${rise}, head ${head}`);
+        const homes = [{ name: "Neighbour", home: { x: miner.home.x, y: 67 - step + head, z: -55 + step } }];
+        assert.match(plan(fleet(), settings, ready, homes).error, /Neighbour's home/, `miner ${miner.id}, step ${step}, head ${head}`);
       }
     }
   }
 });
 
-test("does not reject untouched blocks inside the staircase's enclosing rectangle", () => {
+test("does not reserve the surface home, but still protects depot waiting space and assembly homes", () => {
+  assert.equal(plan(fleet(), settings, ready, ready).error, undefined);
   const f = fleet();
-  f.protect.areas = [point(100, 50, 104), point(100, 54, 100)];
-  assert.equal(plan(f).error, undefined);
-});
-
-test("checks the access staircase of every selected turtle", () => {
-  const f = fleet();
-  f.protect.areas = [point(103, 52, 102, "Second stair")];
-  assert.equal(plan(f, settings, ready.slice(0, 1)).error, undefined);
-  assert.match(plan(f, settings, ready).error, /Second stair/);
-});
-
-test("refuses staircase intersections with depot waiting space and turtle homes", () => {
-  const f = fleet();
-  f.depot = { ...f.depot, x: 100, y: 54, z: 104 };
+  f.depot = { ...f.depot, x: 100, z: -48 };
   assert.match(plan(f).error, /depot/);
-  assert.match(plan(fleet(), settings, ready.slice(0, 1), [{
-    name: "Neighbour", home: { x: 100, y: 53, z: 102 },
-  }]).error, /Neighbour's home/);
-  assert.equal(plan(fleet(), settings, ready.slice(0, 1), [{
-    name: "Neighbour", home: { x: 100, y: 50, z: 104 },
-  }]).error, undefined);
+  assert.match(plan(fleet(), settings, ready, [{ name: "Bottom neighbour", home: { x: 101, y: 51, z: -38 } }]).error, /Bottom neighbour's home/);
 });
 
-test("rejects an access staircase extending beyond world coordinate limits", () => {
-  assert.match(plan(fleet(), { ...settings, x: -30_000_000, dir: "east" }).error, /world coordinate limits/);
+test("rejects lane or scan allowance beyond world coordinate limits", () => {
+  for (const x of [-30_000_000, 30_000_000]) {
+    assert.match(plan(fleet(), settings, [turtle(1, x)]).error, /world coordinate limits/);
+  }
 });
 
-test("quarry assignments retain their original box and never gain external stairs", () => {
+test("quarry assignments retain their original box without requiring surface-row homes", () => {
   const f = fleet();
+  f.depot.y = 64;
   f.protect.areas = [point(100, 70, 100)];
   const result = planFleetJob(f, "areaQuarry", {
     x1: 100, z1: 100, x2: 101, z2: 101, yTop: 69, yBottom: 60,
-  }, ready, []);
+  }, [{ id: 1 }, { id: 2 }], []);
   assert.equal(result.error, undefined);
   assert.equal(result.assignments.length, 2);
+  assert.equal(result.assignments[0].args.routeMode, undefined);
   assert.equal(result.assignments[0].args.access, undefined);
   assert.equal(result.assignments[0].args.entryY, undefined);
 });

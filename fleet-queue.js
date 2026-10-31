@@ -23,7 +23,17 @@ function prune(jobs) {
 }
 
 function idle(status) {
-  return status && !status.job && !status.fleetJob && !(Number(status.queued) > 0);
+  return status && !status.job && !status.fleetJob && !status.miningRoute?.intent && !(Number(status.queued) > 0);
+}
+
+function rowPosition(position) {
+  return position && Number.isInteger(position.x) && position.y === 67 && position.z === -55;
+}
+
+function located(status, kind) {
+  // Initial row placement supplies the known south-facing orientation. A GPS
+  // fix at that row is enough to start without first moving off the home cell.
+  return status?.gpsTrusted || (kind === "branchMine" && !status?.miningRoute && rowPosition(status?.world));
 }
 
 export class FleetJobQueue {
@@ -142,8 +152,14 @@ export class FleetJobQueue {
       if (!status?.queueSupported) return `Update ${label}'s script to use the fleet queue`;
       if (job.kind === "branchMine" && !status.staircaseSupported) return `Update ${label}'s script to use staircase mining`;
       if (job.kind === "branchMine" && !status.oreScanSupported) return `Update ${label}'s script to check every side for ore`;
-      if (!status.gpsTrusted) return `Waiting for ${label}'s GPS position`;
+      if (job.kind === "branchMine" && !status.southRowSupported) return `Update ${label}'s script for the saved south staircase`;
+      if (job.kind === "branchMine" && !status.radiusSupported) return `Update ${label}'s script for the home mining radius`;
+      if (!located(status, job.kind)) return `Waiting for ${label}'s GPS position`;
       if (!idle(status)) return `Waiting for ${label} to finish its current work`;
+      if (job.kind === "branchMine") {
+        const home = status.miningRoute?.home ?? status.world;
+        if (!rowPosition(home) || !rowPosition(status.world) || home.x !== status.world.x) return `Waiting for ${label} at its home on Y=67, Z=-55`;
+      }
     }
     return null;
   }
@@ -258,7 +274,7 @@ export class FleetJobQueue {
       if (assignment.done || this.acknowledged.has(assignment.queueId)) continue;
       const turtle = this.inspect(assignment.id);
       const status = turtle?.status;
-      if (!turtle?.online || !turtle.fresh || !status?.queueSupported || !status.gpsTrusted || !idle(status)) continue;
+      if (!turtle?.online || !turtle.fresh || !status?.queueSupported || !located(status, job.kind) || !idle(status)) continue;
       const time = this.now();
       if (this.sentAt.has(assignment.queueId) && time - this.sentAt.get(assignment.queueId) < RETRY_MS) continue;
       // Record attempts even if the transport throws; the same ID is retried.

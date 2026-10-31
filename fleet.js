@@ -92,7 +92,21 @@ function intersects(a, b) {
   return a.x1 <= b.x2 && a.x2 >= b.x1 && a.y1 <= b.y2 && a.y2 >= b.y1 && a.z1 <= b.z2 && a.z2 >= b.z1;
 }
 
-const contains = (b, p) => intersects(b, box(p.x, p.y, p.z, p.x, p.y, p.z));
+// A home cylinder extends through every Y. Its radius measures only world XZ.
+const insideCylinder = (cylinder, point) =>
+  (point.x - cylinder.x) ** 2 + (point.z - cylinder.z) ** 2 <= cylinder.radius ** 2;
+
+// Work bounds are conservative boxes around a lane. Only integer block cells
+// inside that turtle's original-home cylinder can actually be mined.
+function intersectsWork(a, b, circle) {
+  if (!intersects(a, b)) return false;
+  if (!circle) return true;
+  a = normal(a);
+  b = normal(b);
+  const x = Math.max(a.x1, b.x1, Math.min(circle.x, a.x2, b.x2));
+  const z = Math.max(a.z1, b.z1, Math.min(circle.z, a.z2, b.z2));
+  return insideCylinder(circle, { x, z });
+}
 
 // The dock, its chests and the space around it where turtles wait their turn
 // (5 blocks out sideways, 2 up and down, as the turtle script uses): no job
@@ -110,38 +124,65 @@ export function validateFleet(fleet) {
 }
 
 // Splits a fleet job between the ready turtles and checks it can't dig
-// anywhere it shouldn't. `ready` is [{ id, name }]; `homes` is [{ name, home }]
+// anywhere it shouldn't. For level jobs `ready` is [{ id, name, home }], with
+// a confirmed, south-facing home in the surface row; `homes` is [{ name, home }]
 // for every known turtle (home in world coordinates). Returns
 // { assignments: [{ id, args, volume }] } or { error }.
 export function planFleetJob(fleet, kind, params, ready, homes) {
   if (!fleet.depot) return { error: "Set up the depot first (Fleet settings)." };
   if (!ready.length) return { error: "No turtles are ready." };
   let jobs;
+  let selected = ready;
 
   if (kind === "branchMine") {
-    const dir = COMPASS.indexOf(params.dir);
-    const [x, z, y] = [coord(params.x), coord(params.z), height(params.y)];
-    const length = int(params.length, 1, 1024);
-    const spacing = int(params.spacing ?? 2, 2, 16);
-    const band = int(params.band ?? 0, 0, 16);
-    const goal = int(params.goal ?? 0, 0, 100_000);
-    const goalItem = params.goalItem ?? "valuables";
-    if (dir < 0 || [x, z, y, length, spacing, band, goal].includes(null) || !GOAL_ITEMS.includes(goalItem)) {
+    if (params.routeMode !== "southRow") {
+      return { error: "This level job uses an old route layout. Create a new south-row level job." };
+    }
+    if (fleet.depot.y !== 67) return { error: "The shared depot must be at Y=67 for south-row mining." };
+    const y = Number(params.y);
+    if (params.y === null || !Number.isInteger(y) || y < -64 || y > 67) {
       return { error: "Check the tunnel settings." };
     }
-    const entryY = params.entryY === undefined ? Math.max(y, fleet.depot.y) : Number(params.entryY);
-    if (params.entryY === null || !Number.isInteger(entryY) || entryY < y || entryY < -64 || entryY > 318) {
-      return { error: "Entrance Y must be a whole number from the mining level up to 318." };
+    const radius = params.radius;
+    if (!Number.isInteger(radius) || radius < 1 || radius > 1024) {
+      return { error: "Choose a mining radius from 1 to 1024 whole blocks, measured horizontally from each turtle's original home." };
     }
+    for (const turtle of ready) {
+      const home = turtle.home;
+      if (!home || !Number.isInteger(home.x) || coord(home.x) === null ||
+          home.y !== 67 || home.z !== -55 || home.facing !== "south") {
+        return { error: `${turtle.name || `Turtle ${turtle.id}`} needs a confirmed south-facing home at Y=67, Z=-55.` };
+      }
+    }
+    if (new Set(ready.map(({ home }) => home.x)).size !== ready.length) {
+      return { error: "Each turtle needs its own X position in the home row." };
+    }
+    selected = [...ready].sort((a, b) => b.home.x - a.home.x);
+    const x = selected[0].home.x, z = -55 + 67 - y;
+    const spacing = 2, band = 0, goal = 0, goalItem = "valuables", scan = true;
+    for (const [k, turtle] of selected.entries()) {
+      const home = turtle.home, cylinder = { x: home.x, z: home.z, radius };
+      const bottom = { x: home.x, z }, lane = { x: x - k * spacing, z };
+      if (!insideCylinder(cylinder, bottom)) {
+        const needed = Math.ceil(Math.hypot(bottom.x - home.x, bottom.z - home.z));
+        return { error: `${turtle.name || `Turtle ${turtle.id}`}'s staircase leaves the home cylinder; it needs at least ${needed} blocks horizontally.` };
+      }
+      if (!insideCylinder(cylinder, lane)) {
+        const needed = Math.ceil(Math.hypot(lane.x - home.x, lane.z - home.z));
+        return { error: `${turtle.name || `Turtle ${turtle.id}`}'s assigned lane starts outside its home cylinder. It needs at least ${needed} blocks horizontally; increase the radius or select fewer turtles.` };
+      }
+    }
+    const dir = COMPASS.indexOf("south"), entryY = 67;
     const right = (dir + 1) % 4;
-    // Each turtle owns a slice of rock: its tunnel line, half the spacing to
-    // either side (for veins) and the height band above and below.
+    // Automatic lanes have one shared wall. Their ore-check bounds include
+    // every exposed side, and the circle clips the final reachable blocks.
     const [left, rightSide] = [Math.floor((spacing - 1) / 2), Math.ceil((spacing - 1) / 2)];
     const [y1, y2] = [Math.max(-64, y - band), Math.min(319, y + 1 + band)];
-    const scan = params.scan !== false;
-    jobs = ready.map((_, k) => {
+    jobs = selected.map((turtle, k) => {
       const sx = x + k * spacing * CX[right];
       const sz = z + k * spacing * CZ[right];
+      const maxSouth = Math.floor(Math.sqrt(radius ** 2 - (sx - turtle.home.x) ** 2));
+      const length = turtle.home.z + maxSouth - sz + 1;
       const ex = sx + (length - 1) * CX[dir];
       const ez = sz + (length - 1) * CZ[dir];
       // Shared walls have a single owner. The outer lanes also own their
@@ -155,14 +196,21 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
       );
       return {
         args: {
-          kind, x: sx, z: sz, y, dir: COMPASS[dir], length, scan, spacing, band, goal, goalItem, access: "stairs", entryY,
+          kind, x: sx, z: sz, y, dir: COMPASS[dir], radius, length, scan, spacing, band, goal, goalItem,
+          routeMode: "southRow", routeHome: { ...turtle.home },
+          stairBottom: { x: turtle.home.x, y, z }, access: "southStairs", entryY,
           ...(scan ? { coverage: "allSides", veinBounds: volume } : {}),
         },
         volume,
-        // Exact 2-high staircase columns, descending towards the tunnel start.
-        access: Array.from({ length: entryY - y + 1 }, (_, rise) => {
-          const px = sx - rise * CX[dir], pz = sz - rise * CZ[dir];
-          return box(px, y + rise, pz, px, y + rise + 1, pz);
+        circle: { x: turtle.home.x, z: turtle.home.z, radius },
+        // Assembly and later returns run across the bottom level. Only the
+        // initial descent may cross protected areas; these corridors may not.
+        assembly: box(turtle.home.x, y, z, sx, y + 1, z),
+        // Forward, then down, from this turtle's own saved surface home.
+        // The surface home itself is never an access block to be dug out.
+        access: Array.from({ length: entryY - y }, (_, index) => {
+          const step = index + 1, py = entryY - step, pz = -55 + step;
+          return box(turtle.home.x, py, pz, turtle.home.x, py + 1, pz);
         }),
       };
     });
@@ -192,18 +240,25 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
   // Validate each stair column rather than its much larger enclosing box.
   const depot = depotBox(fleet.depot);
   for (const job of jobs) {
-    for (const part of [job.volume, ...(job.access ?? [])]) {
+    const work = [job.volume, ...(job.assembly ? [job.assembly] : [])];
+    for (const part of [...work, ...(job.access ?? [])]) {
       if ([part.x1, part.x2, part.z1, part.z2].some((value) => coord(value) === null)) {
         return { error: "The job or its access stairs extend beyond the world coordinate limits." };
       }
-      for (const area of fleet.protect.areas) {
-        if (intersects(part, area)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };
+      // Protected block types remain enforced by the turtle everywhere. This
+      // exemption concerns protected coordinates on the initial stairs only.
+      if (work.includes(part)) {
+        for (const area of fleet.protect.areas) {
+          if (intersectsWork(part, area, job.circle)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };
+        }
       }
-      if (intersects(part, depot)) return { error: "The job would dig at the depot, or where turtles wait for it (within 5 blocks)." };
+      if (intersectsWork(part, depot, job.circle)) return { error: "The job would dig at the depot, or where turtles wait for it (within 5 blocks)." };
       for (const { name, home } of homes) {
-        if (home && contains(part, home)) return { error: `The job would dig out ${name}'s home.` };
+        if (home && intersectsWork(part, box(home.x, home.y, home.z, home.x, home.y, home.z), job.circle)) {
+          return { error: `The job would dig out ${name}'s home.` };
+        }
       }
     }
   }
-  return { assignments: jobs.map((job, k) => ({ id: ready[k].id, args: job.args, volume: job.volume })) };
+  return { assignments: jobs.map((job, k) => ({ id: selected[k].id, args: job.args, volume: job.volume })) };
 }

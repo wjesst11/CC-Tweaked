@@ -190,6 +190,27 @@ function addLog(t, level, msg) {
 
 const nameOf = (t) => t.label || `Turtle #${t.id}`;
 
+function onHomeRow(position) {
+  return position && Number.isInteger(position.x) && position.y === 67 && position.z === -55;
+}
+
+function rowHome(status) {
+  const saved = status?.miningRoute?.home;
+  if (onHomeRow(saved)) return { x: saved.x, y: 67, z: -55, facing: "south" };
+  if (onHomeRow(status?.world)) return { x: status.world.x, y: 67, z: -55, facing: "south" };
+  return null;
+}
+
+function atRowHome(status) {
+  const home = rowHome(status);
+  return home && onHomeRow(status?.world) && status.world.x === home.x;
+}
+
+function plannerTurtle(id) {
+  const t = turtles.get(id);
+  return { id, name: t ? nameOf(t) : `Turtle #${id}`, home: rowHome(t?.status), position: t?.status?.world };
+}
+
 // Queued work outlives browser sessions and server restarts. Persist before
 // sending commands, so reconnects can safely retry the same assignment ID.
 let savedQueue;
@@ -206,8 +227,8 @@ const jobQueue = new FleetJobQueue({
     renameSync(`${QUEUE_PATH}.tmp`, QUEUE_PATH);
   },
   plan(kind, params, ids) {
-    const selected = ids.map((id) => ({ id, name: turtles.get(id) ? nameOf(turtles.get(id)) : `Turtle #${id}` }));
-    const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.homeWorld }));
+    const selected = ids.map(plannerTurtle);
+    const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.miningRoute?.home ?? t.status?.homeWorld }));
     return planFleetJob(fleet, kind, params, selected, homes);
   },
   inspect(id) {
@@ -333,11 +354,14 @@ function readyTurtles(ids, kind) {
     const s = t.status ?? {};
     if (!t.socket) skipped.push(`${nameOf(t)} is offline`);
     else if (!t.freshStatus) skipped.push(`${nameOf(t)} is still reporting its status`);
-    else if (!s.gpsTrusted) skipped.push(`${nameOf(t)} doesn't know its GPS facing yet`);
+    else if (!s.gpsTrusted && !(kind === "branchMine" && !s.miningRoute && onHomeRow(s.world))) skipped.push(`${nameOf(t)} doesn't know its GPS position yet`);
     else if (kind === "branchMine" && !s.staircaseSupported) skipped.push(`${nameOf(t)} needs the latest script for staircase mining`);
     else if (kind === "branchMine" && !s.oreScanSupported) skipped.push(`${nameOf(t)} needs the latest script for complete side checks`);
-    else if (s.job || s.fleetJob || s.queued > 0 || t.pendingFleetUntil > Date.now() || queueOwns(t.id)) skipped.push(`${nameOf(t)} is busy or has saved work`);
-    else ready.push({ id: t.id, name: nameOf(t) });
+    else if (kind === "branchMine" && !s.southRowSupported) skipped.push(`${nameOf(t)} needs script 2.0.0 for the saved south staircase`);
+    else if (kind === "branchMine" && !s.radiusSupported) skipped.push(`${nameOf(t)} needs script 2.1.0 for the home mining radius`);
+    else if (kind === "branchMine" && !atRowHome(s)) skipped.push(`${nameOf(t)} must be at its saved home on Y=67, Z=-55`);
+    else if (s.job || s.fleetJob || s.miningRoute?.intent || s.queued > 0 || t.pendingFleetUntil > Date.now() || queueOwns(t.id)) skipped.push(`${nameOf(t)} is busy or has saved work`);
+    else ready.push(plannerTurtle(t.id));
   }
   return { ready: ready.sort((a, b) => a.id - b.id), skipped };
 }
@@ -345,7 +369,7 @@ function readyTurtles(ids, kind) {
 function startFleetJob(ws, { kind, ids, params }) {
   if (!Array.isArray(ids) || typeof kind !== "string") return;
   const { ready, skipped } = readyTurtles([...new Set(ids.slice(0, 256).map(Number))], kind);
-  const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.homeWorld }));
+  const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.miningRoute?.home ?? t.status?.homeWorld }));
   const plan = planFleetJob(fleet, kind, params ?? {}, ready, homes);
   if (plan.error) {
     send(ws, { type: "fleetJobResult", ok: false, msg: [plan.error, ...skipped].join(" ") });
@@ -713,8 +737,9 @@ setInterval(() => {
     }
     // Other turtles' homes, so nobody waits in one (homes are often in a row).
     const homes = [...turtles.values()]
-      .filter((o) => o !== r && o.status?.homeWorld && near(o.status.homeWorld, here))
-      .map((o) => o.status.homeWorld);
+      .map((o) => ({ turtle: o, home: o.status?.miningRoute?.home ?? o.status?.homeWorld }))
+      .filter((o) => o.turtle !== r && o.home && near(o.home, here))
+      .map((o) => o.home);
     if (cells.length || parked.length || homes.length) send(r.socket, { type: "traffic", cells, parked, homes });
   }
 }, 1_000);

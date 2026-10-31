@@ -54,6 +54,7 @@ const nextPow2 = (n) => 2 ** Math.ceil(Math.log2(Math.max(n, 1024)));
 
 // Centre of the block at integer coordinates.
 const centre = (p) => new THREE.Vector3(p.x + 0.5, p.y + 0.5, p.z + 0.5);
+const validPoint = (p) => p && [p.x, p.y, p.z].every(Number.isFinite);
 
 function boxBetween(a, b) {
   const min = new THREE.Vector3(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.min(a.z, b.z));
@@ -322,7 +323,9 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
   function updateStatic(fleet, list) {
     const jobs = list.filter((t) => t.job).map((t) => [t.id, t.job]);
     const homes = list.filter((t) => t.home).map((t) => t.home);
-    const key = JSON.stringify([fleet?.depot, fleet?.protect?.areas, jobs, homes, css().getPropertyValue("--page")]);
+    const routes = list.filter((t) => validPoint(t.route?.home) && validPoint(t.route?.bottom) && (t.route.bottomSaved || t.route.stair?.complete))
+      .map((t) => ({ id: t.id, home: t.route.home, bottom: t.route.bottom, job: t.job }));
+    const key = JSON.stringify([fleet?.depot, fleet?.protect?.areas, jobs, homes, routes, css().getPropertyValue("--page")]);
     if (key === staticKey) return;
     staticKey = key;
     for (const g of ["depot", "areas", "jobs", "homes"]) clearGroup(groups[g]);
@@ -370,7 +373,30 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
       if (job.kind === "areaQuarry") {
         box = boxBetween({ x: job.x1, y: job.yBottom, z: job.z1 }, { x: job.x2, y: job.yTop, z: job.z2 });
       } else if (job.kind === "branchMine") {
-        if (job.veinBounds) {
+        if (Number.isInteger(job.radius) && job.radius >= 1 && validPoint(job.routeHome)) {
+          const h = job.routeHome;
+          for (const y of [-64, 320]) {
+            const points = Array.from({ length: 97 }, (_, i) => {
+              const angle = i / 96 * Math.PI * 2;
+              return new THREE.Vector3(h.x + 0.5 + job.radius * Math.cos(angle), y, h.z + 0.5 + job.radius * Math.sin(angle));
+            });
+            groups.jobs.add(new THREE.Line(
+              new THREE.BufferGeometry().setFromPoints(points),
+              new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.45 }),
+            ));
+          }
+          const verticals = Array.from({ length: 4 }, (_, i) => {
+            const angle = i / 4 * Math.PI * 2;
+            const x = h.x + 0.5 + job.radius * Math.cos(angle);
+            const z = h.z + 0.5 + job.radius * Math.sin(angle);
+            return [new THREE.Vector3(x, -64, z), new THREE.Vector3(x, 320, z)];
+          }).flat();
+          groups.jobs.add(new THREE.LineSegments(
+            new THREE.BufferGeometry().setFromPoints(verticals),
+            new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.18 }),
+          ));
+          box = boxBetween({ x: job.x, y: job.y, z: job.z }, { x: job.x, y: job.y + 1, z: job.z + job.length - 1 });
+        } else if (job.veinBounds) {
           const b = job.veinBounds;
           box = boxBetween({ x: b.x1, y: b.y1, z: b.z1 }, { x: b.x2, y: b.y2, z: b.z2 });
         } else {
@@ -389,6 +415,29 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
       const pad = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.05, 0.9), homeMaterial);
       pad.position.set(h.x + 0.5, h.y + 0.03, h.z + 0.5);
       groups.homes.add(pad);
+    }
+    for (const { id, home, bottom, job } of routes) {
+      const depth = home.y - bottom.y;
+      if (!Number.isInteger(depth) || depth < 0 || depth > 131 || home.x !== bottom.x || bottom.z - home.z !== depth) continue;
+      const points = [centre(home)];
+      for (let step = 1; step <= depth; step++) {
+        points.push(centre({ x: home.x, y: home.y - step + 1, z: home.z + step }));
+        points.push(centre({ x: home.x, y: home.y - step, z: home.z + step }));
+      }
+      const path = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: cssColor("--ink-2"), transparent: true, opacity: 0.65 }));
+      groups.homes.add(path);
+      if (job?.routeMode === "southRow" && [job.x, job.z].every(Number.isFinite)) {
+        groups.homes.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([centre(bottom), centre({ x: job.x, y: bottom.y, z: job.z })]),
+          new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.65 }),
+        ));
+      }
+      const marker = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), new THREE.MeshBasicMaterial({ color: accent }));
+      marker.position.copy(centre(bottom));
+      const tag = label(`${nameOf(id)} stair bottom`, "map3d-label small");
+      tag.position.set(0, 0.8, 0);
+      marker.add(tag);
+      groups.homes.add(marker);
     }
   }
 
@@ -422,6 +471,7 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
     if (fleet?.depot) box.expandByPoint(centre(fleet.depot));
     if (minedBounds) box.union(minedBounds);
     for (const child of groups.jobs.children) box.expandByObject(child);
+    for (const child of groups.homes.children) box.expandByObject(child);
     return box;
   }
 
