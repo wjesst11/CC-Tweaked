@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.3"
+local VERSION = "2.2.4"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -117,6 +117,13 @@ local fleetJob    -- { kind, args, step, phase, paused, failed } for the current
 local lastFleetResult -- durable receipt for an automatically queued assignment
 local miningRoute -- fixed row home and opened south staircase, independent of a job
 local rowRoute = {}
+-- Grouped so the main chunk stays well under CC:Tweaked's limit of 200
+-- local variables; past it, the script no longer loads on a turtle.
+local net = {}  -- dashboard connection, GPS and messages
+local dock = {} -- the shared depot's dock and chests
+local cfg = {}  -- fleet settings: loading and block patterns
+local nav = {}  -- route finding internals
+local vein = {} -- following ore veins
 local blocked, blockedCount = {}, 0 -- blocks found in the way while travelling (local coords)
 local traffic, trafficCount = {}, 0 -- blocks moving turtles are in or about to enter -> until when
 local parked = {}                   -- blocks turtles are standing still in -> until when
@@ -322,7 +329,7 @@ local function worldPos()
 end
 
 -- l: local position when the fix was taken, w: rounded GPS position.
-local function onFix(l, w)
+function net.onFix(l, w)
   local savedHome = calib and calib.home
   if calib and calib.f0 then
     local slip = calib.slip
@@ -400,20 +407,20 @@ end
 local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {} }
 
 -- "*" is the only wildcard; everything else matches literally.
-local function glob(pattern)
+function cfg.glob(pattern)
   local escaped = pattern:lower():gsub("[%^%$%(%)%%%.%[%]%+%-%?]", "%%%0")
   return "^" .. escaped:gsub("%*", ".*") .. "$"
 end
 
-local function compileList(list)
+function cfg.compileList(list)
   local out = {}
   for _, p in ipairs(type(list) == "table" and list or {}) do
-    if type(p) == "string" and p ~= "" then out[#out + 1] = glob(p) end
+    if type(p) == "string" and p ~= "" then out[#out + 1] = cfg.glob(p) end
   end
   return out
 end
 
-local function compileFleet()
+function cfg.compileFleet()
   local protect, items = fleet.protect or {}, fleet.items or {}
   -- A protected-block line starting with "!" is an exception: "create:*"
   -- with "!create:*_ore" protects every Create block except its ores.
@@ -422,11 +429,11 @@ local function compileFleet()
     if type(p) == "string" and p:sub(1, 1) == "!" then except[#except + 1] = p:sub(2)
     else keep[#keep + 1] = p end
   end
-  compiled.protect = compileList(keep)
-  compiled.unprotect = compileList(except)
-  compiled.valuables = compileList(items.valuables)
-  compiled.fuel = compileList(items.fuel)
-  compiled.vein = compileList(fleet.veinBlocks)
+  compiled.protect = cfg.compileList(keep)
+  compiled.unprotect = cfg.compileList(except)
+  compiled.valuables = cfg.compileList(items.valuables)
+  compiled.fuel = cfg.compileList(items.fuel)
+  compiled.vein = cfg.compileList(fleet.veinBlocks)
 end
 
 local function matches(name, patterns)
@@ -437,24 +444,24 @@ local function matches(name, patterns)
   return false
 end
 
-local function protectedName(name)
+function cfg.protectedName(name)
   return matches(name, compiled.protect) and not matches(name, compiled.unprotect)
 end
 
-local function loadFleet()
+function cfg.loadFleet()
   if fs.exists(FLEET_FILE) then
     local f = fs.open(FLEET_FILE, "r")
     local data = textutils.unserialize(f.readAll())
     f.close()
     if type(data) == "table" then fleet = data end
   end
-  compileFleet()
+  cfg.compileFleet()
 end
 
-local function adoptFleet(c)
+function cfg.adoptFleet(c)
   if type(c) ~= "table" or (tonumber(c.updatedAt) or 0) <= (fleet.updatedAt or 0) then return end
   fleet = c
-  compileFleet()
+  cfg.compileFleet()
   local f = fs.open(FLEET_FILE, "w")
   f.write(textutils.serialize(fleet))
   f.close()
@@ -496,7 +503,7 @@ end
 local function protection(dir, block, context)
   if block then
     local name = block.name:lower()
-    if name:find("^computercraft:") or protectedName(name) then
+    if name:find("^computercraft:") or cfg.protectedName(name) then
       return "protected block " .. block.name
     end
   end
@@ -718,7 +725,7 @@ end
 -- Where moving turtles are (or are about to be) only counts when planning
 -- normally; a lenient plan ignores it and waits if one is really there.
 -- Turtles standing still, and turtles bumped into recently, always count.
-local function isOpen(x, y, z, lenient, mining)
+function nav.isOpen(x, y, z, lenient, mining)
   local k = cellKey(x, y, z)
   local now = os.clock()
   local t, p, b = traffic[k], parked[k], blocked[k]
@@ -727,7 +734,7 @@ local function isOpen(x, y, z, lenient, mining)
   return b == nil or (b ~= true and b < now)
 end
 
-local function heapPush(heap, node, f)
+function nav.heapPush(heap, node, f)
   node.f = f
   heap[#heap + 1] = node
   local i = #heap
@@ -739,7 +746,7 @@ local function heapPush(heap, node, f)
   end
 end
 
-local function heapPop(heap)
+function nav.heapPop(heap)
   local top, last = heap[1], table.remove(heap)
   if #heap > 0 then
     heap[1] = last
@@ -757,7 +764,7 @@ local function heapPop(heap)
 end
 
 -- Each step with the heading it needs (nil for up and down, which need none).
-local NEIGHBOURS = { { 1, 0, 0, 1 }, { -1, 0, 0, 3 }, { 0, 0, 1, 0 }, { 0, 0, -1, 2 }, { 0, 1, 0 }, { 0, -1, 0 } }
+nav.NEIGHBOURS = { { 1, 0, 0, 1 }, { -1, 0, 0, 3 }, { 0, 0, 1, 0 }, { 0, 0, -1, 2 }, { 0, 1, 0 }, { 0, -1, 0 } }
 
 -- Turns needed to face local heading h from heading `from` (default: now).
 local function turnsTo(h, from)
@@ -802,10 +809,10 @@ local function findPath(goal, lenient)
   -- The cheapest onward route depends on facing as well as position.
   local startKey = cellKey(from.x, from.y, from.z) .. ":" .. heading
   local g, came, closed, open = { [startKey] = 0 }, {}, {}, {}
-  heapPush(open, { x = from.x, y = from.y, z = from.z, k = startKey, h = heading, cost = 0 }, goal.estimate(from.x, from.y, from.z))
+  nav.heapPush(open, { x = from.x, y = from.y, z = from.z, k = startKey, h = heading, cost = 0 }, goal.estimate(from.x, from.y, from.z))
   local expanded, limit = 0, goal.limit or 8000
   while #open > 0 do
-    local cur = heapPop(open)
+    local cur = nav.heapPop(open)
     if not closed[cur.k] then
       if goal.reached(cur.x, cur.y, cur.z) then
         local path, node = {}, cur
@@ -822,11 +829,11 @@ local function findPath(goal, lenient)
         os.queueEvent("minerdash_yield") -- don't hog the computer
         os.pullEvent("minerdash_yield")
       end
-      for _, d in ipairs(NEIGHBOURS) do
+      for _, d in ipairs(nav.NEIGHBOURS) do
         local x, y, z = cur.x + d[1], cur.y + d[2], cur.z + d[3]
         local k = cellKey(x, y, z)
         -- A turtle standing on the goal itself is waited for, not avoided.
-        if (isOpen(x, y, z, lenient, goal.mining) or (goal.reached(x, y, z) and blocked[k] == nil))
+        if (nav.isOpen(x, y, z, lenient, goal.mining) or (goal.reached(x, y, z) and blocked[k] == nil))
           and not (goal.blocked and (goal.blocked[k] == true or (tonumber(goal.blocked[k]) or 0) > os.clock()))
           and x >= lo.x and x <= hi.x and y >= lo.y and y <= hi.y and z >= lo.z and z <= hi.z
           and (not goal.allowed or goal.allowed(x, y, z))
@@ -841,7 +848,7 @@ local function findPath(goal, lenient)
             local ng = g[cur.k] + 1 + turnsTo(facing, cur.h) + ((dock and inDockRoom(dock, x, y, z)) and 4 or 0)
             if not closed[stateKey] and ng < (g[stateKey] or math.huge) then
               g[stateKey], came[stateKey] = ng, cur
-              heapPush(open, { x = x, y = y, z = z, k = stateKey, h = facing, back = back, cost = ng }, ng + goal.estimate(x, y, z))
+              nav.heapPush(open, { x = x, y = y, z = z, k = stateKey, h = facing, back = back, cost = ng }, ng + goal.estimate(x, y, z))
             end
           end
         end
@@ -853,7 +860,7 @@ end
 
 -- Sand, gravel and other blocks that fall: the only things travel may clear,
 -- and only from blocks the turtle has already passed through.
-local function hasFallen(name)
+function nav.hasFallen(name)
   return name ~= "minecraft:soul_sand"
     and not not (name:find("sand$") or name:find("gravel$") or name:find("concrete_powder$") or name:find("anvil$")
       or name == "minecraft:pointed_dripstone")
@@ -890,7 +897,7 @@ local function stepTo(n, mining)
         local cleared, why = clear(dir)
         if not cleared then return false, why == "another turtle is in the way" and "turtle" or "block" end
       else
-        local fellIn = visited[cellKey(n.x, n.y, n.z)] and hasFallen(block.name) and not protection(dir, block)
+        local fellIn = visited[cellKey(n.x, n.y, n.z)] and nav.hasFallen(block.name) and not protection(dir, block)
         if not fellIn then return false, "block" end
         if SIDES[dir].dig() then noteDug(dir, block.name) end
       end
@@ -901,7 +908,7 @@ local function stepTo(n, mining)
   return false, "block"
 end
 
-local function describe(p)
+function nav.describe(p)
   local w = toWorld(p) or p
   return ("%d, %d, %d"):format(w.x, w.y, w.z)
 end
@@ -917,7 +924,7 @@ local function navigate(goal)
     local path = findPath(goal) or findPath(goal, true)
     if not path then
       travelNext = nil
-      error((goal.mining and "Found no safe mining route to %s" or "Found no open way to %s without digging"):format(describe(goal.centre)), 0)
+      error((goal.mining and "Found no safe mining route to %s" or "Found no open way to %s without digging"):format(nav.describe(goal.centre)), 0)
     end
     for i = 2, #path do
       travelNext = path[i]
@@ -948,7 +955,7 @@ local function navigate(goal)
     tries = tries + 1
     if tries > 600 then
       travelNext = nil
-      error((goal.mining and "Gave up finding a safe mining route to %s" or "Gave up finding an open way to %s"):format(describe(goal.centre)), 0)
+      error((goal.mining and "Gave up finding a safe mining route to %s" or "Gave up finding an open way to %s"):format(nav.describe(goal.centre)), 0)
     end
   end
   travelNext = nil
@@ -1268,9 +1275,9 @@ local function installUpdate()
   if not res then return false, "Download failed: " .. tostring(err) end
   local code = res.readAll()
   res.close()
-  if not (code and code:find("MinerDash", 1, true) and load(code, "minerdash")) then
-    return false, "Downloaded script is invalid"
-  end
+  if not (code and code:find("MinerDash", 1, true)) then return false, "Downloaded script is invalid" end
+  local compiled, why = load(code, "minerdash")
+  if not compiled then return false, "Downloaded script doesn't load: " .. tostring(why) end
   local f = fs.open(shell.getRunningProgram(), "w")
   f.write(code)
   f.close()
@@ -1320,7 +1327,7 @@ end
 -- Where to wait for a turn at the dock, and to step out to after one: any open
 -- block just outside the space around the dock, within 2 of its height, that
 -- isn't another turtle or another turtle's home.
-local function aroundDock()
+function dock.around()
   local dock, now = fromWorld(fleet.depot), os.clock()
   local function off(x, z) return math.max(math.abs(x - dock.x), math.abs(z - dock.z)) end
   return {
@@ -1328,7 +1335,7 @@ local function aroundDock()
       local d, k = off(x, z), cellKey(x, y, z)
       return d > DOCK_ROOM and d <= DOCK_ROOM + 3 and math.abs(y - dock.y) <= 2
         and not (homesNear[k] and homesNear[k] > now)
-        and ((x == pos.x and y == pos.y and z == pos.z) or isOpen(x, y, z))
+        and ((x == pos.x and y == pos.y and z == pos.z) or nav.isOpen(x, y, z))
     end,
     estimate = function(x, y, z)
       local d = off(x, z)
@@ -1339,7 +1346,7 @@ local function aroundDock()
 end
 
 -- Whether world position w is where turtles wait for the dock, or closer.
-local function atDepot(w)
+function dock.atDepot(w)
   local D = fleet.depot
   return D ~= nil and math.max(math.abs(w.x - D.x), math.abs(w.z - D.z)) <= DOCK_ROOM + 3 and math.abs(w.y - D.y) <= 2
 end
@@ -1372,28 +1379,28 @@ local function ensureCalibrated()
   error("Couldn't confirm the GPS facing. Move it one block sideways by hand.", 0)
 end
 
-local function dockSide(side)
+function dock.side(side)
   if side == "up" then return "top" end
   if side == "down" then return "bottom" end
   faceCompass(COMPASS_INDEX[side])
   return "front"
 end
 
-local DROP = { top = turtle.dropUp, bottom = turtle.dropDown, front = turtle.drop }
-local SUCK = { top = turtle.suckUp, bottom = turtle.suckDown, front = turtle.suck }
+dock.DROP = { top = turtle.dropUp, bottom = turtle.dropDown, front = turtle.drop }
+dock.SUCK = { top = turtle.suckUp, bottom = turtle.suckDown, front = turtle.suck }
 
 -- Only ever drop into a chest, never onto the ground.
-local function dockDrop(side)
-  local p = dockSide(side)
-  return isInventory(p) and DROP[p]()
+function dock.drop(side)
+  local p = dock.side(side)
+  return isInventory(p) and dock.DROP[p]()
 end
 
-local function dockSuck(side)
-  local p = dockSide(side)
-  return isInventory(p) and SUCK[p]()
+function dock.suck(side)
+  local p = dock.side(side)
+  return isInventory(p) and dock.SUCK[p]()
 end
 
-local function category(name)
+function dock.category(name)
   if matches(name, compiled.fuel) then return "fuel" end
   if matches(name, compiled.valuables) then return "valuables" end
   return "junk"
@@ -1402,7 +1409,7 @@ end
 -- At the dock: sort the inventory into the three chests and top up fuel from
 -- the fuel chest. One chest at a time, fuel last, so it turns as little as it
 -- can. Returns a description of anything the player needs to fix.
-local function dockWork(minFuel)
+function dock.work(minFuel)
   local D = fleet.depot
   local target = math.min(math.max(tonumber(fleet.refuelTo) or 10000, minFuel), fuelLimit())
   local full, slots = {}, { junk = {}, valuables = {}, fuel = {} }
@@ -1412,16 +1419,16 @@ local function dockWork(minFuel)
   -- valuables, or else the junk.
   local function stowFuel(slot)
     turtle.select(slot)
-    dockDrop(D.fuel)
+    dock.drop(D.fuel)
     refuelSelected(fuelLimit())
     for _, cat in ipairs({ "valuables", "junk" }) do
-      if turtle.getItemCount(slot) > 0 then dockDrop(D[cat]) end
+      if turtle.getItemCount(slot) > 0 then dock.drop(D[cat]) end
     end
   end
   for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
     if item then
-      local cat = category(item.name)
+      local cat = dock.category(item.name)
       if cat == "fuel" then
         turtle.select(slot)
         refuelSelected(target)
@@ -1435,7 +1442,7 @@ local function dockWork(minFuel)
         stowFuel(slot)
       else
         turtle.select(slot)
-        dockDrop(D[cat])
+        dock.drop(D[cat])
         if turtle.getItemCount(slot) > 0 then full[cat] = true end
       end
     end
@@ -1446,7 +1453,7 @@ local function dockWork(minFuel)
     if not slot then break end
     turtle.select(slot)
     local before = fuelLevel()
-    if dockSuck(D.fuel) then
+    if dock.suck(D.fuel) then
       refuelSelected(target)
       if turtle.getItemCount(slot) > 0 then stowFuel(slot) end
     end
@@ -1505,7 +1512,7 @@ function rowRoute.sharedDepotVisit(minFuel, flat)
   while true do
     if leases.depot ~= "granted" then
       setDetail("Heading to the depot")
-      go(aroundDock(), "near the depot")
+      go(dock.around(), "near the depot")
       flown = flown or odometer - start
       setDetail("Waiting for a turn at the depot")
       acquire("depot")
@@ -1515,13 +1522,13 @@ function rowRoute.sharedDepotVisit(minFuel, flat)
     local ok, err = pcall(function()
       go(cellGoal(fromWorld(D)), "into the dock")
       setDetail("Unloading at the depot")
-      problem = dockWork(minFuel)
+      problem = dock.work(minFuel)
     end)
     -- Whatever happened, step back out so the next turtle can come in.
     local stop = stopRequested
     stopRequested = false
     setDetail("Leaving the depot")
-    local left = pcall(function() go(aroundDock(), "out of the dock") end)
+    local left = pcall(function() go(dock.around(), "out of the dock") end)
     stopRequested = stopRequested or stop
     if left then release("depot") end
     if not ok then error(err, 0) end
@@ -1962,7 +1969,7 @@ function rowRoute.recover()
   release("depot")
 end
 
-local function isVein(block)
+function vein.isVein(block)
   return matches(block.name, compiled.vein)
 end
 
@@ -1989,24 +1996,24 @@ local function stepBack(p)
   goTo(p, "xyz")
 end
 
-local function checkpointVein(veins)
+function vein.checkpointVein(veins)
   if veins.checkpoint then veins.checkpoint() end
 end
 
-local function cutVein(veins)
+function vein.cutVein(veins)
   veins.cut = { table.unpack(veins.path) }
-  checkpointVein(veins)
+  vein.checkpointVein(veins)
 end
 
-local function mineVein(dir, veins, depth)
+function vein.mineVein(dir, veins, depth)
   if veins.cut then return end
   local found, block = SIDES[dir].inspect()
-  if not (found and isVein(block)) or protection(dir, block) then return end
+  if not (found and vein.isVein(block)) or protection(dir, block) then return end
   if veins.allowed and not veins.allowed(toWorld(neighbour(dir))) then return end
   -- A bounded pass yields at an observed ore block, rather than silently
   -- abandoning a large or deep vein. Replay reaches this point next time.
   if veins.left <= 0 or (veins.full and veins.full(#veins.path + 1)) then
-    cutVein(veins)
+    vein.cutVein(veins)
     return
   end
   veins.left = veins.left - 1
@@ -2014,26 +2021,26 @@ local function mineVein(dir, veins, depth)
   -- Save the intended step before movement saves its new position. A reboot
   -- can then replay the seed even if the ore vanished during that move.
   veins.path[#veins.path + 1] = toWorld(neighbour(dir))
-  checkpointVein(veins)
+  vein.checkpointVein(veins)
   if not tryDigMove(dir) then
     -- Ore the game won't let it break (spawn protection or a land claim).
     table.remove(veins.path)
-    checkpointVein(veins)
+    vein.checkpointVein(veins)
     return
   end
   -- Coming in sideways, the block behind is the one it came from.
   exploreHere(veins, depth + 1, dir == "forward" and (back.heading + 2) % 4 or nil)
   stepBack(back)
   table.remove(veins.path)
-  checkpointVein(veins)
+  vein.checkpointVein(veins)
 end
 
 -- Follow the vein from every side of the block it's in (except `behind`, a
 -- heading), looking at the nearest side next so it turns as little as it can.
 function exploreHere(veins, depth, behind)
   if veins.cut then return end
-  mineVein("up", veins, depth)
-  mineVein("down", veins, depth)
+  vein.mineVein("up", veins, depth)
+  vein.mineVein("down", veins, depth)
   local sides = {}
   for h = 0, 3 do
     if h ~= behind then sides[#sides + 1] = h end
@@ -2044,27 +2051,27 @@ function exploreHere(veins, depth, behind)
       if turnsTo(sides[n]) < turnsTo(sides[best]) then best = n end
     end
     face(table.remove(sides, best))
-    mineVein("forward", veins, depth)
+    vein.mineVein("forward", veins, depth)
   end
 end
 
 -- Finish a vein it left for the depot: back in along the way it dug, then
 -- look around every block of that way again on the way out.
-local function resumeVein(veins, path)
+function vein.resumeVein(veins, path)
   local start = here()
   veins.path = {}
   for i, w in ipairs(path) do
     goWorld(w, "xyz")
     veins.path[i] = w
-    checkpointVein(veins)
+    vein.checkpointVein(veins)
   end
   veins.resume = nil
-  checkpointVein(veins)
+  vein.checkpointVein(veins)
   for i = #path, 1, -1 do
     exploreHere(veins, i)
     table.remove(veins.path)
     if i > 1 then goWorld(path[i - 1], "xyz") end
-    checkpointVein(veins)
+    vein.checkpointVein(veins)
   end
   goTo(start, "xyz")
   face(start.heading)
@@ -2176,7 +2183,7 @@ KINDS.branchMine = {
       if veins.allowed and not veins.allowed(upper) then error("Tunnel headroom is outside its planned mining bounds", 0) end
       if not a.scan then branchClearHeadroom() return true end
       if veins.resume then
-        resumeVein(veins, veins.resume)
+        vein.resumeVein(veins, veins.resume)
         if veins.cut then return finish() end
       end
       -- Follow an ore headroom seed before clearing the tunnel's upper cell.
@@ -2184,37 +2191,37 @@ KINDS.branchMine = {
       if veins.cut then return finish() end
       branchClearHeadroom()
       if veins.full and veins.full(1) then
-        cutVein(veins)
+        vein.cutVein(veins)
         return finish()
       end
       -- Keep the ordinary upper-cell move in the lower-root path. Depot and
       -- reboot recovery can replay it, including a reboot during the move.
       veins.path[#veins.path + 1] = toWorld(neighbour("up"))
-      checkpointVein(veins)
+      vein.checkpointVein(veins)
       digMove("up")
       exploreHere(veins, 1)
       stepBack(root)
       table.remove(veins.path)
-      checkpointVein(veins)
+      vein.checkpointVein(veins)
       return finish()
     end
     branchClearHeadroom()
     if not a.scan then return true end
-    if veins.resume then resumeVein(veins, veins.resume) end
-    mineVein("down", veins, 0)
+    if veins.resume then vein.resumeVein(veins, veins.resume) end
+    vein.mineVein("down", veins, 0)
     local along = (a.dir - calib.f0) % 4
     local walls = { (along + 1) % 4, (along + 3) % 4 }
     if turnsTo(walls[2]) < turnsTo(walls[1]) then walls[1], walls[2] = walls[2], walls[1] end
     for _, h in ipairs(walls) do
       face(h)
-      mineVein("forward", veins, 0)
+      vein.mineVein("forward", veins, 0)
     end
     return not veins.cut
   end,
   goal = function(a)
     if (a.goal or 0) <= 0 then return nil end
     local g = goalOf(a)
-    return { count = a.goal, name = g.name, patterns = g.match and compileList(g.match) or compiled.valuables }
+    return { count = a.goal, name = g.name, patterns = g.match and cfg.compileList(g.match) or compiled.valuables }
   end,
   detail = function(a, i, fj)
     local c = tunnelCell(a, math.min(i, a.length - 1))
@@ -2395,17 +2402,17 @@ KINDS.staggered = {
       return not veins.cut
     end
     if veins.resume then
-      resumeVein(veins, veins.resume)
+      vein.resumeVein(veins, veins.resume)
       if veins.cut then return finish() end
     end
-    mineVein("up", veins, 0)
-    mineVein("down", veins, 0)
+    vein.mineVein("up", veins, 0)
+    vein.mineVein("down", veins, 0)
     local walls = { (1 - calib.f0) % 4, (3 - calib.f0) % 4 }
     if turnsTo(walls[2]) < turnsTo(walls[1]) then walls[1], walls[2] = walls[2], walls[1] end
     for _, h in ipairs(walls) do
       if veins.cut then break end
       face(h)
-      mineVein("forward", veins, 0)
+      vein.mineVein("forward", veins, 0)
     end
     return finish()
   end,
@@ -2508,7 +2515,7 @@ local function moveToStep(k, a, i, service)
   if not k.inside(a, toWorld(pos)) then
     local from, start = toWorld(pos), odometer
     k.enter(a, service)
-    if atDepot(from) then noteRoute(k, a, odometer - start, toWorld(pos)) end
+    if dock.atDepot(from) then noteRoute(k, a, odometer - start, toWorld(pos)) end
   end
   return k.walk(a, k.cell(a, i))
 end
@@ -2930,17 +2937,17 @@ local function runCommand(cmd)
 end
 
 -- An idle turtle burns fuel from its own inventory before it runs dry.
-local function idleRefuel()
+function net.idleRefuel()
   if fuelLevel() < 1000 then refuelFromInventory(2000) end
 end
 
-local function worker()
+function net.worker()
   while true do
     local timer = os.startTimer(20)
     while #queue == 0 do
       local event, id = os.pullEvent()
       if event == "timer" and id == timer then
-        idleRefuel()
+        net.idleRefuel()
         timer = os.startTimer(20)
       end
     end
@@ -2956,7 +2963,7 @@ end
 
 -- Connection --------------------------------------------------------------------
 
-local function status()
+function net.status()
   local inventory = {}
   for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
@@ -3013,14 +3020,14 @@ local function status()
   }
 end
 
-local function handleMessage(msg)
+function net.handleMessage(msg)
   if msg.type == "error" then
     say("error", "Server: " .. tostring(msg.msg))
     if msg.fatal then authFailed = true end
   elseif msg.type == "welcome" then
     say("info", "Connected to dashboard")
   elseif msg.type == "fleet" then
-    adoptFleet(msg.fleet)
+    cfg.adoptFleet(msg.fleet)
   elseif msg.type == "traffic" then
     if gpsTrusted() then
       if trafficCount > 4000 then traffic, parked, homesNear, trafficCount = {}, {}, {}, 0 end
@@ -3085,44 +3092,44 @@ local function handleMessage(msg)
   end
 end
 
-local function receiver(sock)
+function net.receiver(sock)
   while true do
     local ok, raw = pcall(sock.receive)
     if not ok or not raw then return end
     local msg = textutils.unserializeJSON(raw)
-    if type(msg) == "table" then handleMessage(msg) end
+    if type(msg) == "table" then net.handleMessage(msg) end
   end
 end
 
-local function hasWirelessModem()
+function net.hasWirelessModem()
   return peripheral.find("modem", function(_, m) return m.isWireless() end) ~= nil
 end
 
 -- Take a GPS fix every 30s to verify tracking, and after each move until the
 -- compass direction is known. Runs whether or not the server is reachable.
-local function updateGps(fixPos)
+function net.updateGps(fixPos)
   local before = gpsState
-  if not hasWirelessModem() then
+  if not net.hasWirelessModem() then
     gpsState = "none"
   else
     local x, y, z = gps.locate(1)
     gpsState = x and "ok" or "nofix"
     -- Ignore fixes that straddled a move.
     if x and not physicalMove and samePos(fixPos, pos) then
-      onFix(fixPos, { x = math.floor(x + 0.5), y = math.floor(y + 0.5), z = math.floor(z + 0.5) })
+      net.onFix(fixPos, { x = math.floor(x + 0.5), y = math.floor(y + 0.5), z = math.floor(z + 0.5) })
     end
   end
   if gpsState ~= before then changed() end
 end
 
-local function gpsLoop()
+function net.gpsLoop()
   local lastFix, fixPos = -math.huge, nil
   while true do
     local now = os.clock()
     if now - lastFix >= 30 or (not gpsTrusted() and not samePos(fixPos, pos) and now - lastFix >= 1) then
       lastFix = now
       fixPos = { x = pos.x, y = pos.y, z = pos.z }
-      updateGps(fixPos)
+      net.updateGps(fixPos)
       gpsChecked = true
     end
     sleep(0.5)
@@ -3131,7 +3138,7 @@ end
 
 -- Report dug blocks a batch at a time: a table of block names, and four
 -- numbers per block (x, y, z and the name's index).
-local function sendDug()
+function net.sendDug()
   if #dugLog == 0 then return true end
   local count = math.min(#dugLog, 400)
   local names, index, flat = {}, {}, {}
@@ -3150,21 +3157,21 @@ local function sendDug()
   return true
 end
 
-local function heartbeat()
+function net.heartbeat()
   local lastSent = -math.huge
   while true do
     local now = os.clock()
     if dirty or now - lastSent >= 5 then
       dirty = false
       lastSent = now
-      if not send(status()) then return end
+      if not send(net.status()) then return end
     end
-    if not sendDug() then return end
+    if not net.sendDug() then return end
     sleep(0.5)
   end
 end
 
-local function connection()
+function net.connection()
   local delay = 2
   while true do
     say("info", "Connecting to " .. url)
@@ -3177,7 +3184,7 @@ local function connection()
         holding = leases.depot == "granted", fleet = (fleet.updatedAt or 0) > 0 and fleet or nil,
       })
       changed()
-      parallel.waitForAny(function() receiver(sock) end, heartbeat)
+      parallel.waitForAny(function() net.receiver(sock) end, net.heartbeat)
       ws = nil
       pcall(sock.close)
       say("warn", "Disconnected")
@@ -3196,7 +3203,7 @@ end
 
 -- A turn at the dock survives a reboot only at the dock. Anywhere else it
 -- would keep every other turtle waiting.
-local function dropStaleDockTurn()
+function net.dropStaleDockTurn()
   if leases.depot ~= "granted" then return end
   local w, D = worldPos(), fleet.depot
   if w and D and inDockRoom(D, w.x, w.y, w.z) then return end
@@ -3210,8 +3217,8 @@ term.clear()
 term.setCursorPos(1, 1)
 print(("MinerDash %s | turtle #%d %s"):format(VERSION, os.getComputerID(), os.getComputerLabel() or ""))
 loadState()
-loadFleet()
-dropStaleDockTurn()
+cfg.loadFleet()
+net.dropStaleDockTurn()
 remember(pos)
 refreshSurroundings()
 -- A recall survives even if the assignment was already cleared. An old
@@ -3226,4 +3233,4 @@ elseif fleetJob and not fleetJob.paused and not fleetJob.failed then
 elseif miningRoute and miningRoute.intent and not fleetJob then
   queue[1] = { action = "recoverRoute" }
 end
-parallel.waitForAny(connection, worker, gpsLoop)
+parallel.waitForAny(net.connection, net.worker, net.gpsLoop)

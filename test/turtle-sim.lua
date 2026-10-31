@@ -5,24 +5,24 @@ local source = input:read("*a")
 input:close()
 source = assert(source:match("^(.-)%-%- Main %-%-")) .. [[
 return {
-  init = function() loadState(); loadFleet(); dropStaleDockTurn(); remember(pos) end,
+  init = function() loadState(); cfg.loadFleet(); net.dropStaleDockTurn(); remember(pos) end,
   leases = function() return leases end,
   move = move, face = face, step = stepTo,
   returnHome = function() navigate(cellGoal(home)); face(home.heading) end,
   jobs = jobs, actions = actions, row = rowRoute,
-  fix = function(l, w) gpsChecked = true; gpsState = "ok"; return onFix(l, w) end,
+  fix = function(l, w) gpsChecked = true; gpsState = "ok"; return net.onFix(l, w) end,
   state = function() return { pos = here(), home = home, world = worldPos(), miningRoute = miningRoute, fleetJob = fleetJob, lastFleetResult = lastFleetResult } end,
-  protection = function(areas) fleet.protect.areas = areas; gpsChecked = true; compileFleet() end,
+  protection = function(areas) fleet.protect.areas = areas; gpsChecked = true; cfg.compileFleet() end,
   depot = function(value) fleet.depot = value end,
-  config = function(value) fleet = value; compileFleet() end,
+  config = function(value) fleet = value; cfg.compileFleet() end,
   save = saveState,
   lease = function(value) leases.depot = value end,
   depotVisit = function(minFuel) return depotVisit(minFuel) end,
-  dockWork = function(minFuel) return dockWork(minFuel) end,
+  dockWork = function(minFuel) return dock.work(minFuel) end,
   recover = function(...) return rowRoute.recover(...) end,
-  status = status,
+  status = net.status,
   command = runCommand,
-  message = handleMessage,
+  message = net.handleMessage,
   kinds = KINDS,
   scan = function(args, veins)
     veins.allowed = function(w) return KINDS.branchMine.mayDig(args, w) end
