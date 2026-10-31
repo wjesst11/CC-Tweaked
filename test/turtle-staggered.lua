@@ -693,6 +693,38 @@ test("a turtle with no open side climbs through open space to find its facing",f
   same(api.state().world,a.routeHome)
 end)
 
+test("a turtle whose GPS never settles its facing stays put instead of climbing into the sky",function()
+  local api,sim,files,a=stoppedDeep()
+  displaced(api,sim,{x=HOME.x-7,y=HOME.y+6,z=HOME.z-4})
+  -- GPS keeps giving the same answer wherever it steps.
+  sim.onSleep=function() api.fix(api.state().pos,{x=93,y=90,z=-59}) end
+  local y=sim.pos.y
+  local ok,why=pcall(function()
+    sim.prints={}
+    api.command({action="goHome"})
+  end)
+  assert(sim.pos.y==y,"climbed from Y "..(HOME.y+y).." to Y "..(HOME.y+sim.pos.y))
+  assert(table.concat(sim.prints,"\n"):find("GPS didn't settle its facing",1,true),table.concat(sim.prints,"\n"))
+end)
+
+test("you can move a confused turtle by hand, and that settles its facing",function()
+  local api,sim,files,a=stoppedDeep()
+  local w=api.state().world
+  displaced(api,sim,{x=w.x,y=w.y,z=w.z})
+  assert(not api.trusted())
+  -- Along its tunnel is open; the dashboard's back button is a manual move.
+  local moved=false
+  for _=1,4 do
+    local before=sim.pos.x..","..sim.pos.z
+    api.command({action="back"})
+    if sim.pos.x..","..sim.pos.z~=before then moved=true break end
+    api.command({action="turnRight"})
+  end
+  assert(moved,"a manual move was refused")
+  for _=1,4 do sim.time=sim.time+1; sim.onSleep() end
+  assert(api.trusted(),"moving by hand didn't settle its facing")
+end)
+
 test("a tunnel that is solid again on the way out is dug back through",function()
   local api,sim,files,a=stoppedDeep()
   local w=api.state().world

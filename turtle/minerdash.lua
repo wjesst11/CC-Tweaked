@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.3"
+local VERSION = "2.3.4"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -559,8 +559,12 @@ local SIDES = {
   back = { move = turtle.back },
 }
 
-local function move(dir)
-  if miningRoute and miningRoute.radius then
+-- `manual` is a move you asked for from the dashboard: into open space only
+-- (it never digs), so it goes ahead even when GPS hasn't confirmed where the
+-- turtle is or it's outside its radius. That's how a confused turtle gets
+-- moved by hand to find its facing again.
+local function move(dir, manual)
+  if miningRoute and miningRoute.radius and not manual then
     if not gpsTrusted() then return false, "GPS position unknown" end
     local current, target = toWorld(pos), toWorld(neighbour(dir))
     -- Moving through open air never digs, so surface trips and a flight
@@ -1935,8 +1939,11 @@ function rowRoute.rejoin()
   if w.y >= r.home.y then
     log("warn", ("Off its saved route at X %d, Y %d, Z %d: flying home"):format(w.x, w.y, w.z))
     setDetail("Flying back home")
+    -- Never higher than a few blocks above where it is or its home.
+    local goal, ceiling = cellGoal(fromWorld(r.home)), math.max(w.y, r.home.y) + 4
+    goal.allowed = function(x, y, z) return toWorld({ x = x, y = y, z = z }).y <= ceiling end
     rowRoute.flying = true
-    local ok, err = pcall(navigate, cellGoal(fromWorld(r.home)))
+    local ok, err = pcall(navigate, goal)
     rowRoute.flying = false
     if not ok then error(err, 0) end
     return
@@ -1995,11 +2002,18 @@ function rowRoute.findFacing()
     error("No GPS signal here, so it can't confirm where it is. GPS hosts placed higher reach deeper; or move it by hand.", 0)
   end
   setDetail("Finding its facing with GPS")
-  -- With no open side here (in a shaft, say), it climbs through open space
-  -- and tries again higher up.
-  for _ = 1, 160 do
-    if rowRoute.stepAside() then return end
-    if turtle.detectUp() then break end
+  -- With no open side at all (in a shaft, say), it climbs through open space
+  -- and tries again higher up, but never above its home row. If it could
+  -- step aside but GPS didn't settle its facing, it stops there: climbing
+  -- wouldn't help, and in open air it would only rise into the sky.
+  local top = miningRoute and miningRoute.home.y - 1 or calib.w.y
+  for _ = 1, 128 do
+    local found, stepped = rowRoute.stepAside()
+    if found then return end
+    if stepped then
+      error("GPS didn't settle its facing after stepping aside. GPS may be unreliable here; move it one block sideways by hand.", 0)
+    end
+    if turtle.detectUp() or (gpsState == "ok" and calib.w.y + pos.y - calib.l.y >= top) then break end
     physicalMove = true
     local up = turtle.up()
     physicalMove = false
@@ -2007,12 +2021,13 @@ function rowRoute.findFacing()
     pos.y = pos.y + 1
     saveState()
   end
-  error("Can't confirm its GPS position and facing: no open space beside it or above it. Move it one block sideways by hand.", 0)
+  error("Can't confirm its GPS position and facing: no open space beside it, or above it below the home row. Move it one block sideways by hand.", 0)
 end
 
--- One step sideways into open space and back, with GPS fixes; true once its
--- facing is known.
+-- One step sideways into open space and back, with GPS fixes. Returns true
+-- once its facing is known, and whether it found open space to step into.
 function rowRoute.stepAside()
+  local stepped = false
   for _ = 1, 4 do
     if not turtle.detect() then
       local from = { x = pos.x, z = pos.z }
@@ -2020,6 +2035,7 @@ function rowRoute.stepAside()
       local moved = turtle.forward()
       physicalMove = false
       if moved then
+        stepped = true
         local function settle()
           local wait = os.clock() + 8
           while not gpsTrusted() and os.clock() < wait do waitSeconds(0.5) end
@@ -2035,12 +2051,12 @@ function rowRoute.stepAside()
         -- If it was somewhere else entirely, the first fix only moved it to
         -- the right place; stepping back then settles the facing.
         settle()
-        if gpsTrusted() then return true end
+        if gpsTrusted() then return true, true end
       end
     end
     turn(true)
   end
-  return false
+  return false, stepped
 end
 
 function rowRoute.exit(intent)
@@ -3087,10 +3103,10 @@ for _, dir in ipairs({ "forward", "up", "down" }) do
       digMove(dir)
       return true
     end
-    return move(dir)
+    return move(dir, true)
   end
 end
-actions.back = function() return move("back") end
+actions.back = function() return move("back", true) end
 actions.turnLeft = function() return turn(false) end
 actions.turnRight = function() return turn(true) end
 actions.dig = function() return guardedDig("forward") end
