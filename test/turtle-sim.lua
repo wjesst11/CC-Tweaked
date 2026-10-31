@@ -63,7 +63,7 @@ local function miner(files, initial)
   local sim = {
     pos = {x=0,y=0,z=0}, heading = 0, moves = 0, turns = 0, digs = 0,
     blocks = {}, time = 0, history = {}, slots = {}, items = {}, inspected = {},
-    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {},
+    fuel = 100000, fuelLimit = 100000, selected = 1, chests = {}, deposits = {}, fullChests = {}, prints = {}, refuse = {},
   }
   local dx, dz = {[0]=0,1,0,-1}, {[0]=1,0,-1,0}
   local function nextCell(direction)
@@ -91,6 +91,8 @@ local function miner(files, initial)
   local function dig(direction)
     local target = key(nextCell(direction))
     if not sim.blocks[target] then return false end
+    -- Blocks the game refuses to break, such as under spawn protection.
+    if sim.refuse[target] then return false, sim.refuse[target] end
     sim.blocks[target], sim.digs = nil, sim.digs+1
     return true
   end

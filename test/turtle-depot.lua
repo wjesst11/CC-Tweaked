@@ -86,7 +86,20 @@ test("large upper ore veins cut and resume without repeated-reference serializat
   for z=5,49 do assert(not sim.blocks["1,-4,"..z],"unfinished upper ore at Z "..z) end
 end)
 
-test("a full fuel chest keeps surplus coal without reporting an unload problem",function()
+test("surplus coal a full fuel chest can't take is burnt into the tank rather than carried",function()
+  local api,sim,files,a,f=setup()
+  api.row.ensure(a)
+  api.row.surface(f.depot)
+  sim.fullChests["-7,0,0"]=true
+  sim.fuel=20000
+  sim.items[1],sim.slots[1]="minecraft:coal",64
+  local problem=api.dockWork(500)
+  assert(problem==nil,"surplus fuel was reported as a problem: "..tostring(problem))
+  assert((sim.slots[1] or 0)==0,"the turtle kept spare coal")
+  assert(sim.fuel==20000+64*80,"surplus coal was not burnt")
+end)
+
+test("with a full tank, surplus coal is stored with the valuables rather than carried",function()
   local api,sim,files,a,f=setup()
   api.row.ensure(a)
   api.row.surface(f.depot)
@@ -94,8 +107,20 @@ test("a full fuel chest keeps surplus coal without reporting an unload problem",
   sim.items[1],sim.slots[1]="minecraft:coal",64
   local problem=api.dockWork(500)
   assert(problem==nil,"surplus fuel was reported as a problem: "..tostring(problem))
-  assert(sim.items[1]=="minecraft:coal" and sim.slots[1]==64,"surplus coal was discarded")
-  assert(sim.fuel>=500)
+  assert((sim.slots[1] or 0)==0,"the turtle kept spare coal")
+  assert(sim.deposits["-8,0,-1"]["minecraft:coal"]==64,"surplus coal was not stored")
+end)
+
+test("fuel taken from the chest beyond the refuel target goes back, leaving no spare stack",function()
+  local api,sim,files,a,f=setup()
+  api.row.ensure(a)
+  api.row.surface(f.depot)
+  sim.fuel=9960
+  local problem=api.dockWork(500)
+  assert(problem==nil,tostring(problem))
+  for slot=1,16 do assert((sim.slots[slot] or 0)==0,"kept fuel in slot "..slot) end
+  assert(sim.fuel==10040,"burnt more than the one coal it needed")
+  assert(sim.deposits["-7,0,0"]["minecraft:coal"]==63,"the rest of the stack did not go back in the fuel chest")
 end)
 
 local function serviceJob()
@@ -125,7 +150,8 @@ local function serviceJob()
   api.command({action="fleetJob",args=a})
   finished(api,a)
   assert(injected and visits==2,"job did not service inventory and then finish mining")
-  assert(sim.items[15]=="minecraft:coal" and sim.slots[15]==64,"job did not retain surplus coal")
+  assert((sim.slots[15] or 0)==0,"the job kept spare coal")
+  assert(sim.deposits["-8,0,-1"]["minecraft:coal"]==64,"surplus coal was not stored with the valuables")
   assert(sim.deposits["-8,-1,0"]["minecraft:cobblestone"]==14*64)
   return api,sim,resumeDetail
 end

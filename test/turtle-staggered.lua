@@ -235,5 +235,41 @@ test("a job cancelled after crossing between shafts at depth still climbs out wi
   assert(sim.digs==digs,"the way out dug new blocks")
 end)
 
+test("blocks the game won't let it break are skipped instead of ending the job",function()
+  local r=4
+  local api,sim,files,a=setup(r,60,56,96,104)
+  local protected="Cannot break protected block"
+  -- A tunnel block north of column 100's Y 55 shaft crossing, column 98's
+  -- shaft partway down, and an ore beside a tunnel.
+  local tunnelBlock={x=100,y=55,z=-57}
+  local shaftBlock={x=98,y=58,z=-55}
+  local ore={x=101,y=55,z=-54}
+  assert(tunnel(100,55) and tunnel(98,56) and not tunnel(101,55))
+  for _,w in ipairs({tunnelBlock,shaftBlock,ore}) do sim.refuse[lkey(w)]=protected end
+  sim.blocks[lkey(ore)]="minecraft:deepslate_diamond_ore"
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  for _,w in ipairs({tunnelBlock,shaftBlock,ore}) do assert(sim.blocks[lkey(w)],"broke a protected block") end
+  -- The tunnel stopped short of the block; its south half was still mined.
+  assert(not sim.blocks[lkey({x=100,y=55,z=-56})] and sim.blocks[lkey({x=100,y=55,z=-58})])
+  assert(not sim.blocks[lkey({x=100,y=55,z=-54})],"skipped the reachable half of the tunnel")
+  -- Column 98 stopped above the block; columns beside it were still mined.
+  assert(sim.blocks[lkey({x=98,y=56,z=-54})],"mined below a blocked shaft")
+  for _,x in ipairs({97,99}) do
+    for y=a.low,a.y-1 do
+      if tunnel(x,y) then assert(not sim.blocks[lkey({x=x,y=y,z=-54})],"column "..x.." beside the blocked shaft was skipped") end
+    end
+  end
+  local logs=table.concat(sim.prints,"\n")
+  assert(logs:find("Tunnel stops at X 100, Y 55, Z -56",1,true) and logs:find("Shaft at X 98 stops at Y 59",1,true),logs)
+end)
+
+test("a staircase blocked by spawn protection or a claim explains why",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  sim.refuse[lkey({x=100,y=64,z=stairZ(3,4)})]="Cannot break protected block"
+  local ok,why=pcall(api.row.enter,a)
+  assert(not ok and tostring(why):find("spawn protection or a land claim",1,true),tostring(why))
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

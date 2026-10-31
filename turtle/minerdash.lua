@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.0"
+local VERSION = "2.2.1"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -619,15 +619,23 @@ local function clear(dir, context)
   return false, "Too many falling blocks"
 end
 
+-- Blocks it must not or cannot break: protected by its own settings, or
+-- refused by the game ("Cannot break protected block" under spawn
+-- protection or a land claim, "Cannot break unbreakable block" for bedrock).
+local function forbidden(why)
+  return type(why) == "string" and (why:find("^protected ") ~= nil or why:find("^Cannot break") ~= nil)
+end
+
 -- Move one block, digging or attacking whatever is in the way. Another turtle
 -- in the way is only passing through, so wait for it rather than dig.
-local function digMove(dir, context)
+-- Returns false, why and the block's name at a block it may not break.
+local function tryDigMove(dir, context)
   local side = SIDES[dir]
   local waited = 0
   for _ = 1, 400 do
     checkStop()
     local ok, err = move(dir)
-    if ok then return end
+    if ok then return true end
     if err == "Outside mining radius" then error(err, 0) end
     if err == "Out of fuel" then error("Out of fuel", 0) end
     local found, block = side.inspect()
@@ -637,6 +645,7 @@ local function digMove(dir, context)
       sleep(0.5)
     elseif found and not LIQUIDS[block.name] then
       local cleared, why = clear(dir, context)
+      if not cleared and forbidden(why) then return false, why, block.name end
       if not cleared and why ~= "another turtle is in the way" then
         error(("Can't dig %s: %s"):format(block.name, why or "unknown"), 0)
       end
@@ -645,6 +654,13 @@ local function digMove(dir, context)
     end
   end
   error("Can't move " .. dir, 0)
+end
+
+local function digMove(dir, context)
+  local ok, why, name = tryDigMove(dir, context)
+  if ok then return end
+  if why == "Cannot break protected block" then why = why .. " (spawn protection or a land claim)" end
+  error(("Can't dig %s: %s"):format(name, why), 0)
 end
 
 -- Walk to a target, one axis at a time in the given order (e.g. "yxz").
@@ -1347,6 +1363,18 @@ local function dockWork(minFuel)
   local D = fleet.depot
   local target = math.min(math.max(tonumber(fleet.refuelTo) or 10000, minFuel), fuelLimit())
   local full, slots = {}, { junk = {}, valuables = {}, fuel = {} }
+  -- Fuel left after refuelling goes back in the fuel chest. Cargo space
+  -- matters more than spare fuel, so what the chest can't take is burnt,
+  -- up to the tank's limit, and anything still left is stored with the
+  -- valuables, or else the junk.
+  local function stowFuel(slot)
+    turtle.select(slot)
+    dockDrop(D.fuel)
+    while turtle.getItemCount(slot) > 0 and fuelLevel() < fuelLimit() and turtle.refuel(1) do end
+    for _, cat in ipairs({ "valuables", "junk" }) do
+      if turtle.getItemCount(slot) > 0 then dockDrop(D[cat]) end
+    end
+  end
   for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
     if item then
@@ -1360,11 +1388,13 @@ local function dockWork(minFuel)
   end
   for _, cat in ipairs({ "junk", "valuables", "fuel" }) do
     for _, slot in ipairs(slots[cat]) do
-      turtle.select(slot)
-      dockDrop(D[cat])
-      -- Surplus fuel stays on the turtle if the fuel chest cannot accept it.
-      -- Only mined cargo needs an available deposit chest.
-      if cat ~= "fuel" and turtle.getItemCount(slot) > 0 then full[cat] = true end
+      if cat == "fuel" then
+        stowFuel(slot)
+      else
+        turtle.select(slot)
+        dockDrop(D[cat])
+        if turtle.getItemCount(slot) > 0 then full[cat] = true end
+      end
     end
   end
   local outOfFuel = false
@@ -1375,7 +1405,7 @@ local function dockWork(minFuel)
     local before = fuelLevel()
     if dockSuck(D.fuel) then
       while fuelLevel() < target and turtle.refuel(1) do end
-      if turtle.getItemCount(slot) > 0 then dockDrop(D.fuel) end
+      if turtle.getItemCount(slot) > 0 then stowFuel(slot) end
     end
     if fuelLevel() == before then
       outOfFuel = true
@@ -1931,7 +1961,12 @@ local function mineVein(dir, veins, depth)
   -- can then replay the seed even if the ore vanished during that move.
   veins.path[#veins.path + 1] = toWorld(neighbour(dir))
   checkpointVein(veins)
-  digMove(dir)
+  if not tryDigMove(dir) then
+    -- Ore the game won't let it break (spawn protection or a land claim).
+    table.remove(veins.path)
+    checkpointVein(veins)
+    return
+  end
   -- Coming in sideways, the block behind is the one it came from.
   exploreHere(veins, depth + 1, dir == "forward" and (back.heading + 2) % 4 or nil)
   stepBack(back)
@@ -2220,6 +2255,22 @@ local function staggeredCell(a, i)
   }
 end
 
+-- Straight along one world axis to t's coordinate, stopping at a block it
+-- may not break: returns false, why and the block's name there.
+local function staggeredLeg(t, axis)
+  while true do
+    local w = toWorld(pos)
+    if w[axis] == t[axis] then return true end
+    local up = t[axis] > w[axis]
+    local dir = "forward"
+    if axis == "y" then dir = up and "up" or "down"
+    elseif axis == "x" then faceCompass(up and 1 or 3)
+    else faceCompass(up and 2 or 0) end
+    local ok, why, name = tryDigMove(dir)
+    if not ok then return false, why, name end
+  end
+end
+
 KINDS.staggered = {
   total = function(a) return staggeredPlan(a).total end,
   entry = function(a) return a.routeHome end,
@@ -2236,20 +2287,50 @@ KINDS.staggered = {
   -- Back along the tunnel to its shaft. For another column, up its own shaft
   -- to a level every shaft between is dug to (the corridor at first) and
   -- across. Then up or down the target shaft, deepening only that one, and
-  -- out along the tunnel.
+  -- out along the tunnel. Returns false, "shaft" or "tunnel" when a block it
+  -- may not break is in the way.
   walk = function(a, t)
+    -- How far down each shaft stopped at such a block.
+    local stopped = fleetJob.stoppedShafts or {}
+    if stopped[t.x] and t.y < stopped[t.x] then return false, "shaft" end
     local w = toWorld(pos)
     if w.x ~= t.x or w.y ~= t.y then
       if w.z ~= a.z then goWorld({ z = a.z }, "z") end
       if w.x ~= t.x then
         local across = math.min(a.y, math.max(w.y, t.y, t.floor or a.y))
+        for x = math.min(w.x, t.x), math.max(w.x, t.x) do
+          if stopped[x] and stopped[x] > across then across = a.y end
+        end
         goWorld({ y = across }, "y")
         if across == a.y then rowRoute.flatMine({ x = t.x, y = a.y, z = a.z })
         else goWorld({ x = t.x }, "x") end
       end
-      goWorld({ y = t.y }, "y")
+      local ok, why, name = staggeredLeg(t, "y")
+      if not ok then
+        stopped[t.x] = toWorld(pos).y
+        fleetJob.stoppedShafts = stopped
+        log("warn", ("Shaft at X %d stops at Y %d: %s %s. Skipping its tunnels below."):format(t.x, stopped[t.x], name, why))
+        return false, "shaft"
+      end
     end
-    goWorld({ z = t.z }, "z")
+    local ok, why, name = staggeredLeg(t, "z")
+    if not ok then
+      local w = toWorld(pos)
+      log("warn", ("Tunnel stops at X %d, Y %d, Z %d: %s %s. Skipping the rest of it."):format(w.x, w.y, w.z, name, why))
+      return false, "tunnel"
+    end
+  end,
+  -- Past a blocked tunnel half, on to the other half or the next tunnel.
+  skip = function(a, i, why)
+    local plan = staggeredPlan(a)
+    local lo, hi = 1, #plan
+    while lo < hi do
+      local mid = math.floor((lo + hi + 1) / 2)
+      if plan[mid].start <= i then lo = mid else hi = mid - 1 end
+    end
+    local t = plan[lo]
+    if why == "tunnel" and i - t.start <= t.h then return t.start + t.h + 1 end
+    return t.start + 2 * t.h + 1
   end,
   -- Up, down, east and west. North and south are the tunnel itself.
   work = function(a, i, veins)
@@ -2375,7 +2456,7 @@ local function moveToStep(k, a, i, service)
     k.enter(a, service)
     if atDepot(from) then noteRoute(k, a, odometer - start, toWorld(pos)) end
   end
-  k.walk(a, k.cell(a, i))
+  return k.walk(a, k.cell(a, i))
 end
 
 -- From anywhere in the job, out to where it can fly from.
@@ -2462,18 +2543,25 @@ local function fleetWork()
     while not done() do
       checkStop()
       service(cut)
-      moveToStep(k, a, fleetJob.step, service)
-      setDetail(k.detail(a, fleetJob.step, fleetJob), fleetJob.step / total)
-      if a.routeMode == "southRow" then
-        miningRoute.work, miningRoute.veinPath = toWorld(pos), fleetJob.vein
-        rowRoute.save("work")
+      local reached, why = moveToStep(k, a, fleetJob.step, service)
+      if reached == false then
+        -- A block it may not break is in the way: on to the next part of
+        -- the job it can reach.
+        fleetJob.step, fleetJob.vein, cut = k.skip(a, fleetJob.step, why), nil, false
+        if a.routeMode == "southRow" then miningRoute.veinPath = nil end
+      else
+        setDetail(k.detail(a, fleetJob.step, fleetJob), fleetJob.step / total)
+        if a.routeMode == "southRow" then
+          miningRoute.work, miningRoute.veinPath = toWorld(pos), fleetJob.vein
+          rowRoute.save("work")
+        end
+        veins.left, veins.path, veins.cut, veins.resume = 32, {}, nil, fleetJob.vein
+        cut = k.work(a, fleetJob.step, veins) == false
+        -- A vein it had to leave is finished from where it left off.
+        fleetJob.vein = cut and veins.cut or nil
+        if a.routeMode == "southRow" then miningRoute.veinPath = fleetJob.vein end
+        if not cut then fleetJob.step = fleetJob.step + 1 end
       end
-      veins.left, veins.path, veins.cut, veins.resume = 32, {}, nil, fleetJob.vein
-      cut = k.work(a, fleetJob.step, veins) == false
-      -- A vein it had to leave is finished from where it left off.
-      fleetJob.vein = cut and veins.cut or nil
-      if a.routeMode == "southRow" then miningRoute.veinPath = fleetJob.vein end
-      if not cut then fleetJob.step = fleetJob.step + 1 end
       tally()
       saveState()
       local progress = fleetJob.step / total
