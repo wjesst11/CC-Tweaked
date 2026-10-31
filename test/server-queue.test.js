@@ -356,3 +356,29 @@ test("the dock is freed when its turtle disconnects away from it, and kept when 
   const last = dashboard.messages.filter((msg) => msg.type === "depot").at(-1);
   assert.equal(last.depot.holder, 7, "a turtle disconnected inside the dock lost its turn");
 });
+
+test("a turtle joins a running staggered job once the busy turtle switches to fewer columns", { timeout: 20000 }, async (t) => {
+  const app = await harness(t);
+  const dashboard = await app.dashboard();
+  const args = {
+    kind: "branchMine", pattern: "staggered", jobId: "job-x", x: 80, z: -55, y: 62, low: 55, peak: 61, yTop: 60, yBottom: 56,
+    first: 80, last: 120, radius: 20, dir: "south", routeMode: "southRow", access: "southStairs", entryY: 67,
+    routeHome: { x: 100, y: 67, z: -55, facing: "south" }, stairBottom: { x: 100, y: 62, z: -50 }, coverage: "allSides",
+    veinBounds: { x1: 79, x2: 121, y1: 54, y2: 62, z1: -76, z2: -34 },
+  };
+  const busy = { ...IDLE, job: { name: "fleetJob" }, jobShareSupported: true, fleetJob: { kind: "branchMine", args, step: 50, at: { pass: 1, x: 90 } } };
+  const member = await app.turtle(busy, true, { id: 7 });
+  const home = { x: 101, y: 67, z: -55 };
+  const helper = await app.turtle({ ...IDLE, world: home, homeWorld: home, miningRoute: { home: { ...home, facing: "south" } }, jobShareSupported: true }, true, { id: 8 });
+  await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.id === 8 && msg.turtle.status);
+  const result = await dashboard.exchange({ type: "joinFleetJob", jobId: "job-x", ids: [8] }, (msg) => msg.type === "fleetJobResult");
+  assert.equal(result.ok, true, result.msg);
+  const update = await member.wait(cmd("jobUpdate"));
+  assert.deepEqual([update.args.first, update.args.last], [80, 100]);
+  await delay(200);
+  assert.equal(helper.messages.some(cmd("fleetJob")), false, "the helper started before the busy turtle switched");
+  member.send({ type: "status", ...busy, fleetJob: { ...busy.fleetJob, args: update.args, step: 3 } });
+  const start = await helper.wait(cmd("fleetJob"));
+  assert.equal(start.args.jobId, "job-x");
+  assert.deepEqual([Math.min(start.args.first, start.args.last), Math.max(start.args.first, start.args.last)], [101, 120]);
+});

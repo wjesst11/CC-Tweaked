@@ -587,6 +587,12 @@ textarea {
 .job-queue .card-head { margin-bottom: 0; flex-wrap: wrap; }
 .queue-summary { margin: 0; font-size: 13px; }
 .job-queue-list { display: grid; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.ore-job + .ore-job { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.ore-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+.ore-job h3 { margin: 0; font-size: 13px; font-weight: 500; color: var(--ink-2); }
+.ore-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px 16px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.ore-list li { display: flex; justify-content: space-between; gap: 8px; }
+.ore-list b { font-weight: 600; font-variant-numeric: tabular-nums; }
 .queued-job { display: grid; gap: 6px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
 .queued-job-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .queued-job-head h3 { font-size: 13px; }

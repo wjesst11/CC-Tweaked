@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { DEFAULT_FLEET, planFleetJob, sanitizeFleet, validateFleet } from "./fleet.js";
+import { DEFAULT_FLEET, planFleetJob, planJoin, sanitizeFleet, validateFleet } from "./fleet.js";
 import { FleetJobQueue } from "./fleet-queue.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -376,13 +376,69 @@ function startFleetJob(ws, { kind, ids, params }) {
     send(ws, { type: "fleetJobResult", ok: false, msg: [plan.error, ...skipped].join(" ") });
     return;
   }
+  // Every turtle on the job shares this ID, so the dashboard can add up their ore.
+  const jobId = `job-${Date.now().toString(36)}`;
   for (const { id, args } of plan.assignments) {
     const t = turtles.get(id);
     t.pendingFleetUntil = Date.now() + 10_000;
-    dispatch(t, "fleetJob", args);
+    dispatch(t, "fleetJob", { ...args, jobId });
   }
   const msg = `Started ${plan.assignments.length} turtle${plan.assignments.length === 1 ? "" : "s"}.`;
   send(ws, { type: "fleetJobResult", ok: true, msg: [msg, ...skipped].join(" ") });
+}
+
+// Idle turtles join a running staggered job. Each takes some columns of a
+// busy turtle on it; the busy turtle switches between two steps, and the
+// newcomer starts only once it has, so no column ever has two turtles.
+const JOIN_WAIT_MS = 10 * 60_000;
+
+function joinFleetJob(ws, { jobId, ids }) {
+  if (typeof jobId !== "string" || !Array.isArray(ids)) return;
+  const reply = (ok, msg) => send(ws, { type: "fleetJobResult", ok, msg });
+  const members = [...turtles.values()].filter((t) => t.socket && t.status?.fleetJob?.args?.jobId === jobId);
+  if (!members.length) return reply(false, "No turtle on that job is online right now.");
+  const old = members.find((t) => !t.status.jobShareSupported);
+  if (old) return reply(false, `Update ${nameOf(old)}'s script so it can share its job.`);
+  if (members.some((t) => t.status.fleetJob.args.pattern !== "staggered")) return reply(false, "Only staggered level jobs can take more turtles.");
+  const memberIds = new Set(members.map((t) => t.id));
+  const { ready, skipped } = readyTurtles([...new Set(ids.slice(0, 256).map(Number))].filter((id) => !memberIds.has(id)), "branchMine");
+  const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.miningRoute?.home ?? t.status?.homeWorld }));
+  const plan = planJoin(fleet, members.map((t) => ({
+    id: t.id, name: nameOf(t), args: t.status.fleetJob.args, at: t.status.fleetJob.at,
+  })), ready, homes);
+  if (plan.error) return reply(false, [plan.error, ...skipped].join(" "));
+  for (const { id, args } of plan.updates) dispatch(turtles.get(id), "jobUpdate", args);
+  for (const join of plan.assignments) {
+    const member = turtles.get(join.after);
+    member.joining = [...(member.joining ?? []), { ...join, until: Date.now() + JOIN_WAIT_MS }];
+    turtles.get(join.id).pendingFleetUntil = Date.now() + JOIN_WAIT_MS;
+    addLog(member, "info", `Sharing its columns with ${nameOf(turtles.get(join.id))}`);
+  }
+  const n = plan.assignments.length;
+  const notes = plan.unused.length ? [`Nothing left to share for ${plan.unused.join(", ")}.`] : [];
+  reply(true, [`${n} turtle${n === 1 ? "" : "s"} joining once the turtles they share with switch over.`, ...notes, ...skipped].join(" "));
+}
+
+// Start a joining turtle once its partner reports the narrower columns.
+function advanceJoin(member) {
+  if (!member.joining?.length) return;
+  const args = member.status?.fleetJob?.args;
+  member.joining = member.joining.filter((join) => {
+    const helper = turtles.get(join.id);
+    if (args && args.first === join.expect.first && args.last === join.expect.last) {
+      if (helper?.socket) {
+        helper.pendingFleetUntil = Date.now() + 10_000;
+        dispatch(helper, "fleetJob", join.args);
+      }
+      return false;
+    }
+    if (Date.now() > join.until) {
+      addLog(member, "warn", `Gave up sharing its columns with ${helper ? nameOf(helper) : `turtle ${join.id}`}: it never switched over`);
+      if (helper) helper.pendingFleetUntil = 0;
+      return false;
+    }
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -452,11 +508,13 @@ function handleTurtle(ws) {
         const json = JSON.stringify(status);
         if (json === turtle.statusJson) {
           advanceUpdate(turtle);
+          advanceJoin(turtle);
           break;
         }
         turtle.statusJson = json;
         turtle.status = status;
         advanceUpdate(turtle);
+        advanceJoin(turtle);
         turtle.label = typeof status.label === "string" ? status.label : null;
         broadcast({ type: "turtle", turtle: turtleView(turtle) });
         break;
@@ -466,6 +524,14 @@ function handleTurtle(ws) {
         break;
       case "result":
         if (msg.action === "fleetJob") turtle.pendingFleetUntil = 0;
+        // A turtle that can't take the narrower columns keeps them all.
+        if (msg.action === "jobUpdate" && !msg.ok && turtle.joining?.length) {
+          for (const join of turtle.joining) {
+            const helper = turtles.get(join.id);
+            if (helper) helper.pendingFleetUntil = 0;
+          }
+          turtle.joining = [];
+        }
         // A failed download leaves the old script running: carry on the job.
         if (msg.action === "update" && !msg.ok && turtle.updateFlow) {
           const { resume } = turtle.updateFlow;
@@ -649,6 +715,8 @@ function handleDashboard(ws) {
       send(ws, { type: "fleetSaved", ok: true });
     } else if (msg.type === "fleetJob") {
       startFleetJob(ws, msg);
+    } else if (msg.type === "joinFleetJob") {
+      joinFleetJob(ws, msg);
     } else if (msg.type === "queueFleetJob") {
       queueAction(ws, () => jobQueue.add(msg));
     } else if (msg.type === "pauseJobQueue" && typeof msg.paused === "boolean") {

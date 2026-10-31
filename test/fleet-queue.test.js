@@ -61,6 +61,7 @@ test("validates initially, replans when ready, and runs jobs in FIFO order", () 
   h.queue.tick();
   assert.equal(h.plans.length, 3);
   assert.deepEqual(h.sends.map((send) => send.args.queueId), ["job-1:1", "job-1:2"]);
+  assert.deepEqual(h.sends.map((send) => send.args.jobId), ["job-1", "job-1"], "turtles on one job share its ID for ore totals");
   assert.equal(h.queue.snapshot().jobs[1].state, "queued");
   h.finish(1, "job-1:1");
   h.queue.tick();

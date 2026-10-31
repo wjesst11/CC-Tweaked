@@ -227,7 +227,7 @@ export class FleetJobQueue {
         entry.message = "Running";
         entry.assignments = result.assignments.map(({ id, args }) => {
           const queueId = `${entry.id}:${id}`;
-          return { id, queueId, args: { ...copy(args), queueId }, done: false };
+          return { id, queueId, args: { ...copy(args), queueId, jobId: String(entry.id) }, done: false };
         });
       });
       job = this.state.jobs.find((entry) => entry.id === job.id);

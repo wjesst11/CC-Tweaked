@@ -141,3 +141,51 @@ test("tunnels start at the ore's most common level, kept inside the tunnel level
   assert.equal(peakOf({}), -49, "without a peak, start at the top");
   assert.match(plan({ ...SETTINGS, peak: "deep" }).error, /whole-number level/);
 });
+
+const { planJoin } = await import("../fleet.js");
+const member = (at, overrides = {}) => {
+  const { assignments } = plan({ ...SETTINGS, radius: 20 }, [turtle(1, 100)]);
+  const args = { ...assignments[0].args, first: 80, last: 120, x: 80, jobId: "job-1", ...overrides };
+  return { id: 1, name: "Miner 1", args, at };
+};
+
+test("a joining turtle takes the far side of the busiest turtle's columns", () => {
+  // Pass 1 sweeps from first (80) up to last (120); it is at column 90.
+  const result = planJoin(fleet(), [member({ pass: 1, x: 90 })], [turtle(2, 101)], []);
+  assert.equal(result.error, undefined);
+  const [update] = result.updates, [join] = result.assignments;
+  assert.deepEqual([update.args.first, update.args.last], [80, 100], "the busy turtle keeps the half it is working in");
+  assert.deepEqual(update.args.done, { pass: 1, cols: [[80, 89]] }, "columns already swept in this pass stay done");
+  assert.deepEqual([Math.min(join.args.first, join.args.last), Math.max(join.args.first, join.args.last)], [101, 120]);
+  assert.deepEqual(join.args.done, { pass: 1, cols: [] }, "the helper's columns still need this pass");
+  assert.equal(join.args.jobId, "job-1");
+  assert.deepEqual(join.after, 1);
+  assert.deepEqual(join.expect, { first: 80, last: 100 });
+});
+
+test("a turtle past the middle keeps its side, and the helper starts on the next pass there", () => {
+  // A helper at X 95 reaches columns 80 to 100 inside its radius of 20.
+  const result = planJoin(fleet(), [member({ pass: 1, x: 110 })], [turtle(2, 95)], []);
+  const [update] = result.updates, [join] = result.assignments;
+  assert.deepEqual([update.args.first, update.args.last], [101, 120]);
+  assert.deepEqual(join.args.done, { pass: 1, cols: [[80, 100]] }, "pass 1 is done on the helper's side");
+  assert.deepEqual(update.args.done, { pass: 1, cols: [[101, 109]] });
+});
+
+test("the busy turtle keeps the column it heads to next", () => {
+  // Pass 2 sweeps back from 120 toward 80; at 101 it heads to 100 next.
+  const result = planJoin(fleet(), [member({ pass: 2, x: 101 })], [turtle(2, 95)], []);
+  const [update] = result.updates, [join] = result.assignments;
+  assert.ok(Math.min(update.args.first, update.args.last) <= 100, "the next column went to the helper");
+  assert.ok(Math.max(join.args.first, join.args.last) < Math.min(update.args.first, update.args.last));
+});
+
+test("helpers go to the busiest turtles, one each, and only inside their own radius", () => {
+  const busy = member({ pass: 1, x: 82 });
+  const nearlyDone = { ...member({ pass: 5, x: 118 }), id: 3, name: "Miner 3" };
+  const result = planJoin(fleet(), [nearlyDone, busy], [turtle(2, 101), turtle(4, 300)], []);
+  assert.equal(result.assignments.length, 1);
+  assert.equal(result.assignments[0].after, 1, "the busiest turtle shares first");
+  assert.deepEqual(result.unused, ["Miner 4"], "a turtle whose radius can't reach is left out");
+  assert.match(planJoin(fleet(), [busy], [turtle(4, 300)], []).error, /enough columns left to share/);
+});

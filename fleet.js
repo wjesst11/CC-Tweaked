@@ -162,6 +162,31 @@ function stairAccess(home, y, radius) {
   });
 }
 
+// One turtle's share of a staggered job: columns west to east, swept from
+// the end nearer its stairs. `done` marks work another turtle already did.
+function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, jobId, done }) {
+  const zb = stairZ(67 - y, radius);
+  const [first, last] = Math.abs(west - home.x) <= Math.abs(east - home.x) ? [west, east] : [east, west];
+  // Ore checks reach the next turtle's nearest column, the level below the
+  // lowest tunnel and the corridor above the top one.
+  const volume = box(west - 1, low - 1, -55 - radius - 1, east + 1, y, -55 + radius + 1);
+  return {
+    args: {
+      kind: "branchMine", pattern: "staggered", x: first, z: -55, y, dir: "south", radius, first, last, low, peak, yTop, yBottom,
+      scan: true, spacing: 5, band: 0, goal: 0, goalItem: "valuables",
+      routeMode: "southRow", routeHome: { ...home }, stairBottom: { x: home.x, y, z: zb }, access: "southStairs", entryY: 67,
+      coverage: "allSides", veinBounds: volume,
+      ...(jobId ? { jobId } : {}), ...(done ? { done } : {}),
+    },
+    volume,
+    circle: { x: home.x, z: home.z, radius },
+    // From the stair bottom along the home column to the corridor, and
+    // along the corridor to the far end of its columns.
+    assembly: [box(home.x, y, zb, home.x, y, -55), box(Math.min(home.x, west), y, -55, Math.max(home.x, east), y, -55)],
+    access: stairAccess(home, y, radius),
+  };
+}
+
 // Staggered tunnels through every turtle's cylinder from Y top down to Y
 // bottom, split into runs of whole columns, one run per turtle. A column's
 // tunnels cross its shaft at Z -55 and run to the circle's edge both ways;
@@ -211,31 +236,11 @@ function planStaggered(params, ready, radius) {
     }
     return run;
   });
-  const zb = stairZ(67 - y, radius);
   const jobs = [], selected = [];
   for (const [k, turtle] of sorted.entries()) {
     const run = runs[k];
     if (!run.some((c) => c.weight > 0)) continue;
-    const home = turtle.home, west = run[0].x, east = run.at(-1).x;
-    // From the end nearer its stairs, sweeping to the other.
-    const [first, last] = Math.abs(west - home.x) <= Math.abs(east - home.x) ? [west, east] : [east, west];
-    // Ore checks reach the next turtle's nearest column, the level below the
-    // lowest tunnel and the corridor above the top one.
-    const volume = box(west - 1, low - 1, -55 - radius - 1, east + 1, y, -55 + radius + 1);
-    jobs.push({
-      args: {
-        kind: "branchMine", pattern: "staggered", x: first, z: -55, y, dir: "south", radius, first, last, low, peak, yTop, yBottom,
-        scan: true, spacing: 5, band: 0, goal: 0, goalItem: "valuables",
-        routeMode: "southRow", routeHome: { ...home }, stairBottom: { x: home.x, y, z: zb }, access: "southStairs", entryY: 67,
-        coverage: "allSides", veinBounds: volume,
-      },
-      volume,
-      circle: { x: home.x, z: home.z, radius },
-      // From the stair bottom along the home column to the corridor, and
-      // along the corridor to the far end of its columns.
-      assembly: [box(home.x, y, zb, home.x, y, -55), box(Math.min(home.x, west), y, -55, Math.max(home.x, east), y, -55)],
-      access: stairAccess(home, y, radius),
-    });
+    jobs.push(staggeredJob(turtle.home, run[0].x, run.at(-1).x, { y, low, peak, yTop, yBottom, radius }));
     selected.push(turtle);
   }
   if (!jobs.length) return { error: "No tunnels fall inside these levels and radius. Widen the levels or the radius." };
@@ -357,29 +362,111 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     return { error: `Unknown job type ${kind}.` };
   }
 
-  // Access geometry is known before dispatch, including every headroom block.
-  // Validate each stair column rather than its much larger enclosing box.
+  const problem = safetyError(fleet, jobs, homes);
+  if (problem) return { error: problem };
+  return { assignments: jobs.map((job, k) => ({ id: selected[k].id, args: job.args, volume: job.volume })) };
+}
+
+// Why planned work can't go ahead, or null. Access geometry is known before
+// dispatch, including every headroom block, so each stair column is checked
+// rather than its much larger enclosing box.
+function safetyError(fleet, jobs, homes) {
   const depot = depotBox(fleet.depot);
   for (const job of jobs) {
     const work = [job.volume, ...[job.assembly ?? []].flat()];
     for (const part of [...work, ...(job.access ?? [])]) {
       if ([part.x1, part.x2, part.z1, part.z2].some((value) => coord(value) === null)) {
-        return { error: "The job or its access stairs extend beyond the world coordinate limits." };
+        return "The job or its access stairs extend beyond the world coordinate limits.";
       }
       // Protected block types remain enforced by the turtle everywhere. This
       // exemption concerns protected coordinates on the initial stairs only.
       if (work.includes(part)) {
         for (const area of fleet.protect.areas) {
-          if (intersectsWork(part, area, job.circle)) return { error: `The job would dig into the protected area "${area.name || "unnamed"}".` };
+          if (intersectsWork(part, area, job.circle)) return `The job would dig into the protected area "${area.name || "unnamed"}".`;
         }
       }
-      if (intersectsWork(part, depot, job.circle)) return { error: "The job would dig at the depot, or where turtles wait for it (within 5 blocks)." };
+      if (intersectsWork(part, depot, job.circle)) return "The job would dig at the depot, or where turtles wait for it (within 5 blocks).";
       for (const { name, home } of homes) {
         if (home && intersectsWork(part, box(home.x, home.y, home.z, home.x, home.y, home.z), job.circle)) {
-          return { error: `The job would dig out ${name}'s home.` };
+          return `The job would dig out ${name}'s home.`;
         }
       }
     }
   }
-  return { assignments: jobs.map((job, k) => ({ id: selected[k].id, args: job.args, volume: job.volume })) };
+  return null;
+}
+
+// How many passes (bands of five levels) a staggered job makes. The turtle
+// script orders them; only the count is needed here.
+function staggeredPasses(args) {
+  const top = args.y - 1, low = args.low;
+  const peak = Math.max(low, Math.min(top, Number.isInteger(args.peak) ? args.peak : top));
+  const base = Math.max(low, Math.min(peak - 2, top - 4));
+  let k = 0, n = 0;
+  while (base + 5 * (k - 1) + 4 >= low) k--;
+  for (; base + 5 * k <= top; k++) n++;
+  return n;
+}
+
+// Adds idle turtles to a running staggered job. Each helper takes part of the
+// columns of the job's busiest turtle that hasn't been split yet: the busy
+// turtle keeps the side it's working in (and the column it heads to next),
+// the helper the other side, marked with what is already done there. One
+// owner per column keeps every shaft to one turtle. `members` are the job's
+// turtles, [{ id, name, home, args, at: { pass, x } }]; `helpers` are ready
+// turtles, [{ id, name, home }]. Returns { updates, assignments, unused } or
+// { error }. Each assignment waits for its `after` turtle to switch to the
+// `expect`ed columns before it starts.
+export function planJoin(fleet, members, helpers, homes) {
+  if (!fleet.depot) return { error: "Set up the depot first (Fleet settings)." };
+  if (!helpers.length) return { error: "Pick idle turtles at their homes to add to the job." };
+  const work = members.filter((m) => m.args?.pattern === "staggered" && Number.isInteger(m.at?.pass) && m.at.pass >= 1 && Number.isInteger(m.at?.x))
+    .map((m) => {
+      const a = m.args, p = m.at.pass, c = m.at.x;
+      const lo = Math.min(a.first, a.last), hi = Math.max(a.first, a.last);
+      // Odd passes sweep from first to last, even passes back.
+      const rising = (p % 2 === 1) === (a.first <= a.last);
+      const passes = staggeredPasses(a);
+      const remaining = (rising ? hi - c + 1 : c - lo + 1) + Math.max(0, passes - p) * (hi - lo + 1);
+      return { m, p, c, lo, hi, rising, remaining };
+    })
+    .sort((q, r) => r.remaining - q.remaining);
+  const updates = [], assignments = [], unused = [], jobs = [];
+  for (const helper of helpers) {
+    let placed = false;
+    for (const w of work) {
+      if (w.split) continue;
+      const { m, p, c, lo, hi, rising } = w;
+      const mid = Math.floor((lo + hi) / 2);
+      let keep, give;
+      if (rising) {
+        if (c <= mid) { const s = Math.max(mid, c + 1); keep = [lo, s]; give = [s + 1, hi]; }
+        else { keep = [mid + 1, hi]; give = [lo, mid]; }
+      } else if (c > mid) { const s = Math.min(mid + 1, c - 1); keep = [s, hi]; give = [lo, s - 1]; }
+      else { keep = [lo, mid]; give = [mid + 1, hi]; }
+      if (give[0] > give[1] || keep[0] > keep[1]) continue;
+      const radius = m.args.radius;
+      if (give.some((x) => Math.abs(x - helper.home.x) > radius)) continue;
+      // Done in the current pass: the earlier columns of this sweep, and
+      // whatever was already marked done for it.
+      const doneNow = [rising ? [lo, c - 1] : [c + 1, hi], ...(m.args.done?.pass === p ? m.args.done.cols : [])];
+      const within = ([a, b]) => doneNow.map(([x, y]) => [Math.max(a, x), Math.min(b, y)]).filter(([x, y]) => x <= y);
+      const job = staggeredJob(helper.home, give[0], give[1], { ...m.args, jobId: m.args.jobId, done: { pass: p, cols: within(give) } });
+      jobs.push(job);
+      // The busy turtle keeps its sweep direction, so first stays on the same side.
+      const [first, last] = m.args.first <= m.args.last ? keep : [keep[1], keep[0]];
+      const volume = box(keep[0] - 1, m.args.low - 1, -55 - radius - 1, keep[1] + 1, m.args.y, -55 + radius + 1);
+      updates.push({ id: m.id, args: { ...m.args, x: first, first, last, veinBounds: volume, done: { pass: p, cols: within(keep) } } });
+      assignments.push({ id: helper.id, args: job.args, after: m.id, expect: { first, last } });
+      w.split = placed = true;
+      break;
+    }
+    if (!placed) unused.push(helper.name || `Turtle ${helper.id}`);
+  }
+  if (!assignments.length) {
+    return { error: "No turtle on that job has enough columns left to share with these turtles, inside their mining radius." };
+  }
+  const problem = safetyError(fleet, jobs, homes);
+  if (problem) return { error: problem };
+  return { updates, assignments, unused };
 }

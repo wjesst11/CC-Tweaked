@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.6"
+local VERSION = "2.2.8"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -486,6 +486,11 @@ end
 local dugLog = {}
 
 local function noteDug(dir, name)
+  -- Ore blocks the current fleet job has mined, by block name.
+  if fleetJob and matches(name, compiled.vein) then
+    fleetJob.ores = fleetJob.ores or {}
+    fleetJob.ores[name] = (fleetJob.ores[name] or 0) + 1
+  end
   if not gpsTrusted() then return end
   local w = toWorld(neighbour(dir))
   if #dugLog >= 5000 then table.remove(dugLog, 1) end
@@ -2313,6 +2318,18 @@ local function staggeredPlan(a)
   for x = a.first, a.last, a.last >= a.first and 1 or -1 do
     cols[#cols + 1], deepest[x] = x, a.y
   end
+  -- Work done before this turtle took these columns over (a.done, from a
+  -- turtle joining the job): every pass before done.pass, and in that pass
+  -- the column ranges done.cols. It isn't mined again, but it was dug.
+  local done = type(a.done) == "table" and a.done or { pass = 0, cols = {} }
+  local function finished(pass, x)
+    if pass < done.pass then return true end
+    if pass > done.pass then return false end
+    for _, r in ipairs(done.cols) do
+      if x >= r[1] and x <= r[2] then return true end
+    end
+    return false
+  end
   for pass, band in ipairs(bands) do
     -- Every shaft is dug at least this far down when the pass starts.
     local floor = -math.huge
@@ -2322,9 +2339,11 @@ local function staggeredPlan(a)
       local x = cols[pass % 2 == 1 and n or #cols + 1 - n]
       for y = hi, lo, -1 do
         if (x + 2 * y) % 5 == 0 then
-          local h = staggeredHalf(a, x)
-          plan[#plan + 1] = { x = x, y = y, h = h, floor = floor, pass = pass, start = plan.total }
-          plan.total = plan.total + 2 * h + 1
+          if not finished(pass, x) then
+            local h = staggeredHalf(a, x)
+            plan[#plan + 1] = { x = x, y = y, h = h, floor = floor, pass = pass, start = plan.total }
+            plan.total = plan.total + 2 * h + 1
+          end
           deepest[x] = math.min(deepest[x], y)
         end
       end
@@ -2339,6 +2358,7 @@ end
 -- from the shaft to the edge.
 local function staggeredCell(a, i)
   local plan = staggeredPlan(a)
+  if #plan == 0 then return { x = a.first, y = a.y - 1, z = a.z, floor = a.y, pass = 0, passes = plan.passes, start = 0 } end
   i = math.max(0, math.min(i, plan.total - 1))
   local lo, hi = 1, #plan
   while lo < hi do
@@ -2349,7 +2369,7 @@ local function staggeredCell(a, i)
   local j = i - t.start
   return {
     x = t.x, y = t.y, z = j <= t.h and a.z - j or a.z + j - t.h,
-    floor = t.floor, pass = t.pass, passes = plan.passes,
+    floor = t.floor, pass = t.pass, passes = plan.passes, start = t.start,
   }
 end
 
@@ -2417,6 +2437,11 @@ KINDS.staggered = {
       log("warn", ("Tunnel stops at X %d, Y %d, Z %d: %s %s. Skipping the rest of it."):format(w.x, w.y, w.z, name, why))
       return false, "tunnel"
     end
+  end,
+  -- Which pass and column step i is in.
+  at = function(a, i)
+    local c = staggeredCell(a, i)
+    return { pass = c.pass, x = c.x }
   end,
   -- Past a blocked tunnel half, on to the other half or the next tunnel.
   skip = function(a, i, why)
@@ -2627,6 +2652,32 @@ local function fleetWork()
     if emptySlots() <= 2 or fuelLevel() < need then visit() end
   end
 
+  -- Switch to settings that hand some columns to a turtle joining the job,
+  -- keeping its place: the same tunnel, the same block of it.
+  local function shareColumns()
+    local nextArgs = fleetJob.nextArgs
+    fleetJob.nextArgs = nil
+    local c, step = staggeredCell(a, fleetJob.step), nil
+    for _, t in ipairs(staggeredPlan(nextArgs)) do
+      if t.pass == c.pass and t.x == c.x and t.y == c.y then
+        step = t.start + fleetJob.step - c.start
+        break
+      end
+    end
+    if not step then
+      log("warn", "Couldn't share its columns: it had moved past them")
+      saveState()
+      return
+    end
+    staggeredPlans[a] = nil
+    for key in pairs(a) do a[key] = nil end
+    for key, value in pairs(nextArgs) do a[key] = value end
+    fleetJob.step, total = step, k.total(a)
+    miningRoute.columns = { x1 = math.min(a.first, a.last), x2 = math.max(a.first, a.last), z = a.z, low = a.low }
+    saveState()
+    log("info", ("Sharing the job: now mining columns X %d to %d"):format(miningRoute.columns.x1, miningRoute.columns.x2))
+  end
+
   local veins = { left = 0 }
   if k.mayDig then veins.allowed = function(w) return k.mayDig(a, w) end end
   veins.full = function(depth) return emptySlots() <= 1 or fuelLevel() < roundTrip(k, a, depth) end
@@ -2668,6 +2719,7 @@ local function fleetWork()
       end
       tally()
       saveState()
+      if fleetJob.nextArgs then shareColumns() end
       updateIfAsked()
       local progress = fleetJob.step / total
       if goal then progress = math.max(progress, math.min(1, (fleetJob.found or 0) / goal.count)) end
@@ -2705,7 +2757,8 @@ local function fleetWork()
   end
   setDetail("Job done, unloading")
   visit()
-  if fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = true } end
+  -- The receipt keeps the job's ore count once the job itself is cleared.
+  lastFleetResult = { id = fleetJob.queueId, ok = true, jobId = fleetJob.args.jobId, ores = fleetJob.ores }
   fleetJob = nil
   saveState()
   comeHome()
@@ -2715,6 +2768,59 @@ local function toCompass(v)
   return type(v) == "string" and COMPASS_INDEX[v] or clampInt(v, 0, 3, 0)
 end
 
+-- A level job's settings, checked.
+function rowRoute.jobArgs(a)
+  rowRoute.validate(a)
+  local args = {
+    kind = a.kind, x = clampInt(a.x, -3e7, 3e7, 0), z = clampInt(a.z, -3e7, 3e7, 0),
+    y = a.y, dir = 2,
+    radius = a.radius,
+    length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (a.z + 55) + 1, scan = true,
+    spacing = 2, band = 0,
+    goal = 0, goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
+  }
+  if a.pattern == "staggered" then
+    args.pattern, args.first, args.last, args.low, args.peak, args.spacing = "staggered", a.first, a.last, a.low, a.peak, 5
+    args.yTop, args.yBottom = tonumber(a.yTop), tonumber(a.yBottom)
+    args.length = nil
+  end
+  args.routeMode, args.access, args.entryY = "southRow", "southStairs", 67
+  args.routeHome = { x = a.routeHome.x, y = 67, z = -55, facing = "south" }
+  args.stairBottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }
+  if a.coverage == "allSides" then
+    local bounds = a.veinBounds
+    if type(bounds) ~= "table" then error("All-side scanning needs planned vein bounds", 0) end
+    local validated = {}
+    for _, key in ipairs({ "x1", "y1", "z1", "x2", "y2", "z2" }) do
+      local value = tonumber(bounds[key])
+      local vertical = key:sub(1, 1) == "y"
+      if not value or value ~= math.floor(value) or value < (vertical and -64 or -3e7)
+        or value > (vertical and 319 or 3e7) then error("Invalid planned vein bounds", 0) end
+      validated[key] = value
+    end
+    if validated.x1 > validated.x2 or validated.y1 > validated.y2 or validated.z1 > validated.z2 then
+      error("Invalid planned vein bounds", 0)
+    end
+    args.coverage, args.veinBounds = "allSides", validated
+  else error("Radius mining requires all-side ore coverage", 0) end
+  -- Shared by every turtle on the same job, to add up what they mine.
+  if type(a.jobId) == "string" and #a.jobId <= 64 then args.jobId = a.jobId end
+  if args.pattern == "staggered" and a.done ~= nil then
+    local d = a.done
+    local function int(n) return type(n) == "number" and n == math.floor(n) end
+    if type(d) ~= "table" or not int(d.pass) or d.pass < 0 or type(d.cols) ~= "table" or #d.cols > 32 then
+      error("Invalid finished work for this job", 0)
+    end
+    local cols = {}
+    for i, r in ipairs(d.cols) do
+      if type(r) ~= "table" or not int(r[1]) or not int(r[2]) then error("Invalid finished work for this job", 0) end
+      cols[i] = { r[1], r[2] }
+    end
+    args.done = { pass = d.pass, cols = cols }
+  end
+  return args
+end
+
 function jobs.fleetJob(a)
   -- The server can resend after a lost connection. A saved receipt prevents
   -- completed assignments from being mined twice, including after a reboot.
@@ -2722,39 +2828,7 @@ function jobs.fleetJob(a)
   if fleetJob then error("Resume or cancel the saved fleet job first", 0) end
   local args
   if a.kind == "branchMine" then
-    rowRoute.validate(a)
-    args = {
-      kind = a.kind, x = clampInt(a.x, -3e7, 3e7, 0), z = clampInt(a.z, -3e7, 3e7, 0),
-      y = a.y, dir = 2,
-      radius = a.radius,
-      length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (a.z + 55) + 1, scan = true,
-      spacing = 2, band = 0,
-      goal = 0, goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
-    }
-    if a.pattern == "staggered" then
-      args.pattern, args.first, args.last, args.low, args.peak, args.spacing = "staggered", a.first, a.last, a.low, a.peak, 5
-      args.yTop, args.yBottom = tonumber(a.yTop), tonumber(a.yBottom)
-      args.length = nil
-    end
-    args.routeMode, args.access, args.entryY = "southRow", "southStairs", 67
-    args.routeHome = { x = a.routeHome.x, y = 67, z = -55, facing = "south" }
-    args.stairBottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }
-    if a.coverage == "allSides" then
-      local bounds = a.veinBounds
-      if type(bounds) ~= "table" then error("All-side scanning needs planned vein bounds", 0) end
-      local validated = {}
-      for _, key in ipairs({ "x1", "y1", "z1", "x2", "y2", "z2" }) do
-        local value = tonumber(bounds[key])
-        local vertical = key:sub(1, 1) == "y"
-        if not value or value ~= math.floor(value) or value < (vertical and -64 or -3e7)
-          or value > (vertical and 319 or 3e7) then error("Invalid planned vein bounds", 0) end
-        validated[key] = value
-      end
-      if validated.x1 > validated.x2 or validated.y1 > validated.y2 or validated.z1 > validated.z2 then
-        error("Invalid planned vein bounds", 0)
-      end
-      args.coverage, args.veinBounds = "allSides", validated
-    else error("Radius mining requires all-side ore coverage", 0) end
+    args = rowRoute.jobArgs(a)
   elseif a.kind == "areaQuarry" then
     local x1, x2 = clampInt(a.x1, -3e7, 3e7, 0), clampInt(a.x2, -3e7, 3e7, 0)
     local z1, z2 = clampInt(a.z1, -3e7, 3e7, 0), clampInt(a.z2, -3e7, 3e7, 0)
@@ -2786,7 +2860,9 @@ function jobs.goHome()
   setDetail("Returning home")
   if miningRoute then
     miningRoute.intent = "home"
-    if fleetJob and fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning by saved staircase" } end
+    if fleetJob then
+      lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning by saved staircase", jobId = fleetJob.args.jobId, ores = fleetJob.ores }
+    end
     fleetJob, pendingTrip = nil, nil
     rowRoute.save()
     rowRoute.recover()
@@ -2800,7 +2876,7 @@ function jobs.goHome()
   end
   if fleetJob then
     local k, a = kindOf(fleetJob), fleetJob.args
-    if fleetJob.queueId then lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning home" } end
+    lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled; returning home", jobId = fleetJob.args.jobId, ores = fleetJob.ores }
     fleetJob = nil
     saveState()
     -- Drop off what it mined (and refuel) on the way home.
@@ -3017,7 +3093,8 @@ function net.status()
     local k = kindOf(fleetJob)
     fj = {
       kind = fleetJob.kind, step = fleetJob.step, total = k and k.total(fleetJob.args),
-      paused = fleetJob.paused, failed = fleetJob.failed, args = fleetJob.args, found = fleetJob.found,
+      paused = fleetJob.paused, failed = fleetJob.failed, args = fleetJob.args, found = fleetJob.found, ores = fleetJob.ores,
+      at = k and k.at and k.at(fleetJob.args, fleetJob.step), sharing = fleetJob.nextArgs ~= nil,
       queueId = fleetJob.queueId,
     }
   end
@@ -3053,6 +3130,7 @@ function net.status()
     radiusSupported = true,
     staggeredSupported = true,
     midJobUpdateSupported = true,
+    jobShareSupported = true,
     miningRoute = miningRoute and {
       home = miningRoute.home, bottom = miningRoute.bottom, targetY = miningRoute.targetY,
       radius = miningRoute.radius,
@@ -3115,6 +3193,22 @@ function net.handleMessage(msg)
       local label = type(msg.args) == "table" and tostring(msg.args.label or "") or ""
       os.setComputerLabel(label ~= "" and label:sub(1, 32) or nil)
       changed()
+    elseif name == "jobUpdate" then
+      -- A turtle joining this job takes some of its columns. The new
+      -- settings are kept and switched to between two steps.
+      local a = type(msg.args) == "table" and msg.args or {}
+      local ok, res = pcall(function()
+        local current = fleetJob and fleetJob.args
+        if not (current and current.pattern == "staggered" and a.pattern == "staggered" and a.jobId ~= nil and a.jobId == current.jobId) then
+          error("Not on that job", 0)
+        end
+        return rowRoute.jobArgs(a)
+      end)
+      if ok then
+        fleetJob.nextArgs = res
+        saveState()
+      end
+      send({ type = "result", action = name, ok = ok, msg = ok and "Sharing its columns from the next step" or tostring(res) })
     elseif name == "update" and job then
       -- Mid-job, update at the next safe point; the job resumes after the reboot.
       updateRequested = true

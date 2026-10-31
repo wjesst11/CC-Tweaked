@@ -448,6 +448,86 @@ test("the way back out of a tunnel clears stone that lava and water formed in it
   assert(not sim.blocks[lkey(between)],"left the stone in its tunnel")
 end)
 
+test("each job counts the ore blocks it mines, and its receipt keeps the total",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  a.jobId="job-test"
+  -- Ore beside two tunnels and in one tunnel block itself.
+  sim.blocks[lkey({x=101,y=58,z=-54})]="minecraft:deepslate_diamond_ore"
+  sim.blocks[lkey({x=101,y=58,z=-53})]="minecraft:deepslate_diamond_ore"
+  sim.blocks[lkey({x=100,y=60,z=-56})]="minecraft:redstone_ore"
+  assert(tunnel(100,60))
+  local seen
+  sim.afterSave=function()
+    local job=api.state().fleetJob
+    if job and job.ores then seen=job.ores end
+  end
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  local receipt=api.state().lastFleetResult
+  assert(receipt.jobId=="job-test","the receipt lost the job ID")
+  assert(receipt.ores["minecraft:deepslate_diamond_ore"]==2 and receipt.ores["minecraft:redstone_ore"]==1,"ore counts were wrong")
+  assert(seen and seen["minecraft:deepslate_diamond_ore"],"the running job did not count ore")
+  assert(api.status().fleetJob==nil)
+end)
+
+test("a turtle joining a running job takes over columns, and between them they mine everything",function()
+  local r=6
+  local api,sim,files,a=setup(r,60,56,94,106)
+  a.jobId="job-share"
+  local stairs=function(home) return {x=home,y=a.y,z=stairZ(67-a.y,r)} end
+  local box=function(west,east) return {x1=west-1,x2=east+1,y1=a.low-1,y2=a.y,z1=-55-r-1,z2=-55+r+1} end
+  -- Early in pass 1, sweeping east at column 96: it keeps 94 to 100.
+  local sent,shared=false,nil
+  sim.afterSave=function()
+    local st=api.status().fleetJob
+    if not sent and st and st.at and st.at.pass==1 and st.at.x==96 then
+      sent=true
+      local update={}
+      for key,value in pairs(st.args) do update[key]=value end
+      update.first,update.last,update.x,update.veinBounds=94,100,94,box(94,100)
+      update.done={pass=1,cols={{94,95}}}
+      api.message({type="cmd",action="jobUpdate",args=update})
+    end
+    local job=api.state().fleetJob
+    if sent and not shared and job and job.args.last==100 then shared=job.args.first end
+  end
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  assert(sent and shared==94,"never switched to its narrower columns")
+  assert(table.concat(sim.prints,"\n"):find("now mining columns X 94 to 100",1,true))
+  -- The helper, at home on X 101, shares the same world.
+  local state=assert(load("return {pos={x=-1,y=0,z=0},heading=0}"))()
+  local helperFiles={[".minerdash_state"]=common.serialize(state)}
+  local api2,sim2=miner(helperFiles)
+  for _,field in ipairs({"blocks","refuse","chests","deposits","worldDrops"}) do sim2[field]=sim[field] end
+  sim2.pos,sim2.heading={x=-1,y=0,z=0},0
+  api2.config(fleetConfig())
+  api2.fix({x=-1,y=0,z=0},{x=101,y=67,z=-55})
+  api2.lease("granted")
+  sim2.beforeMove=function()
+    local route=api2.state().miningRoute
+    if route and route.phase=="toDepot" then api2.lease("granted") end
+  end
+  local b={}
+  for key,value in pairs(a) do b[key]=value end
+  b.routeHome,b.stairBottom={x=101,y=67,z=-55,facing="south"},stairs(101)
+  b.first,b.last,b.x,b.veinBounds,b.queueId=101,106,101,box(101,106),"helper"
+  b.done={pass=1,cols={}}
+  api2.command({action="fleetJob",args=b})
+  local state2=api2.state()
+  assert(not state2.fleetJob,"helper stopped: "..tostring(state2.fleetJob and state2.fleetJob.failed))
+  same(state2.world,b.routeHome)
+  for x=94,106 do
+    local home=x<=100 and 100 or 101
+    for y=a.low,a.y-1 do
+      if tunnel(x,y) then
+        local h=math.floor(math.sqrt(r*r-(x-home)^2))
+        for z=-55-h,-55+h do assert(not sim.blocks[lkey({x=x,y=y,z=z})],"tunnel block left at "..x..","..y..","..z) end
+      end
+    end
+  end
+end)
+
 test("go home drops junk before leaving the mine and keeps its treasure",function()
   local api,sim,files,a=stoppedDeep()
   sim.items[2],sim.slots[2]="minecraft:cobblestone",40

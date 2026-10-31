@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.2.6"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.2.8"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
 const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
@@ -360,6 +360,8 @@ function handle(msg) {
       el.hidden = false;
       el.className = `form-msg ${msg.ok ? "ok" : "error"}`;
       el.textContent = msg.msg;
+      if (state.joining) toast(msg.msg, msg.ok ? "info" : "warn");
+      state.joining = false;
       break;
     }
 
@@ -1281,6 +1283,7 @@ function renderFleet() {
   renderFleetPreview();
   renderJobQueue();
   renderDepotStatus();
+  renderJobOres(turtles);
   renderFleetMap(turtles, f);
 
   const sel = currentTurtle();
@@ -1292,6 +1295,56 @@ function renderFleet() {
   $("#btn-dock-here").disabled = !sel?.status?.world;
   $("#btn-dock-here").textContent = selName ? `Dock at ${selName}'s position` : "Dock at selected turtle";
   $("#btn-release-dock").disabled = state.depot.holder == null;
+}
+
+// "minecraft:deepslate_diamond_ore" and "minecraft:diamond_ore" are both diamond.
+function mineralName(block) {
+  const name = String(block).replace(/^.*:/, "").replace(/^deepslate_/, "").replace(/_ore$/, "").replace(/_/g, " ");
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+// Ore blocks mined by each fleet job, added up across its turtles. A running
+// job counts as it goes; a finished one keeps its total in the receipt.
+function renderJobOres(turtles) {
+  const jobs = new Map();
+  for (const t of turtles) {
+    const s = t.status ?? {};
+    const run = s.fleetJob;
+    const done = !run && s.lastFleetResult?.ores ? s.lastFleetResult : null;
+    if (!run && !done) continue;
+    // Jobs started before job IDs: queued ones share their queue entry.
+    const key = run ? run.args?.jobId ?? run.queueId?.split(":")[0] ?? "current" : done.jobId ?? done.id?.split(":")[0] ?? "last";
+    const job = jobs.get(key) ?? { id: run?.args?.jobId, args: run?.args, turtles: [], running: 0, ores: new Map() };
+    jobs.set(key, job);
+    job.args ??= run?.args;
+    job.turtles.push(nameOf(t));
+    if (run) job.running++;
+    for (const [block, n] of Object.entries((run ?? done).ores ?? {})) {
+      const mineral = mineralName(block);
+      job.ores.set(mineral, (job.ores.get(mineral) ?? 0) + (Number(n) || 0));
+    }
+  }
+  const box = $("#job-ores");
+  if (!jobs.size) {
+    box.innerHTML = `<p class="hint flush">Ore the turtles mine on a fleet job is added up here as they go.</p>`;
+    return;
+  }
+  box.innerHTML = [...jobs.values()].map((job) => {
+    const a = job.args;
+    const where = a?.pattern === "staggered" ? `Y ${a.yTop} to ${a.yBottom}` : a?.kind === "areaQuarry" ? `Y ${a.yTop} to ${a.yBottom}` : a ? `Y ${a.y}` : "Finished job";
+    const n = job.turtles.length;
+    const head = `${KIND_NAMES[a?.kind] ?? "Fleet job"} · ${where} · ${n} turtle${n === 1 ? "" : "s"}${job.running ? "" : " · finished"}`;
+    const rows = [...job.ores].sort((p, q) => q[1] - p[1]);
+    const total = rows.reduce((sum, [, n]) => sum + n, 0);
+    // A running staggered job can take more turtles: the ones picked above.
+    const join = job.running && job.id && a?.pattern === "staggered"
+      ? `<button type="button" class="btn sm" data-join-job="${escapeXml(job.id)}" title="Add the turtles picked in the fleet list to this job. Each takes some columns of a busy turtle on it.">Add picked turtles</button>`
+      : "";
+    return `<div class="ore-job"><div class="ore-head"><h3 title="${escapeXml(job.turtles.join(", "))}">${escapeXml(head)}</h3>${join}</div>` + (rows.length
+      ? `<ul class="ore-list">${rows.map(([name, n]) => `<li><span>${escapeXml(name)}</span><b>${fmt(n)}</b></li>`).join("")}</ul>` +
+        `<p class="hint flush">${fmt(total)} ore block${total === 1 ? "" : "s"} in all. Counting starts once turtles run script 2.2.8.</p>`
+      : `<p class="hint flush">No ore yet. Counting starts once turtles run script 2.2.8.</p>`) + "</div>";
+  }).join("");
 }
 
 function renderFleetWarnings(turtles, f) {
@@ -1974,6 +2027,17 @@ function bindEvents() {
       sendRaw({ type: "cmd", ids, action, args: {} });
     });
   }
+  $("#job-ores").addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-join-job]");
+    if (!btn) return;
+    const ids = pickedTurtles().map((t) => t.id);
+    if (!ids.length) {
+      toast("Pick the turtles to add in the fleet list first.", "warn");
+      return;
+    }
+    state.joining = true;
+    sendRaw({ type: "joinFleetJob", jobId: btn.dataset.joinJob, ids });
+  });
   $("#btn-bulk-rename").addEventListener("click", () => {
     $("#bulk-rename").hidden = false;
     renderBulkRenamePreview();
