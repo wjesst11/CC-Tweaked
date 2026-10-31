@@ -141,6 +141,7 @@ export class FleetJobQueue {
       const status = turtle.status;
       if (!status?.queueSupported) return `Update ${label}'s script to use the fleet queue`;
       if (job.kind === "branchMine" && !status.staircaseSupported) return `Update ${label}'s script to use staircase mining`;
+      if (job.kind === "branchMine" && !status.oreScanSupported) return `Update ${label}'s script to check every side for ore`;
       if (!status.gpsTrusted) return `Waiting for ${label}'s GPS position`;
       if (!idle(status)) return `Waiting for ${label} to finish its current work`;
     }

@@ -335,6 +335,7 @@ function readyTurtles(ids, kind) {
     else if (!t.freshStatus) skipped.push(`${nameOf(t)} is still reporting its status`);
     else if (!s.gpsTrusted) skipped.push(`${nameOf(t)} doesn't know its GPS facing yet`);
     else if (kind === "branchMine" && !s.staircaseSupported) skipped.push(`${nameOf(t)} needs the latest script for staircase mining`);
+    else if (kind === "branchMine" && !s.oreScanSupported) skipped.push(`${nameOf(t)} needs the latest script for complete side checks`);
     else if (s.job || s.fleetJob || s.queued > 0 || t.pendingFleetUntil > Date.now() || queueOwns(t.id)) skipped.push(`${nameOf(t)} is busy or has saved work`);
     else ready.push({ id: t.id, name: nameOf(t) });
   }

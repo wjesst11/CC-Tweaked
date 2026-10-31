@@ -370,11 +370,16 @@ export function createWorld(container, { onSelect, onOpen, nameOf }) {
       if (job.kind === "areaQuarry") {
         box = boxBetween({ x: job.x1, y: job.yBottom, z: job.z1 }, { x: job.x2, y: job.yTop, z: job.z2 });
       } else if (job.kind === "branchMine") {
-        const d = typeof job.dir === "number" ? job.dir : Math.max(0, COMPASS.indexOf(job.dir));
-        const step = [[0, -1], [1, 0], [0, 1], [-1, 0]][d];
-        const band = job.band ?? 0; // how far above and below its level it may mine
-        const end = { x: job.x + (job.length - 1) * step[0], y: job.y + 1 + band, z: job.z + (job.length - 1) * step[1] };
-        box = boxBetween({ x: job.x, y: job.y - band, z: job.z }, end);
+        if (job.veinBounds) {
+          const b = job.veinBounds;
+          box = boxBetween({ x: b.x1, y: b.y1, z: b.z1 }, { x: b.x2, y: b.y2, z: b.z2 });
+        } else {
+          const d = typeof job.dir === "number" ? job.dir : Math.max(0, COMPASS.indexOf(job.dir));
+          const step = [[0, -1], [1, 0], [0, 1], [-1, 0]][d];
+          const band = job.band ?? 0;
+          const end = { x: job.x + (job.length - 1) * step[0], y: job.y + 1 + band, z: job.z + (job.length - 1) * step[1] };
+          box = boxBetween({ x: job.x, y: job.y - band, z: job.z }, end);
+        }
       }
       if (box) groups.jobs.add(outline(box, accent, 0.7));
     }

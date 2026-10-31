@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "1.8.0"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "1.9.0"; // the turtle script this dashboard expects
 const FACING = ["+Z", "+X", "−Z", "−X"]; // local headings
 const COMPASS = ["north", "east", "south", "west"];
 const SIDES = { north: "North", east: "East", south: "South", west: "West", up: "Above", down: "Below" };
@@ -924,6 +924,24 @@ function syncStairEntrance() {
   }
 }
 
+// Ore-check bounds match the new all-side job planner, including the exposed
+// floor, ceiling and ends. Neighbouring turtles keep separate slices.
+function plannedOreBounds(params, index, count) {
+  if (!params.scan) return null;
+  const dir = COMPASS.indexOf(params.dir);
+  const right = (dir + 1) % 4;
+  const leftWidth = Math.max(index === 0 ? 1 : 0, Math.floor((params.spacing - 1) / 2));
+  const rightWidth = Math.max(index === count - 1 ? 1 : 0, Math.ceil((params.spacing - 1) / 2));
+  const ax = params.x - WORLD_STEP.x[dir] - leftWidth * WORLD_STEP.x[right];
+  const az = params.z - WORLD_STEP.z[dir] - leftWidth * WORLD_STEP.z[right];
+  const bx = params.x + params.length * WORLD_STEP.x[dir] + rightWidth * WORLD_STEP.x[right];
+  const bz = params.z + params.length * WORLD_STEP.z[dir] + rightWidth * WORLD_STEP.z[right];
+  return {
+    x1: Math.min(ax, bx), y1: Math.max(-64, params.y - (params.band ?? 0) - 1), z1: Math.min(az, bz),
+    x2: Math.max(ax, bx), y2: Math.min(319, params.y + (params.band ?? 0) + 2), z2: Math.max(az, bz),
+  };
+}
+
 function plannedFleetJob() {
   const { kind, params: p } = fleetParams();
   if (kind === "areaQuarry") {
@@ -941,11 +959,17 @@ function plannedFleetJob() {
       x1: x, z1: z, x2: x + (p.length - 1) * WORLD_STEP.x[dir], z2: z + (p.length - 1) * WORLD_STEP.z[dir],
       label: `Planned tunnel ${k + 1} at Y ${p.y ?? "?"}`,
     };
+    const bounds = plannedOreBounds({ ...p, x, z }, k, n);
+    const plans = bounds ? [{
+      ...bounds, scans: true,
+      label: `Planned all-side ore checks ${k + 1}: X ${span(bounds.x1, bounds.x2)}, Y ${span(bounds.y1, bounds.y2)}, Z ${span(bounds.z1, bounds.z2)}`,
+    }, tunnel] : [tunnel];
     const entrance = stairEntrance({ ...p, x, z });
-    return entrance?.depth > 0 ? [tunnel, {
+    if (entrance?.depth > 0) plans.push({
       x1: entrance.x, z1: entrance.z, x2: x, z2: z, stairs: true,
       label: `Planned staircase ${k + 1}: ${entrance.x}, ${entrance.y}, ${entrance.z} to ${x}, ${p.y}, ${z}; 1 forward, 1 down`,
-    }] : [tunnel];
+    });
+    return plans;
   }).flat();
 }
 
@@ -1196,11 +1220,19 @@ function appendLog(entry) {
 function jobBox(args) {
   if (args?.kind === "areaQuarry") return { x1: args.x1, z1: args.z1, x2: args.x2, z2: args.z2 };
   if (args?.kind === "branchMine") {
+    const entrance = args.access === "stairs" ? stairEntrance(args) : null;
+    if (args.veinBounds) {
+      const bounds = args.veinBounds;
+      return entrance ? {
+        ...bounds,
+        x1: Math.min(bounds.x1, entrance.x), z1: Math.min(bounds.z1, entrance.z),
+        x2: Math.max(bounds.x2, entrance.x), z2: Math.max(bounds.z2, entrance.z),
+      } : bounds;
+    }
     const d = COMPASS.indexOf(args.dir);
     const dir = d >= 0 ? d : Number(args.dir) || 0;
     const ex = args.x + (args.length - 1) * [0, 1, 0, -1][dir];
     const ez = args.z + (args.length - 1) * [-1, 0, 1, 0][dir];
-    const entrance = args.access === "stairs" ? stairEntrance(args) : null;
     return { x1: entrance?.x ?? args.x, z1: entrance?.z ?? args.z, x2: ex, z2: ez };
   }
   return null;
@@ -1328,11 +1360,18 @@ function renderFleetPreview() {
       const levels = levelOffsets(p.y, p.band ?? 0).map((off) => p.y + off);
       const item = $("#fleet-job-form").elements.namedItem("goalItem").selectedOptions[0]?.textContent.toLowerCase();
       text = `${n} turtle${n === 1 ? "" : "s"} heading ${p.dir}` +
-        (n > 1 ? `, ${p.spacing} apart going ${COMPASS[(COMPASS.indexOf(p.dir) + 1) % 4]}` : "") +
+        (n > 1 ? `, ${p.spacing} blocks center to center (${p.spacing - 1} solid block${p.spacing === 2 ? "" : "s"} between tunnels) going ${COMPASS[(COMPASS.indexOf(p.dir) + 1) % 4]}` : "") +
         `. ${n > 1 ? "First entrance" : "Entrance"} X ${entrance.x}, Y ${entrance.y}, Z ${entrance.z} → bottom X ${p.x}, Y ${p.y}, Z ${p.z}. ` +
         (entrance.depth ? `${entrance.depth}-step staircase (1 forward, 1 down), then ` : "No descent needed; ") +
         `tunnelling at Y ${levels.join(", ")} up to ${p.length} blocks out. ` +
-        (p.goal > 0 ? `Each comes back once it has ${p.goal} ${item}.` : "Each mines its whole area.");
+        (p.goal > 0 ? `Each stops early once it has ${p.goal} ${item}.` : "Goal 0: each mines its whole planned area.");
+      if (p.scan) {
+        const bounds = plannedOreBounds(p, 0, n);
+        text += ` All six faces are checked at both tunnel heights, including the front and back ends, floor and ceiling (Y ${span(bounds.y1, bounds.y2)}).`;
+      } else {
+        text += " Ore checks are off; only the planned tunnels are mined.";
+      }
+      if (p.spacing >= 4) text += " Spacing 4 or more leaves hidden rock between tunnels that side checks cannot inspect.";
     } else {
       text = p.entryY != null && p.y != null && p.entryY < p.y
         ? "Stair entrance Y must be at or above the target level."
@@ -1483,7 +1522,7 @@ function renderFleetMap(turtles, f) {
   for (const p of plans) {
     out += p.stairs
       ? `<line class="plan-stairs" x1="${v.sx(p.x1)}" y1="${v.sy(p.z1)}" x2="${v.sx(p.x2)}" y2="${v.sy(p.z2)}"><title>${escapeXml(p.label)}</title></line>`
-      : rect(v, p.x1, p.z1, p.x2, p.z2, "plan", p.label);
+      : rect(v, p.x1, p.z1, p.x2, p.z2, p.scans ? "plan-scan" : "plan", p.label);
   }
   for (const { t, box } of jobs) {
     const a = t.status.fleetJob.args;

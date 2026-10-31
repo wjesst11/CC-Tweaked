@@ -20,7 +20,7 @@
 --    Turtles share where they are, so they steer around each other.
 -- Protected blocks and areas are never dug or built in, by any job or command.
 
-local VERSION = "1.8.0"
+local VERSION = "1.9.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1513,23 +1513,38 @@ local function stepBack(p)
   goTo(p, "xyz")
 end
 
+local function checkpointVein(veins)
+  if veins.checkpoint then veins.checkpoint() end
+end
+
+local function cutVein(veins)
+  veins.cut = { table.unpack(veins.path) }
+  checkpointVein(veins)
+end
+
 local function mineVein(dir, veins, depth)
-  if veins.left <= 0 or depth > 10 or veins.cut then return end
+  if veins.cut then return end
   local found, block = SIDES[dir].inspect()
   if not (found and isVein(block)) or protection(dir, block) then return end
   if veins.allowed and not veins.allowed(toWorld(neighbour(dir))) then return end
-  if veins.full and veins.full(depth + 1) then
-    veins.cut = { table.unpack(veins.path) }
+  -- A bounded pass yields at an observed ore block, rather than silently
+  -- abandoning a large or deep vein. Replay reaches this point next time.
+  if veins.left <= 0 or (veins.full and veins.full(#veins.path + 1)) then
+    cutVein(veins)
     return
   end
   veins.left = veins.left - 1
   local back = here()
+  -- Save the intended step before movement saves its new position. A reboot
+  -- can then replay the seed even if the ore vanished during that move.
+  veins.path[#veins.path + 1] = toWorld(neighbour(dir))
+  checkpointVein(veins)
   digMove(dir)
-  veins.path[#veins.path + 1] = toWorld(pos)
   -- Coming in sideways, the block behind is the one it came from.
   exploreHere(veins, depth + 1, dir == "forward" and (back.heading + 2) % 4 or nil)
-  table.remove(veins.path)
   stepBack(back)
+  table.remove(veins.path)
+  checkpointVein(veins)
 end
 
 -- Follow the vein from every side of the block it's in (except `behind`, a
@@ -1560,11 +1575,15 @@ local function resumeVein(veins, path)
   for i, w in ipairs(path) do
     goWorld(w, "xyz")
     veins.path[i] = w
+    checkpointVein(veins)
   end
+  veins.resume = nil
+  checkpointVein(veins)
   for i = #path, 1, -1 do
     exploreHere(veins, i)
     table.remove(veins.path)
     if i > 1 then goWorld(path[i - 1], "xyz") end
+    checkpointVein(veins)
   end
   goTo(start, "xyz")
   face(start.heading)
@@ -1683,6 +1702,8 @@ KINDS.branchMine = {
   total = function(a) return a.length * #levelsOf(a) end,
   entry = branchEntry,
   accessCost = function(a, w)
+    -- Ore detours inside the planned work region are not another stair entry.
+    if a.coverage == "allSides" and type(a.veinBounds) == "table" and inBox(w, a.veinBounds) then return 0 end
     return a.access == "stairs" and not KINDS.branchMine.inside(a, w) and 2 * (a.entryY - a.y) or 0
   end,
   cell = tunnelCell,
@@ -1696,6 +1717,7 @@ KINDS.branchMine = {
   -- Veins stay within the band and this turtle's slice: up to halfway to the
   -- next turtle's tunnel on either side.
   mayDig = function(a, w)
+    if a.coverage == "allSides" then return type(a.veinBounds) == "table" and inBox(w, a.veinBounds) end
     if a.band == nil then return true end -- a job from before height bands
     local s, x, d = a.spacing or 3, across(a, w), along(a, w)
     return w.y >= a.y - a.band and w.y <= a.y + 1 + a.band and d >= 0 and d < a.length
@@ -1712,6 +1734,39 @@ KINDS.branchMine = {
   -- Both walls, the nearer first: four turns a block, whichever way along the
   -- tunnel it's going.
   work = function(a, i, veins)
+    if a.coverage == "allSides" then
+      local root = here()
+      local function finish()
+        if not samePos(pos, root) then stepBack(root) end
+        face(root.heading)
+        return not veins.cut
+      end
+      local upper = toWorld({ x = pos.x, y = pos.y + 1, z = pos.z })
+      if veins.allowed and not veins.allowed(upper) then error("Tunnel headroom is outside its planned mining bounds", 0) end
+      if not a.scan then branchClearHeadroom() return true end
+      if veins.resume then
+        resumeVein(veins, veins.resume)
+        if veins.cut then return finish() end
+      end
+      -- Follow an ore headroom seed before clearing the tunnel's upper cell.
+      exploreHere(veins, 0)
+      if veins.cut then return finish() end
+      branchClearHeadroom()
+      if veins.full and veins.full(1) then
+        cutVein(veins)
+        return finish()
+      end
+      -- Keep the ordinary upper-cell move in the lower-root path. Depot and
+      -- reboot recovery can replay it, including a reboot during the move.
+      veins.path[#veins.path + 1] = toWorld(neighbour("up"))
+      checkpointVein(veins)
+      digMove("up")
+      exploreHere(veins, 1)
+      stepBack(root)
+      table.remove(veins.path)
+      checkpointVein(veins)
+      return finish()
+    end
     branchClearHeadroom()
     if not a.scan then return true end
     if veins.resume then resumeVein(veins, veins.resume) end
@@ -1905,9 +1960,16 @@ local function fleetWork()
     return fleetJob.step >= total or (goal ~= nil and (fleetJob.found or 0) >= goal.count)
   end
 
+  -- Cover replaying a saved route before another bounded exploration pass.
+  -- The extra detour allowance also covers the endpoint's return estimate.
+  local function continuationFuel()
+    local replay = fleetJob.vein and #fleetJob.vein or 0
+    return roundTrip(k, a, 2 * replay) + replay
+  end
+
   local function visit()
     tally()
-    local need = roundTrip(k, a)
+    local need = continuationFuel()
     fleetJob.phase = "depot"
     saveState()
     leaveWork(k, a)
@@ -1922,7 +1984,7 @@ local function fleetWork()
   -- nearly full or hasn't the fuel to get there and back. After a step cut
   -- short (a vein it had no room or fuel to finish), it wants a bit more.
   local function service(cut)
-    local need = roundTrip(k, a) + (cut and 64 or 0)
+    local need = continuationFuel() + (cut and 64 or 0)
     if emptySlots() > 2 and fuelLevel() >= need then return end
     tally()
     refuelFromInventory(need + 200)
@@ -1933,6 +1995,14 @@ local function fleetWork()
   local veins = { left = 0 }
   if k.mayDig then veins.allowed = function(w) return k.mayDig(a, w) end end
   veins.full = function(depth) return emptySlots() <= 1 or fuelLevel() < roundTrip(k, a, depth) end
+  if a.coverage == "allSides" then
+    veins.checkpoint = function()
+      if not fleetJob then return end
+      local path = veins.cut or veins.resume or veins.path
+      fleetJob.vein = path and { table.unpack(path) } or nil
+      saveState()
+    end
+  end
 
   local ok, err = pcall(function()
     if fleetJob.phase == "depot" then visit() end
@@ -2015,6 +2085,22 @@ function jobs.fleetJob(a)
         error("Entrance Y must be a whole number from the mining level up to 318", 0)
       end
       args.access, args.entryY = "stairs", entryY
+    end
+    if a.coverage == "allSides" then
+      local bounds = a.veinBounds
+      if type(bounds) ~= "table" then error("All-side scanning needs planned vein bounds", 0) end
+      local validated = {}
+      for _, key in ipairs({ "x1", "y1", "z1", "x2", "y2", "z2" }) do
+        local value = tonumber(bounds[key])
+        local vertical = key:sub(1, 1) == "y"
+        if not value or value ~= math.floor(value) or value < (vertical and -64 or -3e7)
+          or value > (vertical and 319 or 3e7) then error("Invalid planned vein bounds", 0) end
+        validated[key] = value
+      end
+      if validated.x1 > validated.x2 or validated.y1 > validated.y2 or validated.z1 > validated.z2 then
+        error("Invalid planned vein bounds", 0)
+      end
+      args.coverage, args.veinBounds = "allSides", validated
     end
     args.levels = levelOffsets(args.y, args.band or 0)
   elseif a.kind == "areaQuarry" then
@@ -2314,6 +2400,7 @@ local function status()
     around = around,
     queued = #queue,
     queueSupported = true,
+    oreScanSupported = true,
     staircaseSupported = true,
     forceHomeSupported = true,
     lastFleetResult = lastFleetResult,

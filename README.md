@@ -76,10 +76,11 @@ A home doesn't need open sky directly above it, but it does need some open way o
 
 Pick turtles in the picker (**All ready** selects every online, idle turtle that knows its GPS facing), then:
 
-- **Mine a level.** Choose an ore preset or a Y level, a start point and a direction, then the goal: how many of what each turtle should bring back (say 64 diamonds, or 0 for no goal).
-  - **Its own slice of rock.** Each turtle digs its own 2-high tunnel, *spacing* blocks apart, and mines any ore veins it sees in the floor and walls.
-  - **Height band.** **Stay within** sets how far above and below the level it may go. Once it reaches **Go at most** blocks out, it starts a new tunnel 3 blocks up, and later 3 blocks down, as long as those stay inside the band. It keeps going until it reaches its goal or has mined its whole slice.
-  - **What it digs.** Veins are followed only inside the turtle's band and its slice (halfway to the next turtle's tunnel on each side). A vein that runs into a protected area is left there.
+- **Mine a level.** Choose an ore preset or a Y level, a start point and a direction. The defaults mine the whole planned length on one level: **Tunnel spacing 2**, **Extra levels 0**, and **Goal 0**. Set a positive goal, such as 64 diamonds, only when you want each turtle to finish early after collecting that amount.
+  - **One block between lanes.** Spacing counts tunnel centers, so 2 leaves one solid block between neighboring 1-wide, 2-high tunnels. Turtles mine parallel lanes on the same level, with each shared wall assigned to exactly one turtle. Spacing 3 leaves two solid blocks; spacing 4 or more leaves hidden rock that side inspection cannot expose.
+  - **Every exposed side.** With **Check all sides for ore** enabled, each numbered tunnel position is inspected on all six faces at both the lower and upper height, including upper walls, ceiling, floor, and tunnel ends. Headroom ore is followed before it is cleared. Large veins are finished over multiple saved passes instead of being abandoned at a per-pass limit. Depot trips resume the exact vein path, including an upper-height scan.
+  - **Extra levels.** **Extra levels (± Y)** defaults to 0 to stay on one level. Increase it to add tunnels every 3 blocks above and below within that range. Once it reaches **Go at most** blocks out, it starts the next tunnel. It keeps going until it reaches its goal or has mined its planned slice.
+  - **What it digs.** New all-side jobs include a checked one-block allowance for exposed floor, ceiling and tunnel ends, plus the outside walls of the outermost lanes. Veins stay inside the bounds shown on the map; shared walls never belong to two turtles. Protected blocks and areas remain protected. This checks exposed ore, rather than guaranteeing ore hidden beyond the checked layer or behind wider gaps. Saved older jobs retain their original bounds until you start a new job.
   - **Getting down.** New level jobs use a diagonal staircase: one block forward, one block down, with two blocks of headroom. X/Z specify the tunnel bottom; **Stair entrance Y** sets its top. The entrance is that many blocks behind the tunnel bottom, opposite the mining direction. Choose an entrance that opens into air. The preview and map show it before you start. Existing saved jobs retain their original access route when resumed.
 - **Quarry an area.** Two corners plus top and bottom Y. The area is split into one strip per turtle. Only blocks inside the box are dug: turtles drop in from above through open air, so set the top at ground level. Anything above it, like trees, is left alone. A box whose top is buried is refused rather than dug down to.
 
@@ -94,7 +95,7 @@ The planned area is outlined on the fleet map before you start. Each turtle flie
 It keeps the same again for the trip back out, plus a margin. At the depot it takes on at least that much, even if **Refuel to** is set lower.
 
 Before anything starts, the server checks the job. If anything fails, it refuses and tells you why:
-- **Protected areas:** no turtle's slice, height band, or access stair may reach into one. Stair headroom is checked too.
+- **Protected areas:** no turtle's slice, ore-check allowance, height band, or access stair may reach into one. Stair headroom is checked too.
 - **The depot:** no job or staircase may dig at the depot or where turtles wait for it.
 - **Homes:** no mining area or staircase may dig out a turtle's home.
 
@@ -110,6 +111,8 @@ If a turtle reboots mid-job, it picks the job back up by itself.
 The journal holds 100,000 cells. At that limit the turtle refuses new unexplored moves and keeps its existing return route, rather than deleting it. Home navigation can take open shortcuts, but it never digs a new path: only fallen blocks in cells it previously visited may be cleared, subject to protection rules.
 
 **Force home** is a separate recovery command on the turtle page and in the fleet's picked-turtle controls. It cancels the current job and returns directly home, mining ordinary blocks when needed. Chests, other ComputerCraft blocks, configured protected blocks, restricted areas, and other turtles remain protected; it plans around obstacles it cannot dig. It preserves the saved home and return history. Normal **Go home** and **Recall** continue to use open routes. Update turtles to **1.8.0** for staircase mining and Force home.
+
+Update idle turtles to **1.9.0**, then start a new level job to use the closer spacing and all-side scan. The server waits for clients that support the new scan before dispatching those jobs.
 
 ## Automatic fleet queue
 

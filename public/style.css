@@ -484,6 +484,7 @@ textarea {
 .map .job-area { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: var(--accent); stroke-width: 1; }
 .map .plan { fill: color-mix(in srgb, var(--accent) 8%, transparent); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 3; }
 .map .plan-stairs { fill: none; stroke: var(--accent); stroke-width: 3; stroke-dasharray: 2 3; stroke-linecap: round; }
+.map .plan-scan { fill: color-mix(in srgb, var(--accent) 4%, transparent); stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.6; }
 .map .home-dot { fill: none; stroke: var(--ink-2); stroke-width: 1.5; }
 .map .selected-ring { fill: none; stroke: var(--ink); stroke-width: 1.5; }
 .map .map-label { fill: var(--ink); font: 600 11px var(--font); paint-order: stroke; stroke: var(--page); stroke-width: 3px; }
@@ -505,6 +506,7 @@ textarea {
 .key-depot { width: 10px; height: 10px; border: 2px solid var(--ink); border-radius: 2px; }
 .key-area { width: 12px; height: 9px; border: 1.5px dashed var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
 .key-plan { width: 12px; height: 9px; border: 1.5px dashed var(--accent); }
+.key-scan { width: 12px; height: 9px; border: 1px dotted var(--accent); background: color-mix(in srgb, var(--accent) 4%, transparent); opacity: 0.6; }
 .key-job { width: 12px; height: 9px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
 .banner {

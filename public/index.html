@@ -397,10 +397,10 @@
                     <div class="fields">
                       <label class="field"><span>Tunnel bottom X</span><input name="x" type="number" required></label>
                       <label class="field"><span>Tunnel bottom Z</span><input name="z" type="number" required></label>
-                      <label class="field"><span>Spacing</span><input name="spacing" type="number" min="2" max="16" value="3" required></label>
+                      <label class="field"><span>Tunnel spacing</span><input name="spacing" type="number" min="2" max="16" value="2" required></label>
                     </div>
                     <div class="fields">
-                      <label class="field"><span>Each brings back</span><input name="goal" type="number" min="0" max="100000" value="64" required></label>
+                      <label class="field"><span>Each brings back</span><input name="goal" type="number" min="0" max="100000" value="0" required></label>
                       <label class="field"><span>Of</span>
                         <select name="goalItem">
                           <option value="diamond">Diamonds</option>
@@ -415,14 +415,16 @@
                           <option value="valuables">Any valuables</option>
                         </select>
                       </label>
-                      <label class="field"><span>Stay within (± Y)</span><input name="band" type="number" min="0" max="16" value="4" required></label>
+                      <label class="field"><span>Extra levels (± Y)</span><input name="band" type="number" min="0" max="16" value="0" required></label>
                       <label class="field"><span>Go at most (blocks)</span><input name="length" type="number" min="1" max="1024" value="128" required></label>
                     </div>
                     <div class="row between">
                       <button type="button" class="btn sm" data-use-pos="x,z">Bottom at selected turtle</button>
-                      <label class="check"><input name="scan" type="checkbox" checked><span>Mine ore veins in the walls</span></label>
+                      <label class="check"><input name="scan" type="checkbox" checked><span>Check all sides for ore</span></label>
                     </div>
-                    <p class="hint flush">Each turtle enters by a staircase, moving 1 block forward and 1 down toward the tunnel bottom. The entrance lies behind the bottom in the chosen direction; every block down needs one block of horizontal space. Pick an entrance in the open, away from builds. Turtles mine until they bring back their goal (0 means no goal), adding tunnels 3 blocks above and below within the height you set. When fuel or space runs low, they go to the depot and return to where they left off.</p>
+                    <p class="hint flush">Spacing counts tunnel centers: 2 leaves one solid block between tunnels. Extra levels 0 keeps miners on the selected level. Goal 0 mines the whole planned area; a positive goal stops each turtle early.</p>
+                    <p class="hint flush">All-side checks inspect all six faces at both tunnel heights, following ore inside each turtle's assigned bounds. Protected blocks and areas stay protected.</p>
+                    <p class="hint flush">Each turtle enters by a staircase, moving 1 block forward and 1 down toward the tunnel bottom. The entrance lies behind the bottom; every block down needs one block of horizontal space. Pick an entrance in the open, away from builds. Extra tunnels are added every 3 blocks above and below within the range you set. When fuel or space runs low, turtles go to the depot and return to where they left off.</p>
                   </div>
                   <div data-kind="areaQuarry" hidden>
                     <div class="corner-row">
@@ -517,6 +519,7 @@
                   <li><span class="key key-area"></span>Protected</li>
                   <li><span class="key key-job"></span>Job area</li>
                   <li><span class="key key-plan"></span>Planned</li>
+                  <li><span class="key key-scan"></span>Planned ore checks</li>
                 </ul>
               </section>
             </div>

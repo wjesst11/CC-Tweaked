@@ -122,7 +122,7 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     const dir = COMPASS.indexOf(params.dir);
     const [x, z, y] = [coord(params.x), coord(params.z), height(params.y)];
     const length = int(params.length, 1, 1024);
-    const spacing = int(params.spacing ?? 3, 2, 16);
+    const spacing = int(params.spacing ?? 2, 2, 16);
     const band = int(params.band ?? 0, 0, 16);
     const goal = int(params.goal ?? 0, 0, 100_000);
     const goalItem = params.goalItem ?? "valuables";
@@ -138,17 +138,27 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     // either side (for veins) and the height band above and below.
     const [left, rightSide] = [Math.floor((spacing - 1) / 2), Math.ceil((spacing - 1) / 2)];
     const [y1, y2] = [Math.max(-64, y - band), Math.min(319, y + 1 + band)];
+    const scan = params.scan !== false;
     jobs = ready.map((_, k) => {
       const sx = x + k * spacing * CX[right];
       const sz = z + k * spacing * CZ[right];
       const ex = sx + (length - 1) * CX[dir];
       const ez = sz + (length - 1) * CZ[dir];
+      // Shared walls have a single owner. The outer lanes also own their
+      // exposed outside wall, even with the one-block gap of spacing 2.
+      const sliceLeft = scan && k === 0 ? Math.max(1, left) : left;
+      const sliceRight = scan && k === ready.length - 1 ? Math.max(1, rightSide) : rightSide;
+      const halo = scan ? 1 : 0;
+      const volume = box(
+        sx - halo * CX[dir] - sliceLeft * CX[right], Math.max(-64, y1 - halo), sz - halo * CZ[dir] - sliceLeft * CZ[right],
+        ex + halo * CX[dir] + sliceRight * CX[right], Math.min(319, y2 + halo), ez + halo * CZ[dir] + sliceRight * CZ[right],
+      );
       return {
-        args: { kind, x: sx, z: sz, y, dir: COMPASS[dir], length, scan: params.scan !== false, spacing, band, goal, goalItem, access: "stairs", entryY },
-        volume: box(
-          sx - left * CX[right], y1, sz - left * CZ[right],
-          ex + rightSide * CX[right], y2, ez + rightSide * CZ[right],
-        ),
+        args: {
+          kind, x: sx, z: sz, y, dir: COMPASS[dir], length, scan, spacing, band, goal, goalItem, access: "stairs", entryY,
+          ...(scan ? { coverage: "allSides", veinBounds: volume } : {}),
+        },
+        volume,
         // Exact 2-high staircase columns, descending towards the tunnel start.
         access: Array.from({ length: entryY - y + 1 }, (_, rise) => {
           const px = sx - rise * CX[dir], pz = sz - rise * CZ[dir];

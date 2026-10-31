@@ -9,7 +9,7 @@ function fleet() {
   };
 }
 
-const settings = { x: 100, y: 50, z: 100, dir: "north", length: 10, entryY: 54 };
+const settings = { x: 100, y: 50, z: 100, dir: "north", length: 10, entryY: 54, spacing: 3 };
 const ready = [{ id: 1, name: "One" }, { id: 2, name: "Two" }];
 const point = (x, y, z, name = "Protected") => ({ name, x1: x, x2: x, y1: y, y2: y, z1: z, z2: z });
 const plan = (f = fleet(), params = settings, selected = ready.slice(0, 1), homes = []) =>
@@ -24,7 +24,7 @@ test("new branch assignments carry deterministic staircase access and preserve t
     { id: 1, x: 100, y: 50, z: 100, access: "stairs", entryY: 54 },
     { id: 2, x: 103, y: 50, z: 100, access: "stairs", entryY: 54 },
   ]);
-  assert.deepEqual(result.assignments[0].volume, { x1: 99, x2: 101, y1: 50, y2: 51, z1: 91, z2: 100 });
+  assert.deepEqual(result.assignments[0].volume, { x1: 99, x2: 101, y1: 49, y2: 52, z1: 90, z2: 101 });
 });
 
 test("defaults entrance Y to the depot level, or the target level when higher", () => {

@@ -3,7 +3,7 @@ import test from "node:test";
 import { FleetJobQueue } from "../fleet-queue.js";
 
 function ready(label = "Miner") {
-  return { online: true, fresh: true, label, status: { queueSupported: true, staircaseSupported: true, gpsTrusted: true, queued: 0 } };
+  return { online: true, fresh: true, label, status: { queueSupported: true, staircaseSupported: true, oreScanSupported: true, gpsTrusted: true, queued: 0 } };
 }
 
 function setup(state) {
@@ -39,7 +39,7 @@ function setup(state) {
     failWrites: (value) => { failWrites = value; },
     add: (ids = [1], params = {}) => queue.add({ kind: "branchMine", params, ids }),
     finish: (id, queueId, extra = {}) => {
-      turtles.get(id).status = { queueSupported: true, staircaseSupported: true, gpsTrusted: true, lastFleetResult: { id: queueId, ok: true }, ...extra };
+      turtles.get(id).status = { queueSupported: true, staircaseSupported: true, oreScanSupported: true, gpsTrusted: true, lastFleetResult: { id: queueId, ok: true }, ...extra };
     },
   };
 }
@@ -75,6 +75,7 @@ test("waits for every selected turtle to be online, fresh, updated, GPS ready, a
     ["stale status", { fresh: false }],
     ["old script", { status: { gpsTrusted: true } }],
     ["no staircase support", { status: { queueSupported: true, staircaseSupported: false, gpsTrusted: true } }],
+    ["no all-side scan support", { status: { queueSupported: true, staircaseSupported: true, oreScanSupported: false, gpsTrusted: true } }],
     ["untrusted GPS", { status: { queueSupported: true, gpsTrusted: false } }],
     ["active job", { status: { queueSupported: true, gpsTrusted: true, job: { name: "quarry" } } }],
     ["saved fleet job", { status: { queueSupported: true, gpsTrusted: true, fleetJob: {} } }],
