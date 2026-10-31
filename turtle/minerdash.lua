@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.2.1"
+local VERSION = "2.2.2"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -973,6 +973,19 @@ local function fuelLimit()
 end
 
 -- Burn fuel items from the inventory until fuel >= target. Returns success.
+-- Burn fuel from the selected slot until fuel reaches target (or the slot
+-- is empty). Each refuel call takes a game tick, so it burns one item to
+-- learn what an item is worth, then all it needs in a single call.
+local function refuelSelected(target)
+  target = math.min(target, fuelLimit())
+  local before = fuelLevel()
+  if before >= target or turtle.getItemCount() == 0 or not turtle.refuel(1) then return end
+  local each = fuelLevel() - before
+  if each > 0 and fuelLevel() < target and turtle.getItemCount() > 0 then
+    turtle.refuel(math.min(turtle.getItemCount(), math.ceil((target - fuelLevel()) / each)))
+  end
+end
+
 local function refuelFromInventory(target)
   target = math.min(target, fuelLimit())
   if fuelLevel() >= target then return true end
@@ -981,7 +994,7 @@ local function refuelFromInventory(target)
     if fuelLevel() >= target then break end
     if turtle.getItemCount(slot) > 0 then
       turtle.select(slot)
-      while fuelLevel() < target and turtle.refuel(1) do end
+      refuelSelected(target)
     end
   end
   turtle.select(selected)
@@ -1370,7 +1383,7 @@ local function dockWork(minFuel)
   local function stowFuel(slot)
     turtle.select(slot)
     dockDrop(D.fuel)
-    while turtle.getItemCount(slot) > 0 and fuelLevel() < fuelLimit() and turtle.refuel(1) do end
+    refuelSelected(fuelLimit())
     for _, cat in ipairs({ "valuables", "junk" }) do
       if turtle.getItemCount(slot) > 0 then dockDrop(D[cat]) end
     end
@@ -1381,7 +1394,7 @@ local function dockWork(minFuel)
       local cat = category(item.name)
       if cat == "fuel" then
         turtle.select(slot)
-        while fuelLevel() < target and turtle.refuel(1) do end
+        refuelSelected(target)
       end
       if turtle.getItemCount(slot) > 0 then table.insert(slots[cat], slot) end
     end
@@ -1404,7 +1417,7 @@ local function dockWork(minFuel)
     turtle.select(slot)
     local before = fuelLevel()
     if dockSuck(D.fuel) then
-      while fuelLevel() < target and turtle.refuel(1) do end
+      refuelSelected(target)
       if turtle.getItemCount(slot) > 0 then stowFuel(slot) end
     end
     if fuelLevel() == before then

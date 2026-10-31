@@ -99,6 +99,21 @@ test("surplus coal a full fuel chest can't take is burnt into the tank rather th
   assert(sim.fuel==20000+64*80,"surplus coal was not burnt")
 end)
 
+test("refuelling burns what it needs in a couple of calls, not one coal at a time",function()
+  local api,sim,files,a,f=setup()
+  api.row.ensure(a)
+  api.row.surface(f.depot)
+  sim.fuel=0
+  local calls,refuel=0,sim.turtle.refuel
+  sim.turtle.refuel=function(...) calls=calls+1; return refuel(...) end
+  local problem=api.dockWork(500)
+  assert(problem==nil,tostring(problem))
+  assert(sim.fuel==10000,"refuelled to "..sim.fuel.." instead of the 10000 target")
+  -- Two stacks from the chest: one coal to learn its worth, then the rest.
+  assert(calls<=4,"took "..calls.." refuel calls")
+  for slot=1,16 do assert((sim.slots[slot] or 0)==0,"kept fuel in slot "..slot) end
+end)
+
 test("with a full tank, surplus coal is stored with the valuables rather than carried",function()
   local api,sim,files,a,f=setup()
   api.row.ensure(a)
