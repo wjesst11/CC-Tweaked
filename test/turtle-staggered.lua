@@ -783,5 +783,24 @@ test("an off-route turtle at or above the Home floor, or with no Home area, stay
   end
 end)
 
+test("rock blocking its saved way back is dug through only below the Home protected area",function()
+  for _,guarded in ipairs({true,false}) do
+    local api,sim,files,a=stoppedDeep()
+    -- On its way along the tunnel to the shaft.
+    local cell=lkey({x=99,y=58,z=-53})
+    sim.blocks[cell]="minecraft:deepslate"
+    api.protection(guarded and {homeArea(64)} or {})
+    local p=sim.pos
+    api.command({action="goHome"})
+    if guarded then
+      same(api.state().world,a.routeHome)
+      assert(sim.blocks[cell]==nil,"didn't dig the rock")
+    else
+      same(sim.pos,p)
+      assert(sim.blocks[cell]=="minecraft:deepslate","dug a new route with no Home area below it")
+    end
+  end
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

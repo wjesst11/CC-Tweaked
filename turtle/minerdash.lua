@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.8"
+local VERSION = "2.3.9"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1726,8 +1726,15 @@ function rowRoute.walkStep(w, known)
       if found and not LIQUIDS[block.name] then
         local reason = protection(dir, block)
         if reason then error("Saved route blocked: " .. reason, 0) end
-        if not (nav.hasFallen(block.name) or rowRoute.REFILL[block.name]) then
+        -- Below the protected area named Home, anything else in the way of
+        -- its saved route is dug through too, so it can always get back.
+        local floor = rowRoute.homeFloor()
+        local below = floor and current.y < floor and w.y < floor
+        if not (nav.hasFallen(block.name) or rowRoute.REFILL[block.name] or below) then
           error("Saved route blocked by " .. block.name .. "; it will not dig a new route", 0)
+        end
+        if below and not (nav.hasFallen(block.name) or rowRoute.REFILL[block.name]) then
+          log("warn", ("Saved route blocked by %s at %d, %d, %d: below the Home area, digging through"):format(block.name, w.x, w.y, w.z))
         end
         local dug, why = SIDES[dir].dig()
         if not dug then error("Can't clear " .. block.name .. " from its saved route: " .. tostring(why), 0) end
