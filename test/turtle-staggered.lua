@@ -914,5 +914,39 @@ test("a move cut short that GPS never settled is fixed by stepping aside and bac
   assert(said,"didn't say it was settling a cut-short move")
 end)
 
+test("outside its radius in a shaft, or at the corridor level, it walks back into the circle first",function()
+  -- Local heading for each compass direction: +Z local is south, +X west.
+  local H={east=3,west=1,south=0,north=2}
+  local function go(api,sim,dir,n)
+    for _=1,n do
+      if dir=="up" or dir=="down" then api.command({action=dir,args={dig=true}})
+      else
+        while sim.heading~=H[dir] do api.command({action="turnRight"}) end
+        api.command({action="forward",args={dig=true}})
+      end
+    end
+  end
+  -- From (99, 58, -52) to X 103 on the shafts' row, then up to the given Y.
+  for _,up in ipairs({0,3,4}) do
+    local api,sim,files,a=stoppedDeep()
+    go(api,sim,"north",3)
+    go(api,sim,"east",4)
+    go(api,sim,"up",up)
+    local w=api.state().world
+    assert(w.x==103 and w.z==-55 and w.y==58+up)
+    api.protection({homeArea(64)})
+    -- Outside a radius of 2; the real one (4) returns once it's back inside.
+    local route=api.state().miningRoute
+    route.radius=2
+    sim.afterSave=function()
+      local v=api.state().world
+      if v and (v.x-100)^2+(v.z+55)^2<=4 then route.radius=4 end
+    end
+    api.command({action="goHome"})
+    sim.afterSave=nil
+    same(api.state().world,a.routeHome)
+  end
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

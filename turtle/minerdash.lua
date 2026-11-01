@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.10"
+local VERSION = "2.3.11"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1918,8 +1918,24 @@ function rowRoute.rejoin(current)
   goWorld(t, "zxy")
 end
 
+-- Outside its radius below the Home area, it first walks straight back into
+-- the circle on the level it's on: toward the shafts' row, then along it,
+-- one block at a time, each closer. Its usual way back starts from there.
+function rowRoute.intoCircle()
+  local w, floor, h = toWorld(pos), rowRoute.homeFloor(), miningRoute.home
+  if rowRoute.withinRadius(w) or not (floor and w.y < floor) then return end
+  log("warn", ("Outside its mining radius at %d, %d, %d: heading back into it"):format(w.x, w.y, w.z))
+  setDetail("Returning into its mining radius")
+  while not rowRoute.withinRadius(w) do
+    if w.z ~= h.z then goWorld({ z = w.z + (h.z > w.z and 1 or -1) }, "z")
+    else goWorld({ x = w.x + (h.x > w.x and 1 or -1) }, "x") end
+    w = toWorld(pos)
+  end
+end
+
 function rowRoute.unwind()
   local r = miningRoute
+  rowRoute.intoCircle()
   if not r.work or rowRoute.surfacePhase() then return end
   local current = toWorld(pos)
   if samePos(current, r.work) then return end
