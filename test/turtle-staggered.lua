@@ -664,6 +664,31 @@ test("with open space only above it, it steps up, finds its facing beside that, 
   for i=moves+1,#sim.history do assert(sim.history[i].y<=start.y+1,"went more than one block up") end
 end)
 
+test("at the bottom of a shaft it climbs the open space to the first side opening, then comes back down",function()
+  local api,sim,files,a=stoppedDeep()
+  api.loseFacing()
+  goodGps(api,sim)
+  local p=sim.pos
+  local start={x=p.x,y=p.y,z=p.z}
+  -- Open for 3 blocks above, closed on every side until the third.
+  boxIn(sim,{{x=p.x,y=p.y+1,z=p.z}})
+  for i=1,3 do
+    sim.pos={x=start.x,y=start.y+i,z=start.z}
+    local open={{x=start.x,y=start.y+i-1,z=start.z}}
+    if i<3 then open[2]={x=start.x,y=start.y+i+1,z=start.z} else open[2]={x=start.x,y=start.y+i,z=start.z+1} end
+    boxIn(sim,open)
+  end
+  sim.pos=start
+  local digs,moves=sim.digs,#sim.history
+  api.row.findFacing()
+  assert(api.trusted(),"facing still unsure")
+  same(sim.pos,start)
+  assert(sim.digs==digs,"dug to find its facing")
+  local top=start.y
+  for i=moves+1,#sim.history do top=math.max(top,sim.history[i].y) end
+  assert(top==start.y+3,"climbed to "..top.." instead of the opening 3 up")
+end)
+
 test("sand or gravel beside it is dug to step in only when none of the 4 blocks around it is protected",function()
   for _,guarded in ipairs({false,true}) do
     local api,sim,files,a=stoppedDeep()

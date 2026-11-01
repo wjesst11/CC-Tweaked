@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.7"
+local VERSION = "2.3.8"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -2034,8 +2034,9 @@ end
 -- When GPS disagreed with where it thought it was, its facing is unsure and
 -- it won't travel. It looks at all 6 sides for open space, steps in and back,
 -- and a GPS fix there settles the facing. Open space above or below doesn't
--- show the facing, so from there it looks sideways and then comes back. It
--- never goes above its home row, coming back included.
+-- show the facing, so it moves along it (up to 16 blocks, as at the bottom of
+-- a shaft) looking sideways at each block, then comes back. It never goes
+-- above its home row, coming back included.
 function rowRoute.findFacing()
   local deadline = os.clock() + 10
   while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
@@ -2046,24 +2047,33 @@ function rowRoute.findFacing()
     x, y, z = gps.locate(2)
     if x then break end
   end
-  if not x then return end
+  if not x then
+    log("warn", "Can't settle its GPS facing: no GPS fix here")
+    return
+  end
   local w = { x = math.floor(x + 0.5), y = math.floor(y + 0.5), z = math.floor(z + 0.5) }
   setDetail("Finding its facing with GPS")
   rowRoute.lookingAround = true
   if not rowRoute.lookAround(w) then
     for _, v in ipairs({ "up", "down" }) do
-      local found, block = SIDES[v].inspect()
-      local allowed = (v == "up" and w.y < miningRoute.home.y) or (v == "down" and w.y <= miningRoute.home.y)
-      if allowed and (not found or LIQUIDS[block.name]) and rowRoute.nudge(v) then
-        local settled = rowRoute.lookAround({ x = w.x, y = w.y + (v == "up" and 1 or -1), z = w.z })
-        rowRoute.nudge(v == "up" and "down" or "up")
-        if settled then break end
+      local dy, moved, settled = v == "up" and 1 or -1, 0, false
+      while moved < 16 and not settled do
+        local found, block = SIDES[v].inspect()
+        -- The highest it would be: there going up, back at the start coming
+        -- back from below.
+        local top = math.max(w.y, w.y + (moved + 1) * dy)
+        if top > miningRoute.home.y or (found and not LIQUIDS[block.name]) or not rowRoute.nudge(v) then break end
+        moved = moved + 1
+        settled = rowRoute.lookAround({ x = w.x, y = w.y + moved * dy, z = w.z })
       end
+      while moved > 0 and rowRoute.nudge(v == "up" and "down" or "up") do moved = moved - 1 end
+      -- Settled, or couldn't get back to where it started: stop looking.
+      if settled or moved > 0 then break end
     end
   end
   rowRoute.lookingAround = nil
   if not gpsTrusted() then
-    log("warn", "Couldn't settle its GPS facing: no open space, or sand or gravel it may dig, on any side")
+    log("warn", ("Couldn't settle its GPS facing at %d, %d, %d: no open space, or sand or gravel it may dig, beside it or along open space above or below"):format(w.x, w.y, w.z))
   end
 end
 
