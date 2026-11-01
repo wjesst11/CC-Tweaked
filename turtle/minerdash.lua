@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.0"
+local VERSION = "2.3.6"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -357,8 +357,9 @@ function net.onFix(l, w)
       return
     end
     -- Don't keep digging on a position that might be wrong, and forget
-    -- obstacles remembered relative to it.
-    if job then stopRequested = true end
+    -- obstacles remembered relative to it. Steps taken to find its facing
+    -- don't stop anything: they are how it finds out.
+    if job and not rowRoute.lookingAround then stopRequested = true end
     blocked, blockedCount = {}, 0
     if not slip then
       -- First assume only the position slipped (e.g. the server stopped mid-move).
@@ -1796,8 +1797,11 @@ function rowRoute.ensure(a)
     forgetVisited()
     remember(pos)
     saveState()
-  elseif not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
-    error("Confirm GPS position and facing before using the saved staircase", 0)
+  else
+    rowRoute.findFacing()
+    if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
+      error("Confirm GPS position and facing before using the saved staircase", 0)
+    end
   end
   local w = toWorld(pos)
   if not miningRoute then
@@ -1934,10 +1938,112 @@ function rowRoute.toBottom(w)
   return math.abs(w.z - c.z) + (b.y - w.y) + math.abs(w.x - b.x) + math.abs(c.z - b.z)
 end
 
+-- One step through open space, without digging, kept in its own tracking.
+function rowRoute.nudge(dir)
+  physicalMove = true
+  local ok = SIDES[dir].move()
+  physicalMove = false
+  if not ok then return false end
+  if dir == "up" or dir == "down" then
+    pos.y = pos.y + (dir == "up" and 1 or -1)
+  else
+    local s = dir == "back" and -1 or 1
+    pos.x, pos.z = pos.x + DX[heading] * s, pos.z + DZ[heading] * s
+  end
+  saveState()
+  changed()
+  return true
+end
+
+-- Sand or gravel ahead may be dug while its facing is unsure only if it's
+-- fine to dig whichever of the 4 blocks around w (its GPS position) it is:
+-- none protected, none outside its radius, none above its home row.
+function rowRoute.mayClearBeside(w, block)
+  local name = block.name:lower()
+  if not nav.hasFallen(name) or name:find("^computercraft:") or cfg.protectedName(name) then return false end
+  if w.y > miningRoute.home.y then return false end
+  for f = 0, 3 do
+    local c = { x = w.x + CX[f], y = w.y, z = w.z + CZ[f] }
+    if not rowRoute.withinRadius(c) then return false end
+    for _, a in ipairs(fleet.protect and fleet.protect.areas or {}) do
+      if inBox(c, a) then return false end
+    end
+  end
+  return true
+end
+
+-- Waits a few seconds for a GPS fix to settle its facing.
+function rowRoute.awaitFacing()
+  local wait = os.clock() + 6
+  while not gpsTrusted() and os.clock() < wait do sleep(0.5) end
+end
+
+-- Turns to each of its 4 sides at w looking for open space (or sand or
+-- gravel it may dig), steps in and back, and says whether a GPS fix there
+-- settled its facing.
+function rowRoute.lookAround(w)
+  for _ = 1, 4 do
+    local found, block = SIDES.forward.inspect()
+    if found and rowRoute.mayClearBeside(w, block) then
+      for _ = 1, 16 do
+        if not turtle.dig() then break end
+        sleep(0.4) -- let the next one above land
+        found, block = SIDES.forward.inspect()
+        if not (found and nav.hasFallen(block.name)) then break end
+      end
+    end
+    if (not found or LIQUIDS[block.name]) and rowRoute.nudge("forward") then
+      rowRoute.awaitFacing()
+      rowRoute.nudge("back")
+      rowRoute.awaitFacing()
+      if gpsTrusted() then return true end
+    end
+    turn(true)
+  end
+  return false
+end
+
+-- When GPS disagreed with where it thought it was, its facing is unsure and
+-- it won't travel. It looks at all 6 sides for open space, steps in and back,
+-- and a GPS fix there settles the facing. Open space above or below doesn't
+-- show the facing, so from there it looks sideways and then comes back. It
+-- never goes above its home row, coming back included.
+function rowRoute.findFacing()
+  local deadline = os.clock() + 10
+  while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
+  if gpsTrusted() or not calib then return end
+  -- A fresh GPS fix: the tracked position is what's in doubt.
+  local x, y, z
+  for _ = 1, 3 do
+    x, y, z = gps.locate(2)
+    if x then break end
+  end
+  if not x then return end
+  local w = { x = math.floor(x + 0.5), y = math.floor(y + 0.5), z = math.floor(z + 0.5) }
+  setDetail("Finding its facing with GPS")
+  rowRoute.lookingAround = true
+  if not rowRoute.lookAround(w) then
+    for _, v in ipairs({ "up", "down" }) do
+      local found, block = SIDES[v].inspect()
+      local allowed = (v == "up" and w.y < miningRoute.home.y) or (v == "down" and w.y <= miningRoute.home.y)
+      if allowed and (not found or LIQUIDS[block.name]) and rowRoute.nudge(v) then
+        local settled = rowRoute.lookAround({ x = w.x, y = w.y + (v == "up" and 1 or -1), z = w.z })
+        rowRoute.nudge(v == "up" and "down" or "up")
+        if settled then break end
+      end
+    end
+  end
+  rowRoute.lookingAround = nil
+  if not gpsTrusted() then
+    log("warn", "Couldn't settle its GPS facing: no open space, or sand or gravel it may dig, on any side")
+  end
+end
+
 function rowRoute.exit(intent)
   if not miningRoute then error("No saved south-row route. Start a new row job first.", 0) end
   local deadline = os.clock() + 10
   while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
+  rowRoute.findFacing()
   if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then error("Confirm GPS position and facing before returning on the saved staircase", 0) end
   if intent then miningRoute.intent = intent end
   setDetail("Returning to the saved staircase")
@@ -2051,6 +2157,8 @@ end
 -- still unloads and refuels.
 function rowRoute.recover()
   if not miningRoute then error("No saved south staircase to recover", 0) end
+  rowRoute.findFacing()
+  if not gpsTrusted() then error("Confirm GPS position and facing before returning on the saved staircase", 0) end
   dock.dropJunk()
   if miningRoute.intent == "service" or fuelLevel() < rowRoute.fuelHome() then depotVisit(miningRoute.minFuel or 0)
   else rowRoute.exit() end
@@ -2967,8 +3075,10 @@ local function guardedPlace(dir, place)
   return place()
 end
 
+-- A row miner whose GPS facing is unsure finds it first.
 for _, dir in ipairs({ "forward", "up", "down" }) do
   actions[dir] = function(a)
+    if miningRoute and not gpsTrusted() then rowRoute.findFacing() end
     if a.dig then
       digMove(dir)
       return true
@@ -2976,7 +3086,10 @@ for _, dir in ipairs({ "forward", "up", "down" }) do
     return move(dir)
   end
 end
-actions.back = function() return move("back") end
+actions.back = function()
+  if miningRoute and not gpsTrusted() then rowRoute.findFacing() end
+  return move("back")
+end
 actions.turnLeft = function() return turn(false) end
 actions.turnRight = function() return turn(true) end
 actions.dig = function() return guardedDig("forward") end
@@ -3116,6 +3229,13 @@ function net.worker()
       local event, id = os.pullEvent()
       if event == "timer" and id == timer then
         net.idleRefuel()
+        -- An unsure GPS facing is settled without being asked, once each
+        -- time it's lost.
+        local lost = calib and (calib.slip or calib)
+        if miningRoute and lost and not gpsTrusted() and rowRoute.lookedFor ~= lost then
+          rowRoute.lookedFor = lost
+          pcall(rowRoute.findFacing)
+        end
         timer = os.startTimer(20)
       end
     end

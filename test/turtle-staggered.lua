@@ -619,5 +619,110 @@ test("go home drops junk before leaving the mine and keeps its treasure",functio
   assert(sim.items[1]=="minecraft:diamond" and sim.slots[1]==3,"lost its treasure")
 end)
 
+-- Where the simulated turtle really is, and GPS that always reports it.
+local function real(p) return {x=HOME.x-p.x,y=HOME.y+p.y,z=HOME.z+p.z} end
+local function goodGps(api,sim)
+  sim.gps=function() local w=real(sim.pos); return w.x,w.y,w.z end
+  sim.onSleep=function() api.fix(api.state().pos,real(sim.pos)) end
+end
+-- Fills its 6 sides with stone, except those given (local cells) as open.
+local function boxIn(sim,open)
+  local p=sim.pos
+  for _,d in ipairs({{1,0,0},{-1,0,0},{0,0,1},{0,0,-1},{0,1,0},{0,-1,0}}) do
+    sim.blocks[key({x=p.x+d[1],y=p.y+d[2],z=p.z+d[3]})]="minecraft:stone"
+  end
+  for _,c in ipairs(open or {}) do sim.blocks[key(c)]=nil end
+end
+
+test("a turtle whose facing is unsure steps into open space and back to find it, then goes home",function()
+  local api,sim,files,a=stoppedDeep()
+  api.loseFacing()
+  assert(not api.trusted())
+  goodGps(api,sim)
+  local digs=sim.digs
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(sim.digs==digs,"dug to find its facing")
+end)
+
+test("with open space only above it, it steps up, finds its facing beside that, and comes back down",function()
+  local api,sim,files,a=stoppedDeep()
+  api.loseFacing()
+  goodGps(api,sim)
+  local p=sim.pos
+  local start={x=p.x,y=p.y,z=p.z}
+  local above={x=p.x,y=p.y+1,z=p.z}
+  boxIn(sim,{above})
+  sim.pos=above
+  boxIn(sim,{start,{x=p.x+1,y=p.y+1,z=p.z}})
+  sim.pos=start
+  local digs,moves=sim.digs,#sim.history
+  api.row.findFacing()
+  assert(api.trusted(),"facing still unsure")
+  same(sim.pos,start)
+  assert(sim.digs==digs,"dug to find its facing")
+  for i=moves+1,#sim.history do assert(sim.history[i].y<=start.y+1,"went more than one block up") end
+end)
+
+test("sand or gravel beside it is dug to step in only when none of the 4 blocks around it is protected",function()
+  for _,guarded in ipairs({false,true}) do
+    local api,sim,files,a=stoppedDeep()
+    -- One block north along the tunnel, so all 4 blocks around it are
+    -- inside the radius.
+    while sim.heading~=2 do api.command({action="turnRight"}) end
+    local before=sim.pos
+    api.command({action="forward"})
+    assert(sim.pos~=before,"didn't move north")
+    api.loseFacing()
+    goodGps(api,sim)
+    local p=sim.pos
+    local start={x=p.x,y=p.y,z=p.z}
+    boxIn(sim)
+    sim.blocks[key({x=p.x+1,y=p.y,z=p.z})]="minecraft:gravel"
+    if guarded then
+      -- Only the block on the far side is protected, but it can't tell
+      -- which side is which without its facing.
+      local w=real({x=p.x-1,y=p.y,z=p.z})
+      api.protection({{name="base",x1=w.x,x2=w.x,y1=w.y,y2=w.y,z1=w.z,z2=w.z}})
+    end
+    local digs=sim.digs
+    api.row.findFacing()
+    same(sim.pos,start)
+    if guarded then
+      assert(not api.trusted(),"settled its facing without moving")
+      assert(sim.digs==digs,"dug beside a protected block")
+    else
+      assert(api.trusted(),"facing still unsure")
+      assert(sim.digs==digs+1,"didn't dig just the gravel")
+    end
+  end
+end)
+
+test("it never goes above its home row to find its facing",function()
+  local api,sim,files,a=stoppedDeep()
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  api.loseFacing()
+  goodGps(api,sim)
+  local p=sim.pos
+  boxIn(sim,{{x=p.x,y=p.y+1,z=p.z}})
+  local moves=#sim.history
+  api.row.findFacing()
+  assert(#sim.history==moves,"moved with only open space above its home row")
+  assert(not api.trusted())
+end)
+
+test("a move button pressed while its facing is unsure finds the facing first, then moves",function()
+  local api,sim,files,a=stoppedDeep()
+  api.loseFacing()
+  goodGps(api,sim)
+  local p=sim.pos
+  local start={x=p.x,y=p.y,z=p.z}
+  api.command({action="forward"})
+  assert(api.trusted(),"facing still unsure")
+  local moved=math.abs(sim.pos.x-start.x)+math.abs(sim.pos.z-start.z)
+  assert(moved==1 and sim.pos.y==start.y,"didn't move one block")
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

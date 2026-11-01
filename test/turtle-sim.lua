@@ -11,6 +11,13 @@ return {
   returnHome = function() navigate(cellGoal(home)); face(home.heading) end,
   jobs = jobs, actions = actions, row = rowRoute,
   fix = function(l, w) gpsChecked = true; gpsState = "ok"; return net.onFix(l, w) end,
+  -- The state net.onFix leaves after deciding the turtle was moved by hand.
+  loseFacing = function()
+    local savedHome = { w = toWorld(home), compass = (calib.f0 + home.heading) % 4 }
+    calib = { l = { x = pos.x, y = pos.y, z = pos.z }, w = toWorld(pos), home = savedHome }
+    saveState()
+  end,
+  trusted = function() return gpsTrusted() end,
   state = function() return { pos = here(), home = home, world = worldPos(), miningRoute = miningRoute, fleetJob = fleetJob, lastFleetResult = lastFleetResult } end,
   protection = function(areas) fleet.protect.areas = areas; gpsChecked = true; cfg.compileFleet() end,
   depot = function(value) fleet.depot = value end,
@@ -186,6 +193,7 @@ local function miner(files, initial)
       return nil, "offline"
     end},
     shell={getRunningProgram=function() return "minerdash.lua" end},
+    gps={locate=function() if sim.gps then return sim.gps() end end},
     peripheral={getType=function(side)
       local direction = side == "top" and "up" or side == "bottom" and "down" or "forward"
       return inventory(direction) and "inventory" or nil
