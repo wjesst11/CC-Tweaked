@@ -724,5 +724,39 @@ test("a move button pressed while its facing is unsure finds the facing first, t
   assert(moved==1 and sim.pos.y==start.y,"didn't move one block")
 end)
 
+-- Stopped deep, then dug by hand below its lowest tunnel level (55), where
+-- nothing is its saved route.
+local function offRoute()
+  local api,sim,files,a=stoppedDeep()
+  for _=1,4 do api.command({action="down",args={dig=true}}) end
+  local w=api.state().world
+  assert(w.y==54,"didn't get below its tunnels: "..tostring(w.y))
+  return api,sim,files,a
+end
+local function homeArea(y1)
+  return {name="Home",x1=-2500,x2=2500,y1=y1,y2=320,z1=-2500,z2=2500}
+end
+
+test("a turtle off its route below the Home protected area digs back to its shaft and goes home",function()
+  local api,sim,files,a=offRoute()
+  api.protection({homeArea(64)})
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  local said=false
+  for _,line in ipairs(sim.prints) do if line:find("digging back to its shaft",1,true) then said=true end end
+  assert(said,"didn't say it was digging back")
+end)
+
+test("an off-route turtle at or above the Home floor, or with no Home area, stays where it is",function()
+  for _,areas in ipairs({{homeArea(50)},{},{{name="Base",x1=-2500,x2=2500,y1=64,y2=320,z1=-2500,z2=2500}}}) do
+    local api,sim,files,a=offRoute()
+    api.protection(areas)
+    local p,digs=sim.pos,sim.digs
+    api.command({action="goHome"})
+    same(sim.pos,p)
+    assert(sim.digs==digs,"dug without a Home area below it")
+  end
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

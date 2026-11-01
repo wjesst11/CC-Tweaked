@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.6"
+local VERSION = "2.3.7"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1864,6 +1864,34 @@ function rowRoute.flatMine(target)
   navigate(goal)
 end
 
+-- The lowest Y of the protected area named "Home": the floor of the base.
+function rowRoute.homeFloor()
+  for _, a in ipairs(fleet.protect and fleet.protect.areas or {}) do
+    if tostring(a.name or ""):lower() == "home" then return math.min(a.y1, a.y2) end
+  end
+end
+
+-- Off its saved route (an ore pocket whose path it lost, a neighbour's
+-- columns), it digs straight back to the shaft of the column it last worked
+-- in, then returns as usual. Only while it and that shaft are below the
+-- protected area named "Home"; otherwise it stops where it is. Every block it
+-- digs still passes the usual protection checks and its mining radius.
+function rowRoute.rejoin(current)
+  local r, floor = miningRoute, rowRoute.homeFloor()
+  local at = ("%d, %d, %d"):format(current.x, current.y, current.z)
+  if not r.columns then error("No saved opened vein path back to the safe mining Y from " .. at, 0) end
+  local t = { x = r.work.x, y = r.work.y, z = r.columns.z }
+  if not floor then
+    error("Off its saved route at " .. at .. ". It only digs its way back below a protected area named Home, and there isn't one", 0)
+  end
+  if current.y >= floor or t.y >= floor then
+    error(("Off its saved route at %s. It only digs its way back below the Home protected area (Y %d)"):format(at, floor), 0)
+  end
+  log("warn", ("Off its saved route at %s: digging back to its shaft at %d, %d, %d"):format(at, t.x, t.y, t.z))
+  setDetail("Digging back to its shaft")
+  goWorld(t, "yzx")
+end
+
 function rowRoute.unwind()
   local r = miningRoute
   if not r.work or rowRoute.surfacePhase() then return end
@@ -1874,7 +1902,7 @@ function rowRoute.unwind()
   for i = #path, 1, -1 do if samePos(current, path[i]) then index = i break end end
   if not index then
     if rowRoute.opened(current) or rowRoute.inColumns(current) then return end
-    if current.y ~= r.targetY then error("No saved opened vein path back to the safe mining Y", 0) end
+    if current.y ~= r.targetY then rowRoute.rejoin(current) end
     return
   end
   rowRoute.save("unwinding")
