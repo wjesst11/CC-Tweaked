@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.3.9"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.3.10"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -1844,6 +1844,11 @@ function bindEvents() {
   $("#btn-install").addEventListener("click", () => $("#install-dialog").showModal());
   $("#btn-pause-all").addEventListener("click", () => sendRaw({ type: "cmd", id: "all", action: "pause" }));
   $("#btn-resume-all").addEventListener("click", () => sendRaw({ type: "cmd", id: "all", action: "resume" }));
+  $("#btn-unload-all").addEventListener("click", () => {
+    if (confirm("Send every turtle to the depot to drop off what it carries? Turtles on a job unload before their next step and carry on with it.")) {
+      sendRaw({ type: "cmd", id: "all", action: "unload" });
+    }
+  });
   $("#btn-recall-all").addEventListener("click", () => {
     if (confirm("Cancel every turtle's job and send them all home?")) sendRaw({ type: "cmd", id: "all", action: "goHome" });
   });

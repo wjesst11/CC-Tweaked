@@ -26,7 +26,7 @@ const TURTLE_TIMEOUT_MS = 30_000;
 const MAX_LOGS = 200;
 const SNAPSHOT_LOGS = 50;
 // Actions the dashboard may send to every turtle at once.
-const BROADCAST_ACTIONS = new Set(["stop", "pause", "resume", "goHome", "forceHome", "update"]);
+const BROADCAST_ACTIONS = new Set(["stop", "pause", "resume", "goHome", "forceHome", "update", "unload"]);
 // After a restart, give turtles that held the dock time to reconnect and
 // reclaim it before anyone else gets a turn.
 const LEASE_GRACE_MS = 20_000;
@@ -626,7 +626,7 @@ function handleCommand(ws, { id, ids, action, args }) {
       return;
     }
     // An update reboots between steps and resumes the same assignment.
-    if (queueOwns(t.id) && !["pause", "resume", "stop", "goHome", "forceHome", "setLabel", "update"].includes(action)) {
+    if (queueOwns(t.id) && !["pause", "resume", "stop", "goHome", "forceHome", "setLabel", "update", "unload"].includes(action)) {
       send(ws, { type: "error", msg: `${nameOf(t)} belongs to an active queued job. Cancel that queued job before sending other commands.` });
       return;
     }

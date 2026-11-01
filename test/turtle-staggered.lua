@@ -802,5 +802,117 @@ test("rock blocking its saved way back is dug through only below the Home protec
   end
 end)
 
+test("rock that comes back after digging stops it after three tries, with one log line",function()
+  local api,sim,files,a=stoppedDeep()
+  local cell=lkey({x=99,y=58,z=-53})
+  sim.blocks[cell]="minecraft:deepslate"
+  sim.sticky[cell]=true
+  api.protection({homeArea(64)})
+  local p,digs=sim.pos,sim.digs
+  api.command({action="goHome"})
+  same(sim.pos,p)
+  assert(sim.digs==digs+3,"dug it "..(sim.digs-digs).." times")
+  local said,stopped=0,false
+  for _,line in ipairs(sim.prints) do
+    if line:find("digging through",1,true) then said=said+1 end
+    if line:find("still there after digging",1,true) then stopped=true end
+  end
+  assert(said==1,"logged digging through "..said.." times")
+  assert(stopped,"didn't say the block keeps coming back")
+end)
+
+test("unload sends a turtle at home to drop everything off at the depot, then back home",function()
+  local api,sim,files,a=stoppedDeep()
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(next(sim.deposits)==nil)
+  api.command({action="unload"})
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==3,"didn't unload at the depot")
+  same(api.state().world,a.routeHome)
+end)
+
+test("unload from a stopped job deep in the mine drops off, comes home, and leaves the job paused",function()
+  local api,sim,files,a=stoppedDeep()
+  api.command({action="unload"})
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]==3,"didn't unload at the depot")
+  same(api.state().world,a.routeHome)
+  local job=api.state().fleetJob
+  assert(job and job.paused,"lost its paused job")
+end)
+
+test("unload asked for mid-job goes to the depot before the next step and carries on with the job",function()
+  local api,sim,files,a=setup(4,60,56,96,104)
+  -- Left alone, this job's first depot visit is at step 70.
+  local asked,visitedAt
+  sim.afterSave=function()
+    local state=api.state()
+    local w,route,job=state.world,state.miningRoute,state.fleetJob
+    if not asked and w and w.y<a.y-3 and job and job.step>=5 then
+      asked=job.step
+      sim.items[16],sim.slots[16]="minecraft:diamond",2
+      api.message({type="cmd",action="unload"})
+    end
+    if asked and not visitedAt and route and route.phase=="toDepot" and job then visitedAt=job.step end
+  end
+  api.command({action="fleetJob",args=a})
+  sim.afterSave=nil
+  assert(asked,"never reached a deep tunnel")
+  assert(visitedAt and visitedAt<=asked+1,"went to the depot at step "..tostring(visitedAt).." after being asked at step "..asked)
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond"]>=2,"didn't unload at the depot")
+  finished(api,a)
+end)
+
+test("outside its radius below the Home area it may only step back toward the circle",function()
+  local api,sim,files,a=stoppedDeep()
+  local row=api.row
+  api.protection({homeArea(64)})
+  -- Radius 4 around (100, -55).
+  assert(row.mayReach({x=100,y=50,z=-61},{x=100,y=50,z=-60}),"refused a step back toward the circle")
+  assert(not row.mayReach({x=100,y=50,z=-61},{x=100,y=50,z=-62}),"allowed a step further out")
+  assert(not row.mayReach({x=100,y=50,z=-61},{x=100,y=49,z=-61}),"allowed a step down outside the circle")
+  assert(not row.mayReach({x=100,y=64,z=-61},{x=100,y=64,z=-60}),"allowed it at the Home floor")
+  api.protection({})
+  assert(not row.mayReach({x=100,y=50,z=-61},{x=100,y=50,z=-60}),"allowed it with no Home area")
+end)
+
+test("a turtle outside its radius below the Home area comes back into the circle and goes home",function()
+  for _,guarded in ipairs({true,false}) do
+    local api,sim,files,a=stoppedDeep()
+    api.protection(guarded and {homeArea(64)} or {})
+    -- At (99, 58, -52), outside a radius of 2. Once back in that circle,
+    -- the real radius (4) returns for the stairs it dug.
+    local route=api.state().miningRoute
+    route.radius=2
+    sim.afterSave=function()
+      local w=api.state().world
+      if w and (w.x-100)^2+(w.z+55)^2<=4 then route.radius=4 end
+    end
+    local p=sim.pos
+    api.command({action="goHome"})
+    sim.afterSave=nil
+    if guarded then
+      same(api.state().world,a.routeHome)
+    else
+      same(sim.pos,p)
+    end
+  end
+end)
+
+test("a move cut short that GPS never settled is fixed by stepping aside and back, then it goes home",function()
+  local api,sim,files,a=stoppedDeep()
+  goodGps(api,sim)
+  -- Left over from a reboot, matching neither where it is nor next to it.
+  api.state().miningRoute.pendingMove={from={x=0,y=0,z=0},to={x=0,y=0,z=1}}
+  api.save()
+  local moves=#sim.history
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(not api.state().miningRoute.pendingMove,"still has the cut-short move")
+  assert(#sim.history>moves)
+  local said=false
+  for _,line in ipairs(sim.prints) do if line:find("move was cut short",1,true) then said=true end end
+  assert(said,"didn't say it was settling a cut-short move")
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")
