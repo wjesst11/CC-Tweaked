@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.4"
+local VERSION = "2.3.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -347,8 +347,7 @@ function net.onFix(l, w)
       return
     end
     if samePos(toWorld(l), w) then
-      -- Exactly where it thinks it is: any half-finished move is settled.
-      if pending then miningRoute.pendingMove = nil; saveState() end
+      if pending and samePos(w, pending.from) then miningRoute.pendingMove = nil; saveState() end
       -- A matching fix after a sideways move confirms the heading as well.
       if slip and (l.x ~= slip.x or l.z ~= slip.z) then
         calib.slip = nil
@@ -361,8 +360,6 @@ function net.onFix(l, w)
     -- obstacles remembered relative to it.
     if job then stopRequested = true end
     blocked, blockedCount = {}, 0
-    -- GPS now says where it is, so a half-finished move no longer matters.
-    if miningRoute then miningRoute.pendingMove = nil end
     if not slip then
       -- First assume only the position slipped (e.g. the server stopped mid-move).
       pos = fromWorld(w)
@@ -559,17 +556,11 @@ local SIDES = {
   back = { move = turtle.back },
 }
 
--- `manual` is a move you asked for from the dashboard: into open space only
--- (it never digs), so it goes ahead even when GPS hasn't confirmed where the
--- turtle is or it's outside its radius. That's how a confused turtle gets
--- moved by hand to find its facing again.
-local function move(dir, manual)
-  if miningRoute and miningRoute.radius and not manual then
+local function move(dir)
+  if miningRoute and miningRoute.radius then
     if not gpsTrusted() then return false, "GPS position unknown" end
     local current, target = toWorld(pos), toWorld(neighbour(dir))
-    -- Moving through open air never digs, so surface trips and a flight
-    -- home from where it was carried may leave the circle. Digging can't.
-    local surfaceTravel = (rowRoute.surfacePhase() and current.y == 67 and target.y == 67) or rowRoute.flying
+    local surfaceTravel = rowRoute.surfacePhase() and current.y == 67 and target.y == 67
     if not surfaceTravel and not rowRoute.withinRadius(target) then return false, "Outside mining radius" end
   end
   if miningRoute and gpsTrusted() then
@@ -1805,11 +1796,8 @@ function rowRoute.ensure(a)
     forgetVisited()
     remember(pos)
     saveState()
-  else
-    rowRoute.findFacing()
-    if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
-      error("GPS hasn't confirmed its position yet. Try again in a moment.", 0)
-    end
+  elseif not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
+    error("Confirm GPS position and facing before using the saved staircase", 0)
   end
   local w = toWorld(pos)
   if not miningRoute then
@@ -1882,7 +1870,7 @@ function rowRoute.unwind()
   for i = #path, 1, -1 do if samePos(current, path[i]) then index = i break end end
   if not index then
     if rowRoute.opened(current) or rowRoute.inColumns(current) then return end
-    if current.y ~= r.targetY then rowRoute.rejoin() end
+    if current.y ~= r.targetY then error("No saved opened vein path back to the safe mining Y", 0) end
     return
   end
   rowRoute.save("unwinding")
@@ -1911,54 +1899,14 @@ function rowRoute.leaveColumns()
   if not rowRoute.inColumns(w) then return end
   rowRoute.save("toShaft")
   setDetail("Returning to the mining shaft")
-  local ok, err = pcall(function()
-    while w.z ~= c.z do
-      rowRoute.walkStep({ x = w.x, y = w.y, z = w.z + (c.z > w.z and 1 or -1) }, true)
-      w = toWorld(pos)
-    end
-    while w.y < miningRoute.targetY do
-      rowRoute.walkStep({ x = w.x, y = w.y + 1, z = w.z }, true)
-      w = toWorld(pos)
-    end
-  end)
-  if ok then return end
-  if err == STOP then error(STOP, 0) end
-  -- Its tunnel or shaft isn't open where it dug it: the world rolled back.
-  log("warn", "Its way out is blocked (" .. tostring(err) .. ")")
-  rowRoute.rejoin()
-end
-
--- Off every route it saved (the world rolled back after a crash, or it was
--- moved by hand). At or above its home row it goes home through open air
--- without digging. Underground it digs the shortest way to its corridor
--- level, inside its radius and around anything protected, then carries on
--- from there. Normal returns never do this; they only use the blocks they dug.
-function rowRoute.rejoin()
-  local r, w = miningRoute, toWorld(pos)
-  rowRoute.save("rejoining")
-  if w.y >= r.home.y then
-    log("warn", ("Off its saved route at X %d, Y %d, Z %d: flying home"):format(w.x, w.y, w.z))
-    setDetail("Flying back home")
-    -- Never higher than a few blocks above where it is or its home.
-    local goal, ceiling = cellGoal(fromWorld(r.home)), math.max(w.y, r.home.y) + 4
-    goal.allowed = function(x, y, z) return toWorld({ x = x, y = y, z = z }).y <= ceiling end
-    rowRoute.flying = true
-    local ok, err = pcall(navigate, goal)
-    rowRoute.flying = false
-    if not ok then error(err, 0) end
-    return
+  while w.z ~= c.z do
+    rowRoute.walkStep({ x = w.x, y = w.y, z = w.z + (c.z > w.z and 1 or -1) }, true)
+    w = toWorld(pos)
   end
-  local target = { x = w.x, y = r.targetY, z = r.columns and r.columns.z or w.z }
-  log("warn", ("Off its saved route at X %d, Y %d, Z %d: digging back to Y %d"):format(w.x, w.y, w.z, r.targetY))
-  setDetail("Digging back to its route")
-  local goal = cellGoal(fromWorld(target))
-  local top = math.max(r.targetY, w.y)
-  goal.allowed = function(x, y, z)
-    local c = toWorld({ x = x, y = y, z = z })
-    return c.y <= top and rowRoute.withinRadius(c)
+  while w.y < miningRoute.targetY do
+    rowRoute.walkStep({ x = w.x, y = w.y + 1, z = w.z }, true)
+    w = toWorld(pos)
   end
-  goal.mining, goal.blocked, goal.limit = true, {}, 40000
-  navigate(goal)
 end
 
 -- At the safe mining Y, a staggered job's corridor runs along its shaft row
@@ -1986,85 +1934,11 @@ function rowRoute.toBottom(w)
   return math.abs(w.z - c.z) + (b.y - w.y) + math.abs(w.x - b.x) + math.abs(c.z - b.z)
 end
 
--- When GPS disagreed with where it thought it was (moved by hand, or the
--- world rolled back), its facing is in doubt and it won't travel. One step
--- sideways into open space with a GPS fix there settles the facing; then it
--- steps back. It never digs to do this.
-function rowRoute.findFacing()
-  local deadline = os.clock() + 10
-  while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
-  -- A move left half-done when the server stopped is settled by its next
-  -- GPS fix, which comes every 30 seconds.
-  deadline = os.clock() + 35
-  while miningRoute and miningRoute.pendingMove and gpsState == "ok" and os.clock() < deadline do waitSeconds(0.5) end
-  if gpsTrusted() or not calib then return end
-  if gpsState ~= "ok" then
-    error("No GPS signal here, so it can't confirm where it is. GPS hosts placed higher reach deeper; or move it by hand.", 0)
-  end
-  setDetail("Finding its facing with GPS")
-  -- With no open side at all (in a shaft, say), it climbs through open space
-  -- and tries again higher up, but never above its home row. If it could
-  -- step aside but GPS didn't settle its facing, it stops there: climbing
-  -- wouldn't help, and in open air it would only rise into the sky.
-  local top = miningRoute and miningRoute.home.y - 1 or calib.w.y
-  for _ = 1, 128 do
-    local found, stepped = rowRoute.stepAside()
-    if found then return end
-    if stepped then
-      error("GPS didn't settle its facing after stepping aside. GPS may be unreliable here; move it one block sideways by hand.", 0)
-    end
-    if turtle.detectUp() or (gpsState == "ok" and calib.w.y + pos.y - calib.l.y >= top) then break end
-    physicalMove = true
-    local up = turtle.up()
-    physicalMove = false
-    if not up then break end
-    pos.y = pos.y + 1
-    saveState()
-  end
-  error("Can't confirm its GPS position and facing: no open space beside it, or above it below the home row. Move it one block sideways by hand.", 0)
-end
-
--- One step sideways into open space and back, with GPS fixes. Returns true
--- once its facing is known, and whether it found open space to step into.
-function rowRoute.stepAside()
-  local stepped = false
-  for _ = 1, 4 do
-    if not turtle.detect() then
-      local from = { x = pos.x, z = pos.z }
-      physicalMove = true
-      local moved = turtle.forward()
-      physicalMove = false
-      if moved then
-        stepped = true
-        local function settle()
-          local wait = os.clock() + 8
-          while not gpsTrusted() and os.clock() < wait do waitSeconds(0.5) end
-        end
-        pos.x, pos.z = pos.x + DX[heading], pos.z + DZ[heading]
-        saveState()
-        settle()
-        physicalMove = true
-        if turtle.back() then pos.x, pos.z = from.x, from.z end
-        physicalMove = false
-        saveState()
-        changed()
-        -- If it was somewhere else entirely, the first fix only moved it to
-        -- the right place; stepping back then settles the facing.
-        settle()
-        if gpsTrusted() then return true, true end
-      end
-    end
-    turn(true)
-  end
-  return false, stepped
-end
-
 function rowRoute.exit(intent)
   if not miningRoute then error("No saved south-row route. Start a new row job first.", 0) end
-  rowRoute.findFacing()
-  if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then
-    error("GPS hasn't confirmed its position yet. Try again in a moment.", 0)
-  end
+  local deadline = os.clock() + 10
+  while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
+  if not gpsChecked or not gpsTrusted() or miningRoute.pendingMove then error("Confirm GPS position and facing before returning on the saved staircase", 0) end
   if intent then miningRoute.intent = intent end
   setDetail("Returning to the saved staircase")
   rowRoute.reconcile()
@@ -2177,10 +2051,6 @@ end
 -- still unloads and refuels.
 function rowRoute.recover()
   if not miningRoute then error("No saved south staircase to recover", 0) end
-  rowRoute.findFacing()
-  if not gpsTrusted() then
-    error("GPS hasn't confirmed its position yet. Try again in a moment.", 0)
-  end
   dock.dropJunk()
   if miningRoute.intent == "service" or fuelLevel() < rowRoute.fuelHome() then depotVisit(miningRoute.minFuel or 0)
   else rowRoute.exit() end
@@ -3103,10 +2973,10 @@ for _, dir in ipairs({ "forward", "up", "down" }) do
       digMove(dir)
       return true
     end
-    return move(dir, true)
+    return move(dir)
   end
 end
-actions.back = function() return move("back", true) end
+actions.back = function() return move("back") end
 actions.turnLeft = function() return turn(false) end
 actions.turnRight = function() return turn(true) end
 actions.dig = function() return guardedDig("forward") end

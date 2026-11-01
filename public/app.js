@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.3.4"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.3.0"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -752,15 +752,12 @@ function renderPosition(s) {
     $("#pos-value").innerHTML = coordsHtml(world);
     parts.push(s.facing ? `Facing ${capital(s.facing)}` : s.southRowSupported && onSouthRow(world)
       ? "Facing south from home-row setup" : "Move one block so it can find north");
-    if (s.gpsState === "nofix") parts.push("no GPS signal right now");
-    else if (s.gpsTrusted === false && s.miningRoute) parts.push("facing not confirmed: move it one block sideways");
   } else if (s.pos) {
     $("#pos-label").textContent = "Position · relative to start";
     $("#pos-value").innerHTML = coordsHtml(s.pos);
     parts.push(`Facing ${FACING[s.heading] ?? "?"}`);
     if (s.gpsState === "none") parts.push("no wireless modem");
     if (s.gpsState === "nofix") parts.push("no GPS signal");
-    else if (s.gpsTrusted === false && s.miningRoute) parts.push("GPS position not confirmed: move it one block sideways");
   } else {
     $("#pos-label").textContent = "Position";
     $("#pos-value").textContent = "–";
