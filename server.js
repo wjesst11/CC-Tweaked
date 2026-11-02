@@ -213,7 +213,7 @@ function setDimension(turtle, value) {
   if (old && old !== turtle.dimension) releaseDepot(old, turtle.id);
 }
 
-// The home row in a turtle's dimension, { y, z }: Y 67, Z -55 in the Overworld.
+// The home row in a turtle's dimension, { y, z }, from that dimension's settings.
 function homeRowOf(t) {
   const f = dimensionFleet(fleet, dimOf(t));
   return { y: f.homeY, z: f.homeZ };

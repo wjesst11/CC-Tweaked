@@ -105,7 +105,17 @@ local function miner(files, initial)
     if sim.refuse[target] then return false, sim.refuse[target] end
     -- Blocks a mod puts straight back: the dig reports success.
     if sim.sticky[target] then sim.digs = sim.digs + 1; return true end
+    local name = sim.blocks[target]
     sim.blocks[target], sim.digs = nil, sim.digs+1
+    -- With collect set, the dug block goes into the inventory, as in the game.
+    if sim.collect then
+      for slot = 1, 16 do
+        if not sim.items[slot] or (sim.items[slot] == name and sim.slots[slot] < 64) then
+          sim.items[slot], sim.slots[slot] = name, (sim.slots[slot] or 0) + 1
+          break
+        end
+      end
+    end
     return true
   end
   local function inventory(direction)

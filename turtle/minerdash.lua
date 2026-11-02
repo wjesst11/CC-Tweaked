@@ -8,8 +8,8 @@
 -- wireless/ender modem and a GPS network, the turtle also works out its world
 -- coordinates and compass facing.
 --
--- Row miners capture their own home on the home row (Z=-55, at Y 67 in the
--- Overworld, or the Nether's height from Fleet settings) before their first job.
+-- Row miners capture their own home on the home row (its Y and Z from their
+-- dimension's Fleet settings) before their first job.
 -- A saved south staircase and bottom waypoint are their only mining-home route.
 --
 -- Two kinds of jobs:
@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.7"
+local VERSION = "2.4.8"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -445,7 +445,8 @@ function cfg.compileFleet()
     compiled.depot, compiled.areas, compiled.homeY = n.depot, n.areas or {}, tonumber(n.homeY) or 67
     compiled.homeZ = tonumber(n.homeZ) or -55
   else
-    compiled.depot, compiled.areas, compiled.homeY, compiled.homeZ = fleet.depot, protect.areas or {}, 67, -55
+    compiled.depot, compiled.areas = fleet.depot, protect.areas or {}
+    compiled.homeY, compiled.homeZ = tonumber(fleet.homeY) or 67, tonumber(fleet.homeZ) or -55
   end
 end
 
@@ -1370,9 +1371,13 @@ function dock.around()
         and not (homesNear[k] and homesNear[k] > now)
         and ((x == pos.x and y == pos.y and z == pos.z) or nav.isOpen(x, y, z))
     end,
+    -- Blocks it must still move: on each axis into the ring's reach, or out
+    -- of the dock room.
     estimate = function(x, y, z)
-      local d = off(x, z)
-      return math.max(0, DOCK_ROOM + 1 - d, d - DOCK_ROOM - 3) + math.max(0, math.abs(y - dock.y) - 2)
+      local far = DOCK_ROOM + 3
+      local dx, dz = math.abs(x - dock.x), math.abs(z - dock.z)
+      return math.max(0, DOCK_ROOM + 1 - off(x, z)) + math.max(0, dx - far) + math.max(0, dz - far)
+        + math.max(0, math.abs(y - dock.y) - 2)
     end,
     centre = dock,
   }
@@ -1440,10 +1445,13 @@ function dock.category(name)
 end
 
 -- Junk isn't worth a trip to the dock. Below ground, a row miner drops it
--- where it is, so its cargo space only ever holds valuables and fuel. It
--- never drops into a chest beside it.
+-- where it is, and so does a turtle inside its quarry, so its cargo space
+-- only ever holds valuables and fuel. It never drops into a chest beside it.
 function dock.dropJunk()
-  if not (miningRoute and gpsTrusted() and toWorld(pos).y < miningRoute.home.y) then return end
+  if not gpsTrusted() then return end
+  local w, q = toWorld(pos), fleetJob and fleetJob.kind == "areaQuarry" and fleetJob.args
+  local inQuarry = q and w.x >= q.x1 and w.x <= q.x2 and w.z >= q.z1 and w.z <= q.z2 and w.y >= q.yBottom and w.y <= q.yTop
+  if not inQuarry and not (miningRoute and w.y < miningRoute.home.y) then return end
   local into
   for _, side in ipairs({ "bottom", "top", "front" }) do
     if not isInventory(side) then into = side break end
@@ -1640,8 +1648,8 @@ function rowRoute.save(phase)
   changed()
 end
 
--- The home row's height and Z: Y 67, Z -55 in the Overworld, the Nether's
--- own from Fleet settings. A saved home keeps the row it was saved on.
+-- The home row's height and Z, from its dimension's Fleet settings. A saved
+-- home keeps the row it was saved on.
 function rowRoute.homeY()
   return miningRoute and miningRoute.home.y or compiled.homeY
 end
@@ -2930,7 +2938,7 @@ local function fleetWork()
 
   local function visit()
     tally()
-    if a.routeMode == "southRow" then dock.dropJunk() end
+    dock.dropJunk()
     local need = continuationFuel()
     fleetJob.phase = "depot"
     saveState()
@@ -2959,13 +2967,13 @@ local function fleetWork()
     end
     -- Junk goes in batches as it builds up: at most about a stack is carried,
     -- without leaving an item behind for every block mined.
-    if a.routeMode == "southRow" then dock.tidy() end
+    dock.tidy()
     local need = continuationFuel() + (cut and 64 or 0)
     if emptySlots() > 2 and fuelLevel() >= need then return end
     tally()
     refuelFromInventory(need + 200)
     -- Room taken by junk is freed on the spot rather than by a depot trip.
-    if a.routeMode == "southRow" then dock.dropJunk() end
+    dock.dropJunk()
     tally()
     if emptySlots() <= 2 or fuelLevel() < need then visit() end
   end
@@ -3341,7 +3349,7 @@ actions.update = installUpdate
 -- Which dimension it works in: its depot and protected areas are that
 -- dimension's. Its saved home, stairs, GPS frame and any paused job belong to
 -- the old one and are forgotten. In the new dimension, place it at its home
--- row (Z -55, at that dimension's home row height) facing south; its first
+-- row (that dimension's home row Y and Z) facing south; its first
 -- row job saves the new home.
 actions.setDimension = function(a)
   local d = (a.dimension == "nether" or a.dimension == "overworld") and a.dimension or nil

@@ -26,12 +26,14 @@ export const DEFAULT_FLEET = {
     fuel: ["minecraft:coal", "minecraft:charcoal", "minecraft:coal_block"],
   },
   veinBlocks: ["*_ore", "*ancient_debris*"],
-  // The depot and protected areas above are the Overworld's. Each other
-  // dimension has its own; everything else is shared.
+  // The depot, protected areas and home row (its height and Z) above are the
+  // Overworld's. Each other dimension has its own; everything else is shared.
+  homeY: 67,
+  homeZ: -55,
   dimensions: { nether: { depot: null, areas: [], homeY: 67, homeZ: -55 } },
 };
 
-// The Overworld's home row: its height and Z. The Nether's are its own settings.
+// The default home row: its height and Z. Each dimension's is its own setting.
 export const HOME_Y = 67;
 export const HOME_Z = -55;
 
@@ -41,7 +43,7 @@ export const dimensionOf = (value) => (value === "nether" ? "nether" : "overworl
 // Fleet settings as one dimension's turtles see them: that dimension's depot,
 // protected areas and home row, with everything else shared.
 export function dimensionFleet(fleet, dimension) {
-  if (dimensionOf(dimension) === "overworld") return { ...fleet, homeY: HOME_Y, homeZ: HOME_Z };
+  if (dimensionOf(dimension) === "overworld") return { ...fleet, homeY: fleet.homeY ?? HOME_Y, homeZ: fleet.homeZ ?? HOME_Z };
   const own = fleet.dimensions?.nether ?? {};
   return {
     ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] },
@@ -113,6 +115,8 @@ export function sanitizeFleet(input = {}) {
       fuel: patterns(input.items?.fuel, DEFAULT_FLEET.items.fuel),
     },
     veinBlocks: patterns(input.veinBlocks, DEFAULT_FLEET.veinBlocks),
+    homeY: height(input.homeY) ?? HOME_Y,
+    homeZ: coord(input.homeZ) ?? HOME_Z,
     dimensions: {
       nether: {
         depot: sanitizeDepot(input.dimensions?.nether?.depot),

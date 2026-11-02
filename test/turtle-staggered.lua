@@ -1036,6 +1036,47 @@ test("a Nether turtle with its home row at Y 97, Z 6 digs its stairs from there,
   assert(home.y==97 and home.z==6,"saved its home off the Nether row")
 end)
 
+test("an Overworld turtle on a home row moved to Y 80, Z 20 digs its stairs from there, mines, and comes home",function()
+  local OHOME={x=300,y=80,z=20}
+  local function oStairZ(step,r) return stairZ(step,r)+55+OHOME.z end
+  local function okey(w) return key({x=OHOME.x-w.x,y=w.y-OHOME.y,z=w.z-OHOME.z}) end
+  local r,yTop,yBottom=4,73,69
+  local api,sim=miner()
+  local settings=fleetConfig()
+  settings.depot={x=308,y=80,z=20,junk="down",valuables="north",fuel="west"}
+  settings.homeY,settings.homeZ=80,20
+  api.config(settings)
+  api.fix({x=0,y=0,z=0},OHOME)
+  local A,low=yTop+2,yBottom-1
+  for x=OHOME.x-r-1,OHOME.x+r+1 do
+    for y=low-2,79 do
+      for z=OHOME.z-r-1,OHOME.z+r+1 do sim.blocks[okey({x=x,y=y,z=z})]="minecraft:stone" end
+    end
+  end
+  sim.blocks["-8,-1,0"]="minecraft:chest"
+  sim.blocks["-8,0,-1"]="minecraft:chest"
+  sim.blocks["-7,0,0"]="minecraft:chest"
+  sim.chests["-7,0,0"]={name="minecraft:coal",count=200}
+  api.lease("granted")
+  sim.beforeMove=function()
+    local route=api.state().miningRoute
+    if route and route.phase=="toDepot" then api.lease("granted") end
+  end
+  local a={
+    kind="branchMine",pattern="staggered",routeMode="southRow",access="southStairs",entryY=80,
+    routeHome={x=300,y=80,z=20,facing="south"},stairBottom={x=300,y=A,z=oStairZ(80-A,r)},
+    x=296,z=20,y=A,dir="south",radius=r,first=296,last=304,low=low,yTop=yTop,yBottom=yBottom,
+    scan=true,band=0,spacing=5,goal=0,goalItem="valuables",coverage="allSides",
+    veinBounds={x1=295,x2=305,y1=low-1,y2=A,z1=20-r-1,z2=20+r+1},
+    queueId="overworld:80",
+  }
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  for _,p in ipairs(sim.history) do assert(p.y<=0,"went above its Y 80 home row") end
+  local home=api.state().miningRoute.home
+  assert(home.y==80 and home.z==20,"saved its home off the moved row")
+end)
+
 test("a turtle standing still takes its position from GPS again once a wrong GPS host is corrected",function()
   local api,sim=miner()
   -- A wrong host put it 15 blocks north of where it is.
@@ -1173,6 +1214,35 @@ test("a quarry under a protected area is not dug down to",function()
   for x=96,106 do for y=65,66 do for z=-60,-48 do
     assert(sim.blocks[lkey({x=x,y=y,z=z})],"dug the protected area at "..x..","..y..","..z)
   end end end
+end)
+
+test("a quarry drops its junk where it digs, and reaches the depot from its far corner",function()
+  local api,sim=quarrier()
+  local kinds={"minecraft:stone","minecraft:dirt","minecraft:andesite","minecraft:granite","minecraft:diorite"}
+  local n=0
+  for x=86,101 do for y=61,66 do for z=-71,-56 do
+    n=n+1
+    sim.blocks[lkey({x=x,y=y,z=z})]=(n%97==0) and "minecraft:diamond_ore" or kinds[n%5+1]
+  end end end
+  sim.collect=true
+  local trips,was=0,false
+  sim.afterPhysicalMove=function()
+    local w=api.state().world
+    local at=w and math.max(math.abs(w.x-108),math.abs(w.z+55))<=5
+    if at and not was then trips=trips+1 end
+    was=at
+  end
+  -- Its last pass ends at the corner farthest from the depot.
+  local q={kind="areaQuarry",x1=86,x2=101,z1=-71,z2=-56,yTop=66,yBottom=61,queueId="quarry:junk"}
+  api.command({action="fleetJob",args=q})
+  local state=api.state()
+  assert(state.lastFleetResult and state.lastFleetResult.ok,"quarry didn't finish: "..tostring(state.fleetJob and state.fleetJob.failed))
+  quarried(sim,q)
+  assert(trips==1,"went to the depot "..trips.." times")
+  assert(sim.deposits["-8,0,-1"]["minecraft:diamond_ore"]==math.floor(n/97),"didn't bring every diamond to the depot")
+  assert(not sim.deposits["-8,-1,0"],"hauled junk to the depot")
+  assert((sim.worldDrops["minecraft:stone"] or 0)>0,"didn't drop its junk")
+  same(state.world,HOME)
 end)
 
 assert(#failures==0,table.concat(failures,"\n"))

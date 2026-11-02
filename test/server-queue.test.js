@@ -444,3 +444,22 @@ test("a Nether turtle on a Y 97, Z 6 home row gets a job saved from that row", a
   assert.equal(args.y, 92);
   assert.equal(args.z, 6);
 });
+
+test("an Overworld turtle on a home row moved to Y 80, Z 20 gets a job saved from that row", async (t) => {
+  const { dashboard: openDashboard, turtle } = await harness(t);
+  const dashboard = await openDashboard();
+  const fleet = { ...FLEET, homeY: 80, homeZ: 20, depot: { x: 5, y: 80, z: 20, junk: "down", valuables: "north", fuel: "west" } };
+  const status = { ...IDLE, world: { x: 100, y: 80, z: 20 }, homeWorld: null };
+  const miner = await turtle(status, true, { fleet });
+  await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.status?.world?.y === 80);
+  dashboard.send({
+    type: "fleetJob", kind: "branchMine", ids: [7],
+    params: { routeMode: "southRow", pattern: "staggered", yTop: 73, yBottom: 69, radius: 6 },
+  });
+  const { args } = await miner.wait(command);
+  assert.equal(args.routeHome.y, 80);
+  assert.equal(args.routeHome.z, 20);
+  assert.equal(args.entryY, 80);
+  assert.equal(args.y, 75);
+  assert.equal(args.z, 20);
+});

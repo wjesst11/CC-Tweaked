@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.4.7"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.4.8"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -530,7 +530,7 @@ const currentQueue = () => state.jobQueues[state.dimension] ?? { paused: false, 
 // protected areas and home row, everything else shared.
 function dimFleet(fleet = state.fleet, dimension = state.dimension) {
   if (!fleet) return fleet;
-  if (dimension === "overworld") return { ...fleet, homeY: 67, homeZ: -55 };
+  if (dimension === "overworld") return { ...fleet, homeY: fleet.homeY ?? 67, homeZ: fleet.homeZ ?? -55 };
   const own = fleet.dimensions?.nether ?? {};
   return {
     ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] },
@@ -538,7 +538,7 @@ function dimFleet(fleet = state.fleet, dimension = state.dimension) {
   };
 }
 
-// The home row in the shown dimension: Y 67, Z -55 in the Overworld.
+// The home row in the shown dimension, from its settings.
 const homeRowY = () => dimFleet()?.homeY ?? 67;
 const homeRowZ = () => dimFleet()?.homeZ ?? -55;
 
@@ -1431,7 +1431,7 @@ function renderJobOres(turtles) {
 function renderFleetWarnings(turtles, f) {
   const notes = [];
   if (!f.depot) notes.push("Set up the depot below before starting fleet jobs.");
-  else if (f.depot.y !== (f.homeY ?? 67)) {
+  else if (fleetTab() === "branchMine" && f.depot.y !== (f.homeY ?? 67)) {
     notes.push(`Home-row mining needs the depot at the home row's height, Y ${f.homeY ?? 67}. Change Dock Y in Fleet settings.`);
   }
   const old = turtles.filter((t) => t.online && t.version && olderVersion(t.version, SCRIPT_VERSION));
@@ -1784,8 +1784,6 @@ function fillFleetForm() {
     $('[data-field="depot.fuel"]').value = "west";
   }
   $("#areas").replaceChildren(...(f.protect?.areas ?? []).map(areaRow));
-  // The Overworld's home row is always Y 67, Z -55; only the Nether's is set here.
-  $("#home-row-fields").hidden = state.dimension === "overworld";
   renderDockApproach();
   setSaveMsg("");
 }
@@ -1822,8 +1820,8 @@ function collectFleet() {
     return { error: "Every protected area needs both corners filled in." };
   }
   const { homeY, homeZ, ...shared } = out;
-  if (state.dimension === "overworld") return { fleet: shared };
-  if (!Number.isInteger(homeY) || !Number.isInteger(homeZ)) return { error: "Fill in the Nether's home row Y and Z." };
+  if (!Number.isInteger(homeY) || !Number.isInteger(homeZ)) return { error: "Fill in the home row Y and Z." };
+  if (state.dimension === "overworld") return { fleet: { ...shared, homeY, homeZ } };
   // The depot, areas and home row edited here are the Nether's; the Overworld's stay.
   const base = state.fleet ?? {};
   return {
@@ -1831,6 +1829,8 @@ function collectFleet() {
       ...shared,
       depot: base.depot ?? null,
       protect: { ...shared.protect, areas: base.protect?.areas ?? [] },
+      homeY: base.homeY ?? 67,
+      homeZ: base.homeZ ?? -55,
       dimensions: { ...base.dimensions, nether: { depot: shared.depot, areas: shared.protect.areas, homeY, homeZ } },
     },
   };
@@ -2061,7 +2061,10 @@ function bindEvents() {
   $("#auto-dig").addEventListener("change", (event) => store.set("autoDig", event.target.checked ? "1" : null));
 
   // Fleet page
-  for (const tab of $$(".tab[data-fleet-tab]")) tab.addEventListener("click", () => setFleetTab(tab.dataset.fleetTab));
+  for (const tab of $$(".tab[data-fleet-tab]")) tab.addEventListener("click", () => {
+    setFleetTab(tab.dataset.fleetTab);
+    invalidate("fleet");
+  });
   const jobForm = $("#fleet-job-form");
   jobForm.addEventListener("input", (event) => {
     const { name, value } = event.target;
