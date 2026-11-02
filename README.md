@@ -78,7 +78,7 @@ For existing installations, use **Update all scripts** while the turtles are idl
 
    Leave open routes at that height between the turtles' homes and the depot, including the waiting spots 3 to 5 blocks from the dock. A turtle can turn or detour around other turtles on that plane, but it does not fly above the route or dig a new surface passage. One turtle uses the dock at a time. Stock the fuel chest and keep space in the junk and valuables chests. Mining areas and stair excavations must stay outside the depot and its waiting space.
 2. **Protection.** Add protected areas (two corners, inclusive) and adjust the block patterns. `*` matches anything, so `create:*` covers every Create block. A line starting with `!` is an exception: the default `!create:*_ore` leaves Create's zinc ores fair game while every other Create block stays protected. Settings saved before 2.2.0 that protect `create:*` get this exception added once; remove it from the list if you want Create's ores protected again.
-3. **Item sorting.** Name patterns for valuables and fuel. Everything else is junk. With a big fleet the junk chest fills quickly, so empty it into a trash can or a hopper line.
+3. **Item sorting.** Name patterns for valuables and fuel. Everything else is junk. A valuables line starting with `!` is an exception: `*raw_*` with `!*raw_copper*` keeps every raw ore except copper, which is then dropped as junk (script 2.5.1). With a big fleet the junk chest fills quickly, so empty it into a trash can or a hopper line.
 4. Click **Save fleet settings**. Every turtle gets them right away.
 
 ## Fleet jobs

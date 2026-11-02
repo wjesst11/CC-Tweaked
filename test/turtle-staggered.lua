@@ -618,6 +618,20 @@ test("go home waits for a turtle on its stairs instead of giving up",function()
   assert(waits>=180,"never had to wait")
 end)
 
+test("a valuables exception makes raw copper junk while every other raw ore is kept",function()
+  local api,sim,files,a=stoppedDeep()
+  local f=fleetConfig()
+  f.items.valuables={"*diamond*","*raw_*","!*raw_copper*"}
+  api.config(f)
+  sim.items[2],sim.slots[2]="minecraft:raw_copper",30
+  sim.items[3],sim.slots[3]="minecraft:raw_iron",12
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(sim.worldDrops["minecraft:raw_copper"]==30,"brought raw copper home")
+  assert(sim.items[3]=="minecraft:raw_iron" and sim.slots[3]==12,"dropped raw iron")
+  assert(sim.items[1]=="minecraft:diamond" and sim.slots[1]==3,"lost its diamonds")
+end)
+
 test("go home drops junk before leaving the mine and keeps its treasure",function()
   local api,sim,files,a=stoppedDeep()
   sim.items[2],sim.slots[2]="minecraft:cobblestone",40

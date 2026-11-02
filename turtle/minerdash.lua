@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.5.0"
+local VERSION = "2.5.1"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -409,7 +409,7 @@ end
 
 -- Fleet settings & protection ---------------------------------------------------
 
-local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {}, areas = {} }
+local compiled = { protect = {}, unprotect = {}, valuables = {}, notValuables = {}, fuel = {}, vein = {}, areas = {} }
 
 -- "*" is the only wildcard; everything else matches literally.
 function cfg.glob(pattern)
@@ -425,18 +425,22 @@ function cfg.compileList(list)
   return out
 end
 
-function cfg.compileFleet()
-  local protect, items = fleet.protect or {}, fleet.items or {}
-  -- A protected-block line starting with "!" is an exception: "create:*"
-  -- with "!create:*_ore" protects every Create block except its ores.
+-- A list's patterns, and its exceptions: the lines starting with "!".
+function cfg.compileWithExceptions(list)
   local keep, except = {}, {}
-  for _, p in ipairs(type(protect.blocks) == "table" and protect.blocks or {}) do
+  for _, p in ipairs(type(list) == "table" and list or {}) do
     if type(p) == "string" and p:sub(1, 1) == "!" then except[#except + 1] = p:sub(2)
     else keep[#keep + 1] = p end
   end
-  compiled.protect = cfg.compileList(keep)
-  compiled.unprotect = cfg.compileList(except)
-  compiled.valuables = cfg.compileList(items.valuables)
+  return cfg.compileList(keep), cfg.compileList(except)
+end
+
+function cfg.compileFleet()
+  local protect, items = fleet.protect or {}, fleet.items or {}
+  -- "create:*" with "!create:*_ore" protects every Create block except its
+  -- ores; "*raw_*" with "!*raw_copper*" keeps every raw ore except copper.
+  compiled.protect, compiled.unprotect = cfg.compileWithExceptions(protect.blocks)
+  compiled.valuables, compiled.notValuables = cfg.compileWithExceptions(items.valuables)
   compiled.fuel = cfg.compileList(items.fuel)
   compiled.vein = cfg.compileList(fleet.veinBlocks)
   -- The depot and protected areas belong to its dimension; the rest is shared.
@@ -1438,7 +1442,7 @@ end
 
 function dock.category(name)
   if matches(name, compiled.fuel) then return "fuel" end
-  if matches(name, compiled.valuables) then return "valuables" end
+  if matches(name, compiled.valuables) and not matches(name, compiled.notValuables) then return "valuables" end
   return "junk"
 end
 
@@ -2515,12 +2519,12 @@ local GOAL_ITEMS = {
   valuables = { name = "valuables" },
 }
 
-local function countItems(patterns)
+local function countItems(patterns, except)
   local n = 0
   for slot = 1, 16 do
     if turtle.getItemCount(slot) > 0 then
       local item = turtle.getItemDetail(slot)
-      if item and matches(item.name, patterns) then n = n + item.count end
+      if item and matches(item.name, patterns) and not (except and matches(item.name, except)) then n = n + item.count end
     end
   end
   return n
@@ -2644,7 +2648,8 @@ KINDS.branchMine = {
   goal = function(a)
     if (a.goal or 0) <= 0 then return nil end
     local g = goalOf(a)
-    return { count = a.goal, name = g.name, patterns = g.match and cfg.compileList(g.match) or compiled.valuables }
+    if g.match then return { count = a.goal, name = g.name, patterns = cfg.compileList(g.match) } end
+    return { count = a.goal, name = g.name, patterns = compiled.valuables, except = compiled.notValuables }
   end,
   detail = function(a, i, fj)
     local c = tunnelCell(a, math.min(i, a.length - 1))
@@ -2986,7 +2991,7 @@ local function fleetWork()
   -- with, and not ones it has since dropped off or burnt.
   local function tally()
     if not goal then return end
-    local now = countItems(goal.patterns)
+    local now = countItems(goal.patterns, goal.except)
     fleetJob.found = (fleetJob.found or 0) + math.max(0, now - (fleetJob.held or now))
     fleetJob.held = now
   end
