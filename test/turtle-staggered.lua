@@ -1029,5 +1029,17 @@ test("a Nether turtle with its home row at Y 97 digs its stairs from there, mine
   assert(api.state().miningRoute.home.y==97)
 end)
 
+test("a turtle standing still takes its position from GPS again once a wrong GPS host is corrected",function()
+  local api,sim=miner()
+  -- A wrong host put it 15 blocks north of where it is.
+  api.fix({x=0,y=0,z=0},{x=50,y=97,z=-40})
+  same(api.state().world,{x=50,y=97,z=-40})
+  api.fix({x=0,y=0,z=0},{x=50,y=97,z=-55})
+  same(api.state().world,{x=50,y=97,z=-55})
+  -- A matching fix changes nothing.
+  api.fix({x=0,y=0,z=0},{x=50,y=97,z=-55})
+  same(api.state().world,{x=50,y=97,z=-55})
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

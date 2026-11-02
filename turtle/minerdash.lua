@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.1"
+local VERSION = "2.4.2"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -397,9 +397,11 @@ function net.onFix(l, w)
       end
     end
     -- No direction fits (moved by hand while calibrating?): re-anchor below.
-  elseif calib and l.y - calib.l.y == w.y - calib.w.y then
-    return -- hasn't moved sideways yet
+  elseif calib and l.y - calib.l.y == w.y - calib.w.y and w.x == calib.w.x and w.z == calib.w.z then
+    return -- hasn't moved sideways yet, and GPS still agrees
   end
+  -- Otherwise start again from this fix, such as after a wrong GPS host was
+  -- corrected while it stood still.
   calib = { l = { x = l.x, y = l.y, z = l.z }, w = w, home = savedHome }
   saveState()
   changed()
