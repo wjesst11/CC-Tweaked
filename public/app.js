@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.4.5"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.4.6"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -2020,6 +2020,7 @@ function bindEvents() {
   $("#home-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const form = event.target;
+    if (currentTurtle()?.status?.miningRoute && !confirm("Make these coordinates its new home? Its saved staircase is forgotten, so it can no longer climb back up it.")) return;
     command("setHome", {
       x: Number(form.elements.x.value), y: Number(form.elements.y.value), z: Number(form.elements.z.value),
       facing: form.elements.facing.value,
@@ -2030,6 +2031,7 @@ function bindEvents() {
   for (const btn of $$("[data-cmd]")) {
     btn.addEventListener("click", () => {
       if (btn.dataset.cmd === "forceHome" && !confirm("Cancel this job and return home? Mine back to the saved stair bottom at the target safe Y, then climb the exact stairs north. Protections stay active.")) return;
+      if (btn.dataset.cmd === "setHome" && currentTurtle()?.status?.miningRoute && !confirm("Make this spot its new home? Its saved staircase is forgotten, so it can no longer climb back up it.")) return;
       command(btn.dataset.cmd);
     });
   }
@@ -2139,7 +2141,7 @@ function bindEvents() {
       const n = `${ids.length} turtle${ids.length === 1 ? "" : "s"}`;
       if (action === "goHome" && !confirm(`Cancel the jobs of ${n} and send them home?`)) return;
       if (action === "forceHome" && !confirm(`Cancel the jobs of ${n} and return home? Mine back to their own saved stair bottoms at the target safe Y, then climb the exact stairs north. Protections stay active.`)) return;
-      if (action === "setHome" && !confirm(`Make the current spot of each of ${n} its new home?`)) return;
+      if (action === "setHome" && !confirm(`Make the current spot of each of ${n} its new home? Saved staircases are forgotten, so they can no longer climb back up them.`)) return;
       sendRaw({ type: "cmd", ids, action, args: {} });
     });
   }

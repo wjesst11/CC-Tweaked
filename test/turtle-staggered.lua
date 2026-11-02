@@ -1059,5 +1059,35 @@ test("with nothing protected, nylium grown into its own stairs is dug through on
   for _,p in ipairs(sim.history) do assert(p.y<=0,"went above its home row") end
 end)
 
+test("set home forgets the saved staircase, so the turtle can quarry an area",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  local ok,msg=api.actions.setHome({})
+  assert(ok,msg)
+  assert(msg:find("staircase is forgotten"),msg)
+  assert(api.state().miningRoute==nil,"kept its saved staircase")
+  local saved=assert(load("return "..files[".minerdash_state"]))()
+  assert(saved.miningRoute==nil,"saved staircase is still on disk")
+  local q={kind="areaQuarry",x1=101,x2=102,z1=-54,z2=-53,yTop=66,yBottom=64,queueId="quarry:1"}
+  sim.onPullEvent=function() if api.leases().depot=="waiting" then api.lease("granted") end end
+  api.command({action="fleetJob",args=q})
+  local state=api.state()
+  assert(state.lastFleetResult and state.lastFleetResult.ok,"quarry didn't finish: "..tostring(state.lastFleetResult and state.lastFleetResult.msg).." / "..table.concat(sim.prints," | "):sub(-600))
+  for x=101,102 do
+    for y=64,66 do
+      for z=-54,-53 do assert(not sim.blocks[lkey({x=x,y=y,z=z})],"left "..x..","..y..","..z) end
+    end
+  end
+  same(state.world,a.routeHome)
+end)
+
+test("set home is refused while a level job is saved, and keeps the staircase",function()
+  local api,sim,files,a=stoppedDeep()
+  local ok,msg=api.actions.setHome({})
+  assert(not ok and msg=="Cancel its saved level job first",tostring(msg))
+  assert(api.state().miningRoute,"lost its saved staircase")
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

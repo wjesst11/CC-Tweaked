@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.5"
+local VERSION = "2.4.6"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -3297,11 +3297,17 @@ actions.dropAll = function()
 end
 
 -- Home is set once on first run; this moves it, either to the current spot or
--- to world coordinates (x, y, z and a facing).
+-- to world coordinates (x, y, z and a facing). A row miner's saved staircase
+-- belongs to its old home and is forgotten; its next row job starts a new one.
 actions.setHome = function(a)
-  if miningRoute then return false, "The mining home is saved permanently with its staircase" end
+  if miningRoute and fleetJob then return false, "Cancel its saved level job first" end
+  if a.x ~= nil and not gpsTrusted() then return false, "Needs GPS to set home by coordinates" end
+  local forgot = miningRoute and "; its saved staircase is forgotten" or ""
+  if miningRoute then
+    miningRoute = nil
+    log("info", "Saved staircase forgotten for a new home")
+  end
   if a.x ~= nil then
-    if not gpsTrusted() then return false, "Needs GPS to set home by coordinates" end
     local w = { x = clampInt(a.x, -3e7, 3e7, 0), y = clampInt(a.y, -64, 320, 64), z = clampInt(a.z, -3e7, 3e7, 0) }
     home = fromWorld(w)
     home.heading = (toCompass(a.facing or "north") - calib.f0) % 4
@@ -3309,11 +3315,11 @@ actions.setHome = function(a)
     remember(pos)
     saveState()
     changed()
-    return true, ("Home set to %d, %d, %d"):format(w.x, w.y, w.z)
+    return true, ("Home set to %d, %d, %d%s"):format(w.x, w.y, w.z, forgot)
   end
   setHome()
   local w = toWorld(home) or home
-  return true, ("Home set to %d, %d, %d"):format(w.x, w.y, w.z)
+  return true, ("Home set to %d, %d, %d%s"):format(w.x, w.y, w.z, forgot)
 end
 
 actions.resetPosition = function()
