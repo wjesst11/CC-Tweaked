@@ -382,3 +382,43 @@ test("a turtle joins a running staggered job once the busy turtle switches to fe
   assert.equal(start.args.jobId, "job-x");
   assert.deepEqual([Math.min(start.args.first, start.args.last), Math.max(start.args.first, start.args.last)], [101, 120]);
 });
+
+test("each dimension has its own dock turns, job queue and fleet-wide commands", async (t) => {
+  const { dashboard: openDashboard, turtle } = await harness(t);
+  const dashboard = await openDashboard();
+  const fleet = {
+    ...FLEET,
+    dimensions: { nether: { depot: { x: 5, y: 67, z: -55, junk: "down", valuables: "north", fuel: "west" }, areas: [] } },
+  };
+  const overworld = await turtle(IDLE, true, { fleet });
+  const nether = await turtle(
+    { ...IDLE, label: "Nether miner", dimension: "nether" }, true,
+    { id: 8, label: "Nether miner", dimension: "nether", fleet },
+  );
+  await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.id === 8 && msg.turtle.status?.dimension === "nether");
+
+  // Each dimension's dock has its own queue of turns.
+  overworld.send({ type: "lease", resource: "depot", op: "acquire" });
+  nether.send({ type: "lease", resource: "depot", op: "acquire" });
+  await dashboard.wait((msg) => msg.type === "depot" && msg.dimension === "nether" && msg.depot.queue.includes(8));
+  const dock = await dashboard.wait((msg) => msg.type === "depot" && msg.dimension === "overworld" && msg.depot.queue.includes(7));
+  assert.equal(dock.depot.queue.includes(8), false);
+
+  // A Nether job can't take an Overworld turtle.
+  const refused = await dashboard.exchange(
+    { type: "queueFleetJob", kind: "areaQuarry", params: PARAMS, ids: [7], dimension: "nether" }, (msg) => msg.type === "queueResult",
+  );
+  assert.equal(refused.ok, false);
+  assert.match(refused.msg, /Overworld/);
+
+  // Pause all in the Nether pauses only Nether turtles and the Nether queue.
+  const after = overworld.messages.length;
+  await dashboard.exchange(
+    { type: "cmd", id: "all", action: "pause", dimension: "nether" },
+    (msg) => msg.type === "jobQueue" && msg.dimension === "nether" && msg.queue.paused,
+  );
+  await nether.wait((msg) => msg.type === "cmd" && msg.action === "pause");
+  await delay(300);
+  assert.equal(overworld.messages.slice(after).some((msg) => msg.type === "cmd" && msg.action === "pause"), false);
+  assert.equal(dashboard.messages.some((msg) => msg.type === "jobQueue" && msg.dimension === "overworld" && msg.queue.paused), false);
+});

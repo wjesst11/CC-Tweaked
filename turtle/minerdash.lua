@@ -21,7 +21,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.3.11"
+local VERSION = "2.4.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -163,6 +163,7 @@ local function loadState()
     miningRoute = data.miningRoute
     odometer = tonumber(data.odometer) or 0
     if data.holding then leases.depot = "granted" end
+    cfg.dimension = data.dimension == "nether" and "nether" or nil
   end
 end
 
@@ -187,7 +188,7 @@ local function saveState()
   local encoded = textutils.serialize(plainCopy({
     pos = pos, heading = heading, home = home, calib = calib,
     fleetJob = fleetJob, lastFleetResult = lastFleetResult, miningRoute = miningRoute,
-    holding = leases.depot == "granted", odometer = odometer,
+    holding = leases.depot == "granted", odometer = odometer, dimension = cfg.dimension,
   }))
   local f, err = fs.open(STATE_FILE, "w")
   if not f then error("Cannot save turtle state: " .. tostring(err), 0) end
@@ -405,7 +406,7 @@ end
 
 -- Fleet settings & protection ---------------------------------------------------
 
-local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {} }
+local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {}, areas = {} }
 
 -- "*" is the only wildcard; everything else matches literally.
 function cfg.glob(pattern)
@@ -435,6 +436,13 @@ function cfg.compileFleet()
   compiled.valuables = cfg.compileList(items.valuables)
   compiled.fuel = cfg.compileList(items.fuel)
   compiled.vein = cfg.compileList(fleet.veinBlocks)
+  -- The depot and protected areas belong to its dimension; the rest is shared.
+  if cfg.dimension == "nether" then
+    local n = fleet.dimensions and fleet.dimensions.nether or {}
+    compiled.depot, compiled.areas = n.depot, n.areas or {}
+  else
+    compiled.depot, compiled.areas = fleet.depot, protect.areas or {}
+  end
 end
 
 local function matches(name, patterns)
@@ -517,7 +525,7 @@ local function protection(dir, block, context)
     if not gpsTrusted() then return "GPS position unknown, so the home mining radius can't be checked" end
     if not rowRoute.mayReach(toWorld(pos), toWorld(neighbour(dir))) then return "outside the mining radius from the saved home" end
   end
-  local areas = fleet.protect and fleet.protect.areas or {}
+  local areas = compiled.areas
   if #areas == 0 then return nil end
   if not gpsTrusted() then return "GPS position unknown, so protected areas can't be checked" end
   local w = toWorld(neighbour(dir))
@@ -823,7 +831,7 @@ local function findPath(goal, lenient)
   -- The dock is only for the turtle whose turn it is, and the others keep out
   -- of the space around it unless there's no other way.
   local dock
-  if fleet.depot and leases.depot ~= "granted" and gpsTrusted() then dock = fromWorld(fleet.depot) end
+  if compiled.depot and leases.depot ~= "granted" and gpsTrusted() then dock = fromWorld(compiled.depot) end
   -- Routes kept to blocks it knows keep out of it altogether: they'd often go
   -- back through it the way they came. (Without one, it's still avoided.)
   local keepOut = dock and goal.keepOut and not inDockRoom(dock, c.x, c.y, c.z)
@@ -1106,7 +1114,7 @@ end
 local depotVisit, depotCost
 
 local function depotReady()
-  return fleet.depot ~= nil and gpsTrusted()
+  return compiled.depot ~= nil and gpsTrusted()
 end
 
 -- A trip describes how a local job travels between its work area and its base
@@ -1349,7 +1357,7 @@ end
 -- block just outside the space around the dock, within 2 of its height, that
 -- isn't another turtle or another turtle's home.
 function dock.around()
-  local dock, now = fromWorld(fleet.depot), os.clock()
+  local dock, now = fromWorld(compiled.depot), os.clock()
   local function off(x, z) return math.max(math.abs(x - dock.x), math.abs(z - dock.z)) end
   return {
     reached = function(x, y, z)
@@ -1368,7 +1376,7 @@ end
 
 -- Whether world position w is where turtles wait for the dock, or closer.
 function dock.atDepot(w)
-  local D = fleet.depot
+  local D = compiled.depot
   return D ~= nil and math.max(math.abs(w.x - D.x), math.abs(w.z - D.z)) <= DOCK_ROOM + 3 and math.abs(w.y - D.y) <= 2
 end
 
@@ -1488,7 +1496,7 @@ end
 -- the fuel chest. One chest at a time, fuel last, so it turns as little as it
 -- can. Returns a description of anything the player needs to fix.
 function dock.work(minFuel)
-  local D = fleet.depot
+  local D = compiled.depot
   local target = math.min(math.max(tonumber(fleet.refuelTo) or 10000, minFuel), fuelLimit())
   local full, slots = {}, { junk = {}, valuables = {}, fuel = {} }
   -- Fuel left after refuelling goes back in the fuel chest. Cargo space
@@ -1554,7 +1562,7 @@ end
 -- the longest flight from there it has actually made (`flown`), or until it
 -- has made one, the straight-line distance with room for detours.
 function depotCost(w, flown)
-  local direct = distance(w, fleet.depot)
+  local direct = distance(w, compiled.depot)
   local fly = flown and math.max(flown, direct) or math.floor(direct * 1.5) + 16
   return fly + 4 * (DOCK_ROOM + 3)
 end
@@ -1564,7 +1572,7 @@ end
 -- steps back out before the next turtle's turn. Retries until it has room and
 -- at least minFuel. Returns how many blocks it flew to get to the depot.
 function rowRoute.sharedDepotVisit(minFuel, flat)
-  local D = fleet.depot
+  local D = compiled.depot
   if not D then error("Set up the depot on the dashboard first", 0) end
   local start, flown = odometer, nil
   -- The chests are solid, so don't plan a way through them.
@@ -1807,7 +1815,7 @@ end
 
 function rowRoute.ensure(a)
   rowRoute.validate(a)
-  if not fleet.depot or fleet.depot.y ~= 67 then error("The shared depot dock must be at Y 67 for row mining", 0) end
+  if not compiled.depot or compiled.depot.y ~= 67 then error("The shared depot dock must be at Y 67 for row mining", 0) end
   local deadline = os.clock() + 10
   while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
   if not miningRoute then
@@ -1891,7 +1899,7 @@ end
 
 -- The lowest Y of the protected area named "Home": the floor of the base.
 function rowRoute.homeFloor()
-  for _, a in ipairs(fleet.protect and fleet.protect.areas or {}) do
+  for _, a in ipairs(compiled.areas) do
     if tostring(a.name or ""):lower() == "home" then return math.min(a.y1, a.y2) end
   end
 end
@@ -1933,10 +1941,17 @@ function rowRoute.intoCircle()
   end
 end
 
+-- On the home row (Y 67, Z -55) it's at the surface, wherever its saved
+-- phase says it was: put back there by hand, it walks along the surface to
+-- its own home without digging.
+function rowRoute.onHomeRow(w)
+  return w.y == 67 and w.z == miningRoute.home.z
+end
+
 function rowRoute.unwind()
   local r = miningRoute
   rowRoute.intoCircle()
-  if not r.work or rowRoute.surfacePhase() then return end
+  if not r.work or rowRoute.surfacePhase() or rowRoute.onHomeRow(toWorld(pos)) then return end
   local current = toWorld(pos)
   if samePos(current, r.work) then return end
   local path = r.veinPath or (fleetJob and fleetJob.vein) or {}
@@ -2035,7 +2050,7 @@ function rowRoute.mayClearBeside(w, block)
   for f = 0, 3 do
     local c = { x = w.x + CX[f], y = w.y, z = w.z + CZ[f] }
     if not rowRoute.withinRadius(c) then return false end
-    for _, a in ipairs(fleet.protect and fleet.protect.areas or {}) do
+    for _, a in ipairs(compiled.areas) do
       if inBox(c, a) then return false end
     end
   end
@@ -2144,7 +2159,7 @@ function rowRoute.exit(intent)
   rowRoute.unwind()
   rowRoute.leaveColumns()
   local w = toWorld(pos)
-  if w.y == 67 and (rowRoute.surfacePhase() or rowRoute.opened(w)) then
+  if w.y == 67 and (rowRoute.surfacePhase() or rowRoute.opened(w) or rowRoute.onHomeRow(w)) then
     setDetail("Returning to the saved home")
     rowRoute.save("toStairHome")
     rowRoute.surface(miningRoute.home)
@@ -2219,7 +2234,7 @@ end
 
 function depotVisit(minFuel)
   if not miningRoute then return rowRoute.sharedDepotVisit(minFuel, false) end
-  if not fleet.depot or fleet.depot.y ~= 67 then error("The shared depot dock must be at Y 67", 0) end
+  if not compiled.depot or compiled.depot.y ~= 67 then error("The shared depot dock must be at Y 67", 0) end
   miningRoute.minFuel = math.max(miningRoute.minFuel or 0, minFuel or 0)
   local flown = 0
   if miningRoute.phase ~= "fromDepot" then
@@ -2840,7 +2855,7 @@ end
 local function fleetWork()
   local k = kindOf(fleetJob)
   if not k then error("Unknown fleet job " .. tostring(fleetJob.kind), 0) end
-  if not fleet.depot then error("Set up the depot on the dashboard first", 0) end
+  if not compiled.depot then error("Set up the depot on the dashboard first", 0) end
   local a = fleetJob.args
   if fleetJob.kind == "branchMine" then rowRoute.ensure(a) else ensureCalibrated() end
   local total = k.total(a)
@@ -3268,6 +3283,26 @@ end
 
 actions.update = installUpdate
 
+-- Which dimension it works in: its depot and protected areas are that
+-- dimension's. Its saved home, stairs, GPS frame and any paused job belong to
+-- the old one and are forgotten. In the new dimension, place it at its home
+-- row (Y 67, Z -55) facing south; its first row job saves the new home.
+actions.setDimension = function(a)
+  local d = (a.dimension == "nether" or a.dimension == "overworld") and a.dimension or nil
+  if not d then return false, "Unknown dimension" end
+  local name = d == "nether" and "Nether" or "Overworld"
+  if d == (cfg.dimension or "overworld") then return true, "Already a " .. name .. " turtle" end
+  release("depot")
+  cfg.dimension = d == "nether" and "nether" or nil
+  miningRoute, fleetJob, pendingTrip, calib = nil, nil, nil, nil
+  pos, heading = { x = 0, y = 0, z = 0 }, 0
+  blocked, blockedCount, traffic, trafficCount, parked, homesNear = {}, 0, {}, 0, {}, {}
+  cfg.compileFleet()
+  setHome()
+  log("info", "Now a " .. name .. " turtle")
+  return true, "Now a " .. name .. " turtle. Its saved home, stairs and any paused job are forgotten: place it at its home row (Y 67, Z -55) facing south."
+end
+
 actions.forgetJob = function()
   fleetJob = nil
   saveState()
@@ -3416,6 +3451,8 @@ function net.status()
     staggeredSupported = true,
     midJobUpdateSupported = true,
     jobShareSupported = true,
+    dimensionSupported = true,
+    dimension = cfg.dimension or "overworld",
     miningRoute = miningRoute and {
       home = miningRoute.home, bottom = miningRoute.bottom, targetY = miningRoute.targetY,
       radius = miningRoute.radius,
@@ -3608,6 +3645,7 @@ function net.connection()
       send({
         type = "hello", token = token, id = os.getComputerID(), label = os.getComputerLabel(), version = VERSION,
         holding = leases.depot == "granted", fleet = (fleet.updatedAt or 0) > 0 and fleet or nil,
+        dimension = cfg.dimension or "overworld",
       })
       changed()
       parallel.waitForAny(function() net.receiver(sock) end, net.heartbeat)
@@ -3631,7 +3669,7 @@ end
 -- would keep every other turtle waiting.
 function net.dropStaleDockTurn()
   if leases.depot ~= "granted" then return end
-  local w, D = worldPos(), fleet.depot
+  local w, D = worldPos(), compiled.depot
   if w and D and inDockRoom(D, w.x, w.y, w.z) then return end
   leases.depot = nil
   saveState()

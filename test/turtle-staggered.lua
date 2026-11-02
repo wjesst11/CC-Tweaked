@@ -948,5 +948,47 @@ test("outside its radius in a shaft, or at the corridor level, it walks back int
   end
 end)
 
+test("a Nether turtle uses the Nether's depot and protected areas, and switching forgets its saved home",function()
+  local api,sim,files,a=stoppedDeep()
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  local settings=fleetConfig()
+  settings.protect.areas={homeArea(45)}
+  settings.dimensions={nether={depot={x=8,y=67,z=-50,junk="down",valuables="north",fuel="west"},areas={homeArea(100)}}}
+  api.config(settings)
+  assert(api.row.homeFloor()==45 and api.currentDepot().x==108)
+  -- The same dimension changes nothing.
+  api.command({action="setDimension",args={dimension="overworld"}})
+  assert(api.state().miningRoute,"forgot its route switching to the dimension it was in")
+  api.command({action="setDimension",args={dimension="nether"}})
+  assert(api.dimension()=="nether")
+  assert(api.row.homeFloor()==100,"still uses the Overworld's protected areas")
+  assert(api.currentDepot().x==8,"still uses the Overworld's depot")
+  local state=api.state()
+  assert(not state.miningRoute and not state.fleetJob,"kept its Overworld home or job")
+  -- It stays a Nether turtle after a reboot.
+  local again=miner(files)
+  assert(again.dimension()=="nether","forgot its dimension after a reboot")
+end)
+
+test("a turtle put back on the home row by hand walks along the surface to its own home",function()
+  local api,sim,files,a=stoppedDeep()
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  api.protection({homeArea(45)})
+  -- Into the next turtle's slot, as if carried there with its saved phase
+  -- still underground.
+  while sim.heading~=1 do api.command({action="turnRight"}) end
+  api.command({action="forward"})
+  same(api.state().world,{x=99,y=67,z=-55})
+  local route=api.state().miningRoute
+  route.phase,route.intent="work","home"
+  api.save()
+  local digs=sim.digs
+  api.command({action="recoverRoute"})
+  same(api.state().world,a.routeHome)
+  assert(sim.digs==digs,"dug on the surface")
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

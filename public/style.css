@@ -526,6 +526,10 @@ textarea {
 /* Views & job controls ----------------------------------------------------- */
 
 .topbar .views { margin-left: 8px; }
+.topbar .dimensions { margin-left: 8px; }
+.tab[data-dimension="nether"][aria-selected="true"] { color: var(--serious); }
+.dim-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.dim-count:empty { display: none; }
 .job-actions { display: flex; gap: 4px; }
 .stat-head { height: auto; min-height: 18px; gap: 8px; }
 .name-row { display: flex; align-items: center; gap: 4px; min-width: 0; }

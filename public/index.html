@@ -43,13 +43,17 @@
         <button class="tab" role="tab" data-view="fleet">Fleet</button>
         <button class="tab" role="tab" data-view="map">3D map</button>
       </div>
+      <div class="tabs inline dimensions" role="tablist" aria-label="Dimension">
+        <button class="tab" role="tab" data-dimension="overworld">Overworld <span class="dim-count"></span></button>
+        <button class="tab" role="tab" data-dimension="nether">Nether <span class="dim-count"></span></button>
+      </div>
       <div class="spacer"></div>
       <div class="topbar-actions">
         <button id="btn-install" class="btn">Add turtles</button>
-        <button id="btn-resume-all" class="btn" title="Resume every paused turtle">Resume all</button>
-        <button id="btn-recall-all" class="btn" title="Cancel every job and send every turtle home">Recall all</button>
-        <button id="btn-unload-all" class="btn" title="Send every turtle to the depot to drop off what it carries. Turtles on a job do it before their next step and carry on.">Unload all</button>
-        <button id="btn-pause-all" class="btn danger" title="Freeze every turtle where it is">Pause all</button>
+        <button id="btn-resume-all" class="btn" title="Resume every paused turtle in this dimension">Resume all</button>
+        <button id="btn-recall-all" class="btn" title="Cancel every job in this dimension and send its turtles home">Recall all</button>
+        <button id="btn-unload-all" class="btn" title="Send every turtle in this dimension to its depot to drop off what it carries. Turtles on a job do it before their next step and carry on.">Unload all</button>
+        <button id="btn-pause-all" class="btn danger" title="Freeze every turtle in this dimension where it is">Pause all</button>
         <button id="btn-theme" class="btn icon" title="Toggle light/dark" aria-label="Toggle light/dark theme">
           <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg>
         </button>
@@ -281,6 +285,7 @@
                   <button class="btn needs-idle" data-cmd="setHome">Set home here</button>
                   <button id="btn-home-coords" class="btn ghost needs-idle">Set home to…</button>
                   <button id="btn-reset-pos" class="btn ghost needs-idle" title="Use after moving the turtle by hand">Reset position</button>
+                  <button id="btn-dimension" class="btn ghost needs-idle"></button>
                 </div>
                 <p class="hint">Home and depot returns use the saved stair bottom, then the exact staircase north. Underground returns may mine at the target safe Y; stair climbing only clears fallen sand or gravel. Surface travel stays at Y 67; protected blocks, areas and other turtles stay protected.</p>
                 <form id="home-form" class="home-form" hidden>

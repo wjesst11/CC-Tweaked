@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.3.11"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.4.0"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -76,8 +76,11 @@ const state = {
   mapMode: store.get("mapMode") === "fleet" ? "fleet" : "turtle",
   fleet: null, // shared fleet settings from the server
   fleetDirty: false, // the settings form has unsaved edits
-  depot: { holder: null, queue: [] },
-  jobQueue: { paused: false, jobs: [] },
+  // The dashboard shows one dimension at a time: its turtles, maps, depot,
+  // protected areas and job queue.
+  dimension: store.get("dimension") === "nether" ? "nether" : "overworld",
+  depots: { overworld: { holder: null, queue: [] }, nether: { holder: null, queue: [] } },
+  jobQueues: { overworld: { paused: false, jobs: [] }, nether: { paused: false, jobs: [] } },
   queueReady: false,
   connected: false,
   picked: new Set(), // turtles picked for a fleet job
@@ -270,22 +273,22 @@ function handle(msg) {
       noteServer(msg.server);
       state.turtles = new Map(msg.turtles.map((t) => [t.id, t]));
       for (const t of state.turtles.values()) recordTrail(t);
-      state.depot = msg.depot ?? state.depot;
-      state.jobQueue = msg.jobQueue ?? { paused: false, jobs: [] };
+      state.depots = msg.depots ?? { ...state.depots, overworld: msg.depot ?? state.depots.overworld };
+      state.jobQueues = msg.jobQueues ?? { ...state.jobQueues, overworld: msg.jobQueue ?? { paused: false, jobs: [] } };
       state.queueReady = true;
       state.ready = true;
       state.revealSelected = true;
       ensureSelection();
       invalidate("list", "detail", "log", "fleet", "map");
       setFleet(msg.fleet);
-      if (world) sendRaw({ type: "mined" }); // reconnected: fetch the history again
+      if (world) sendRaw({ type: "mined", dimension: state.dimension }); // reconnected: fetch the history again
       break;
 
     case "turtle": {
       const t = { ...msg.turtle, logs: state.turtles.get(msg.turtle.id)?.logs ?? [] };
       state.turtles.set(t.id, t);
       recordTrail(t);
-      if (!state.turtles.has(state.selected)) {
+      if (!shown(state.turtles.get(state.selected))) {
         ensureSelection();
         invalidate("log");
       }
@@ -318,33 +321,36 @@ function handle(msg) {
       break;
 
     case "mined":
+      if (dimOf(msg) !== state.dimension) break;
       world?.clearMined();
       world?.addMined(msg.names, msg.blocks);
       invalidate("map");
       break;
 
     case "dug":
+      if (dimOf(msg) !== state.dimension) break;
       world?.addMined(msg.names, msg.blocks);
       // The server keeps the latest 250,000; past that, start again from its copy.
       if (world?.stats().mined > 275_000) {
         world.clearMined();
-        sendRaw({ type: "mined" });
+        sendRaw({ type: "mined", dimension: state.dimension });
       }
       invalidate("map");
       break;
 
     case "minedCleared":
+      if (dimOf(msg) !== state.dimension) break;
       world?.clearMined();
       invalidate("map");
       break;
 
     case "depot":
-      state.depot = msg.depot;
+      state.depots[dimOf(msg)] = msg.depot;
       invalidate("fleet");
       break;
 
     case "jobQueue":
-      state.jobQueue = msg.queue;
+      state.jobQueues[dimOf(msg)] = msg.queue;
       state.queueReady = true;
       invalidate("fleet");
       break;
@@ -511,14 +517,54 @@ function renderBulkRenamePreview() {
 
 // Selection & views ------------------------------------------------------------
 
+// Each turtle works in one dimension; messages without one are the Overworld's.
+const dimOf = (o) => (o?.dimension ?? o?.status?.dimension) === "nether" ? "nether" : "overworld";
+const DIMENSION_NAMES = { overworld: "Overworld", nether: "Nether" };
+const shown = (t) => Boolean(t) && dimOf(t) === state.dimension;
+const currentDepot = () => state.depots[state.dimension] ?? { holder: null, queue: [] };
+const currentQueue = () => state.jobQueues[state.dimension] ?? { paused: false, jobs: [] };
+
+// The fleet settings as the shown dimension's turtles see them: its own depot
+// and protected areas, everything else shared.
+function dimFleet(fleet = state.fleet) {
+  if (!fleet || state.dimension === "overworld") return fleet;
+  const own = fleet.dimensions?.nether ?? {};
+  return { ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] } };
+}
+
+function setDimension(dimension) {
+  if (dimension === state.dimension) return;
+  if (state.fleetDirty && !confirm("Discard your unsaved Fleet settings changes?")) return;
+  state.dimension = dimension;
+  store.set("dimension", dimension);
+  state.fleetDirty = false;
+  fillFleetForm();
+  ensureSelection();
+  renderDimensionTabs();
+  if (world) {
+    world.clearMined();
+    sendRaw({ type: "mined", dimension });
+  }
+  invalidate("list", "detail", "log", "fleet", "map");
+}
+
+function renderDimensionTabs() {
+  const counts = { overworld: 0, nether: 0 };
+  for (const t of state.turtles.values()) counts[dimOf(t)]++;
+  for (const tab of $$(".tab[data-dimension]")) {
+    tab.setAttribute("aria-selected", String(tab.dataset.dimension === state.dimension));
+    $(".dim-count", tab).textContent = counts[tab.dataset.dimension] || "";
+  }
+}
+
 function sortedTurtles() {
-  return [...state.turtles.values()].sort(
+  return [...state.turtles.values()].filter(shown).sort(
     (a, b) => b.online - a.online || nameOf(a).localeCompare(nameOf(b), undefined, { numeric: true }),
   );
 }
 
 function ensureSelection() {
-  if (state.turtles.has(state.selected)) return;
+  if (shown(state.turtles.get(state.selected))) return;
   state.selected = sortedTurtles()[0]?.id ?? null;
   store.set("selected", state.selected);
 }
@@ -595,6 +641,7 @@ function matchesSearch(t, query) {
 }
 
 function renderList() {
+  renderDimensionTabs();
   const turtles = sortedTurtles();
   const states = new Map(turtles.map((t) => [t.id, turtleState(t)]));
 
@@ -632,7 +679,11 @@ function renderList() {
 
   const empty = $("#list-empty");
   empty.hidden = visible.length > 0 || !state.ready;
-  empty.textContent = turtles.length ? "No turtles match." : "No turtles have connected yet.";
+  empty.textContent = turtles.length
+    ? "No turtles match."
+    : state.dimension === "nether"
+      ? "No Nether turtles yet. Open a turtle under Overworld and use Move to the Nether."
+      : "No Overworld turtles have connected yet.";
   $("#turtle-count").textContent = turtles.length ? `${turtles.length - counts.offline} of ${turtles.length} online` : "";
 }
 
@@ -713,10 +764,16 @@ function renderDetail(rebuildLog = false) {
 
   renderInventory(s, t.online && !busy);
   renderHome(s);
+  const other = dimOf(t) === "nether" ? "overworld" : "nether";
+  $("#btn-dimension").textContent = `Move to the ${DIMENSION_NAMES[other]}`;
+  $("#btn-dimension").title = s.dimensionSupported
+    ? `Make it a ${DIMENSION_NAMES[other]} turtle. Its saved home, stairs and any paused job are forgotten.`
+    : "Update its script to use the Nether";
   renderMap(t);
 
   for (const el of $$(".needs-online")) el.disabled = !t.online;
   for (const el of $$(".needs-idle")) el.disabled = !t.online || busy;
+  if (!s.dimensionSupported) $("#btn-dimension").disabled = true;
 
   if (rebuildLog) renderLog(t);
 }
@@ -1013,7 +1070,7 @@ function ensureWorld() {
       });
       $("#map3d-note").hidden = true;
       applyMapOptions();
-      sendRaw({ type: "mined" });
+      sendRaw({ type: "mined", dimension: state.dimension });
       invalidate("map");
     })
     .catch((err) => {
@@ -1043,7 +1100,7 @@ function renderWorld() {
       home: s.miningRoute?.home ?? s.homeWorld, route: s.miningRoute, job: s.fleetJob?.args,
     };
   });
-  world.update(list, state.fleet, state.selected);
+  world.update(list, dimFleet(), state.selected);
   const { mined, ores } = world.stats();
   const unplaced = list.filter((t) => !t.world).length;
   $("#map3d-stats").textContent =
@@ -1274,7 +1331,7 @@ function jobBox(args) {
 
 function renderFleet() {
   const turtles = sortedTurtles();
-  const f = state.fleet ?? {};
+  const f = dimFleet() ?? {};
   const states = turtles.map(turtleState);
   const count = (key) => states.filter((s) => s.key === key).length;
   $("#fleet-summary").textContent = turtles.length
@@ -1305,7 +1362,7 @@ function renderFleet() {
   }
   $("#btn-dock-here").disabled = !sel?.status?.world;
   $("#btn-dock-here").textContent = selName ? `Dock at ${selName}'s position` : "Dock at selected turtle";
-  $("#btn-release-dock").disabled = state.depot.holder == null;
+  $("#btn-release-dock").disabled = currentDepot().holder == null;
 }
 
 // "minecraft:deepslate_diamond_ore" and "minecraft:diamond_ore" are both diamond.
@@ -1412,7 +1469,7 @@ function renderPicker(turtles) {
 }
 
 function pickedTurtles() {
-  return [...state.picked].map((id) => state.turtles.get(id)).filter(Boolean);
+  return [...state.picked].map((id) => state.turtles.get(id)).filter(shown);
 }
 
 function fleetTab() {
@@ -1510,7 +1567,7 @@ function queuedJobLocation(job) {
 }
 
 function renderJobQueue() {
-  const { paused, jobs = [], error } = state.jobQueue ?? {};
+  const { paused, jobs = [], error } = currentQueue();
   const counts = Object.fromEntries(Object.keys(QUEUE_LABELS).map((key) => [key, jobs.filter((job) => job.state === key).length]));
   const summary = [paused ? "Queue paused" : "Automatic dispatch on"];
   if (counts.queued) summary.push(`${counts.queued} waiting`);
@@ -1578,12 +1635,12 @@ function renderDockApproach() {
 }
 
 function renderDepotStatus() {
-  const { holder, queue = [] } = state.depot;
+  const { holder, queue = [] } = currentDepot();
   const name = (id) => {
     const t = state.turtles.get(id);
     return t ? nameOf(t) + (t.online ? "" : " (offline)") : `#${id}`;
   };
-  $("#depot-status").textContent = !state.fleet?.depot
+  $("#depot-status").textContent = !dimFleet()?.depot
     ? "Not set up"
     : holder == null
       ? queue.length ? `${queue.length} waiting` : "Dock free"
@@ -1700,7 +1757,7 @@ function setPath(obj, path, value) {
 }
 
 function fillFleetForm() {
-  const f = state.fleet;
+  const f = dimFleet();
   if (!f) return;
   for (const el of $$("#fleet-settings [data-field]")) {
     const v = getPath(f, el.dataset.field);
@@ -1728,7 +1785,7 @@ function areaRow(a = {}) {
 }
 
 function collectFleet() {
-  const out = structuredClone(state.fleet ?? {});
+  const out = structuredClone(dimFleet() ?? {});
   for (const el of $$("#fleet-settings [data-field]")) {
     let v = el.value;
     if (el.tagName === "TEXTAREA") v = v.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -1747,7 +1804,17 @@ function collectFleet() {
   if (out.protect.areas.some((a) => ["x1", "y1", "z1", "x2", "y2", "z2"].some((k) => a[k] === null))) {
     return { error: "Every protected area needs both corners filled in." };
   }
-  return { fleet: out };
+  if (state.dimension === "overworld") return { fleet: out };
+  // The depot and areas edited here are the Nether's; the Overworld's stay.
+  const base = state.fleet ?? {};
+  return {
+    fleet: {
+      ...out,
+      depot: base.depot ?? null,
+      protect: { ...out.protect, areas: base.protect?.areas ?? [] },
+      dimensions: { ...base.dimensions, nether: { depot: out.depot, areas: out.protect.areas } },
+    },
+  };
 }
 
 function markFleetDirty() {
@@ -1842,20 +1909,33 @@ function bindEvents() {
 
   // Fleet-wide controls
   $("#btn-install").addEventListener("click", () => $("#install-dialog").showModal());
-  $("#btn-pause-all").addEventListener("click", () => sendRaw({ type: "cmd", id: "all", action: "pause" }));
-  $("#btn-resume-all").addEventListener("click", () => sendRaw({ type: "cmd", id: "all", action: "resume" }));
+  // Fleet-wide commands reach every turtle in the shown dimension.
+  const toAll = (action) => sendRaw({ type: "cmd", id: "all", action, dimension: state.dimension });
+  const here = () => DIMENSION_NAMES[state.dimension];
+  $("#btn-pause-all").addEventListener("click", () => toAll("pause"));
+  $("#btn-resume-all").addEventListener("click", () => toAll("resume"));
   $("#btn-unload-all").addEventListener("click", () => {
-    if (confirm("Send every turtle to the depot to drop off what it carries? Turtles on a job unload before their next step and carry on with it.")) {
-      sendRaw({ type: "cmd", id: "all", action: "unload" });
+    if (confirm(`Send every ${here()} turtle to its depot to drop off what it carries? Turtles on a job unload before their next step and carry on with it.`)) {
+      toAll("unload");
     }
   });
   $("#btn-recall-all").addEventListener("click", () => {
-    if (confirm("Cancel every turtle's job and send them all home?")) sendRaw({ type: "cmd", id: "all", action: "goHome" });
+    if (confirm(`Cancel every ${here()} turtle's job and send them all home?`)) toAll("goHome");
   });
   $("#btn-update-all").addEventListener("click", () => {
-    if (confirm("Download the latest script to every turtle and reboot them? Turtles on a fleet job update between two steps and carry on with it.")) {
-      sendRaw({ type: "cmd", id: "all", action: "update" });
+    if (confirm(`Download the latest script to every ${here()} turtle and reboot them? Turtles on a fleet job update between two steps and carry on with it.`)) {
+      toAll("update");
     }
+  });
+  for (const tab of $$(".tab[data-dimension]")) tab.addEventListener("click", () => setDimension(tab.dataset.dimension));
+  $("#btn-dimension").addEventListener("click", () => {
+    const t = currentTurtle();
+    if (!t) return;
+    const other = dimOf(t) === "nether" ? "overworld" : "nether";
+    const name = DIMENSION_NAMES[other];
+    if (!confirm(`Make ${nameOf(t)} a ${name} turtle? Its saved home, stairs and any paused job are forgotten. In the ${name}, place it at its home row (Y 67, Z -55) facing south.`)) return;
+    command("setDimension", { dimension: other });
+    toast(`${nameOf(t)} moves to the ${name} tab once it switches.`, "info");
   });
   for (const tab of $$(".tab[data-view]")) tab.addEventListener("click", () => setView(tab.dataset.view));
 
@@ -1992,21 +2072,21 @@ function bindEvents() {
       return;
     }
     if (queued) $("#job-queue-result").hidden = true;
-    sendRaw({ type: queued ? "queueFleetJob" : "fleetJob", kind, ids, params });
+    sendRaw({ type: queued ? "queueFleetJob" : "fleetJob", kind, ids, params, dimension: state.dimension });
   });
   $("#btn-pause-queue").addEventListener("click", () => {
     $("#job-queue-result").hidden = true;
-    sendRaw({ type: "pauseJobQueue", paused: !state.jobQueue.paused });
+    sendRaw({ type: "pauseJobQueue", paused: !currentQueue().paused, dimension: state.dimension });
   });
   $("#job-queue-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-cancel-job]");
     if (!button || button.disabled) return;
-    const job = state.jobQueue.jobs.find((candidate) => String(candidate.id) === button.dataset.cancelJob);
+    const job = currentQueue().jobs.find((candidate) => String(candidate.id) === button.dataset.cancelJob);
     if (!job || !["queued", "running", "blocked"].includes(job.state)) return;
     const assigned = job.state === "running" || (job.state === "blocked" && job.assignments?.length);
     if (assigned && !confirm("Cancel this mining job? Assigned turtles will be recalled and the queue will pause.")) return;
     $("#job-queue-result").hidden = true;
-    sendRaw({ type: "cancelQueuedJob", id: job.id });
+    sendRaw({ type: "cancelQueuedJob", id: job.id, dimension: state.dimension });
   });
   for (const btn of $$("[data-use-pos]")) {
     btn.addEventListener("click", () => {
@@ -2052,7 +2132,7 @@ function bindEvents() {
       return;
     }
     state.joining = true;
-    sendRaw({ type: "joinFleetJob", jobId: btn.dataset.joinJob, ids });
+    sendRaw({ type: "joinFleetJob", jobId: btn.dataset.joinJob, ids, dimension: state.dimension });
   });
   $("#btn-bulk-rename").addEventListener("click", () => {
     $("#bulk-rename").hidden = false;
@@ -2087,7 +2167,9 @@ function bindEvents() {
     $(id).addEventListener("change", applyMapOptions);
   }
   $("#map3d-clear").addEventListener("click", () => {
-    if (confirm("Clear the mined-block history for everyone? Turtles keep reporting new digs.")) sendRaw({ type: "clearMined" });
+    if (confirm(`Clear the ${DIMENSION_NAMES[state.dimension]}'s mined-block history for everyone? Turtles keep reporting new digs.`)) {
+      sendRaw({ type: "clearMined", dimension: state.dimension });
+    }
   });
   $("#fleet-map").addEventListener("click", (event) => {
     const pick = event.target.closest("[data-id]");
@@ -2132,7 +2214,7 @@ function bindEvents() {
   });
   $("#btn-release-dock").addEventListener("click", () => {
     if (confirm("Release the dock? Only do this if the turtle using it is stuck or gone, or two turtles may meet at the dock.")) {
-      sendRaw({ type: "releaseDepot" });
+      sendRaw({ type: "releaseDepot", dimension: state.dimension });
     }
   });
 

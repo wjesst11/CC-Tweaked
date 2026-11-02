@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { DEFAULT_FLEET, planFleetJob, planJoin, sanitizeFleet, validateFleet } from "./fleet.js";
+import { DEFAULT_FLEET, DIMENSIONS, dimensionFleet, dimensionOf, planFleetJob, planJoin, sanitizeFleet, validateFleet } from "./fleet.js";
 import { FleetJobQueue } from "./fleet-queue.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -90,10 +90,11 @@ let fleet = structuredClone(DEFAULT_FLEET);
 // name code + turtle id * 65536. The oldest are dropped past MAX_MINED, and
 // the history starts again after a redeploy.
 const MAX_MINED = 250_000;
-const mined = new Map();
 const minedNames = [];
 const minedNameCodes = new Map();
-let pendingMined = []; // [x, y, z, code, turtle id, ...] not yet sent to dashboards
+// Each dimension's dug blocks, and those not yet sent to dashboards as
+// [x, y, z, code, turtle id, ...].
+const minedBy = Object.fromEntries(DIMENSIONS.map((d) => [d, { blocks: new Map(), pending: [] }]));
 
 function nameCode(name) {
   let code = minedNameCodes.get(name);
@@ -106,6 +107,7 @@ function nameCode(name) {
 
 function recordDug(turtle, { names, blocks }) {
   if (!Array.isArray(names) || !Array.isArray(blocks)) return;
+  const { blocks: mined, pending } = minedBy[dimOf(turtle)];
   const codes = names.slice(0, 400).map((n) => nameCode(String(n).slice(0, 64)));
   for (let i = 0; i + 3 < blocks.length && i < 4 * 1000; i += 4) {
     const [x, y, z] = [blocks[i], blocks[i + 1], blocks[i + 2]];
@@ -114,7 +116,7 @@ function recordDug(turtle, { names, blocks }) {
     const key = `${x},${y},${z}`;
     mined.delete(key); // re-insert so a re-dug block counts as newest
     mined.set(key, code + turtle.id * 65536);
-    pendingMined.push(x, y, z, code, turtle.id);
+    pending.push(x, y, z, code, turtle.id);
   }
   for (const key of mined.keys()) {
     if (mined.size <= MAX_MINED) break;
@@ -122,23 +124,25 @@ function recordDug(turtle, { names, blocks }) {
   }
 }
 
-function minedSnapshot() {
+function minedSnapshot(dimension) {
   const blocks = [];
-  for (const [key, value] of mined) {
+  for (const [key, value] of minedBy[dimension].blocks) {
     const [x, y, z] = key.split(",").map(Number);
     blocks.push(x, y, z, value % 65536, Math.floor(value / 65536));
   }
-  return { type: "mined", names: minedNames, blocks };
+  return { type: "mined", dimension, names: minedNames, blocks };
 }
 
-// Only dashboards that have the 3D map open get the stream of dug blocks.
+// Only dashboards that have that dimension's 3D map open get its dug blocks.
 function broadcastMap(msg) {
   const data = JSON.stringify(msg);
-  for (const ws of dashboards) if (ws.wantsMap && ws.readyState === ws.OPEN) ws.send(data);
+  for (const ws of dashboards) {
+    if (ws.wantsMap && ws.mapDimension === msg.dimension && ws.readyState === ws.OPEN) ws.send(data);
+  }
 }
 
 // One turtle at a time may use the dock; the rest queue.
-const depot = { holder: null, queue: [], since: 0 };
+const depots = Object.fromEntries(DIMENSIONS.map((d) => [d, { holder: null, queue: [], since: 0 }]));
 const startedAt = Date.now();
 // Identify this copy of the server and the code it runs, so the dashboard can
 // tell a redeploy apart from two copies running side by side (which splits
@@ -190,6 +194,25 @@ function addLog(t, level, msg) {
 
 const nameOf = (t) => t.label || `Turtle #${t.id}`;
 
+// The dimension a turtle works in, as it last said. Older scripts don't say,
+// and work in the Overworld.
+const dimOf = (t) => dimensionOf(t?.dimension);
+const dimensionName = (dimension) => (dimension === "nether" ? "Nether" : "Overworld");
+
+// Turtles' homes in one dimension, which its jobs plan around.
+function homesIn(dimension) {
+  return [...turtles.values()]
+    .filter((t) => dimOf(t) === dimension)
+    .map((t) => ({ name: nameOf(t), home: t.status?.miningRoute?.home ?? t.status?.homeWorld }));
+}
+
+// A turtle that switched dimension leaves the old one's dock.
+function setDimension(turtle, value) {
+  const old = turtle.dimension;
+  turtle.dimension = dimensionOf(value);
+  if (old && old !== turtle.dimension) releaseDepot(old, turtle.id);
+}
+
 function onHomeRow(position) {
   return position && Number.isInteger(position.x) && position.y === 67 && position.z === -55;
 }
@@ -213,83 +236,90 @@ function plannerTurtle(id) {
 
 // Queued work outlives browser sessions and server restarts. Persist before
 // sending commands, so reconnects can safely retry the same assignment ID.
-let savedQueue;
-try {
-  savedQueue = JSON.parse(readFileSync(QUEUE_PATH, "utf8"));
-} catch (err) {
-  if (err.code !== "ENOENT") throw new Error(`Cannot load fleet queue: ${err.message}`);
+// Each dimension has its own queue, so a job in one never waits on the other.
+function makeQueue(dimension) {
+  const file = dimension === "overworld" ? QUEUE_PATH : QUEUE_PATH.replace(/(\.json)?$/, `-${dimension}.json`);
+  let saved;
+  try {
+    saved = JSON.parse(readFileSync(file, "utf8"));
+  } catch (err) {
+    if (err.code !== "ENOENT") throw new Error(`Cannot load fleet queue: ${err.message}`);
+  }
+  const jobs = new FleetJobQueue({
+    state: saved,
+    persist(state) {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(`${file}.tmp`, JSON.stringify(state), { mode: 0o600 });
+      renameSync(`${file}.tmp`, file);
+    },
+    plan(kind, params, ids) {
+      const other = ids.map((id) => turtles.get(id)).find((t) => t && dimOf(t) !== dimension);
+      if (other) return { error: `${nameOf(other)} works in the ${dimensionName(dimOf(other))}.` };
+      return planFleetJob(dimensionFleet(fleet, dimension), kind, params, ids.map(plannerTurtle), homesIn(dimension));
+    },
+    inspect(id) {
+      const t = turtles.get(id);
+      return t && {
+        online: Boolean(t.socket),
+        fresh: t.freshStatus && !(t.pendingFleetUntil > Date.now()),
+        label: nameOf(t),
+        status: t.status,
+      };
+    },
+    dispatch(id, args, action = "fleetJob") {
+      const t = turtles.get(id);
+      if (t?.socket) dispatch(t, action, args);
+    },
+  });
+  // Dashboards get each queue in their snapshot, then only its changes.
+  const q = { dimension, jobs, storageError: null, lastJson: undefined, emergencyHold: false };
+  q.lastJson = JSON.stringify(queueView(q));
+  return q;
 }
-const jobQueue = new FleetJobQueue({
-  state: savedQueue,
-  persist(state) {
-    mkdirSync(path.dirname(QUEUE_PATH), { recursive: true });
-    writeFileSync(`${QUEUE_PATH}.tmp`, JSON.stringify(state), { mode: 0o600 });
-    renameSync(`${QUEUE_PATH}.tmp`, QUEUE_PATH);
-  },
-  plan(kind, params, ids) {
-    const selected = ids.map(plannerTurtle);
-    const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.miningRoute?.home ?? t.status?.homeWorld }));
-    return planFleetJob(fleet, kind, params, selected, homes);
-  },
-  inspect(id) {
-    const t = turtles.get(id);
-    return t && {
-      online: Boolean(t.socket),
-      fresh: t.freshStatus && !(t.pendingFleetUntil > Date.now()),
-      label: nameOf(t),
-      status: t.status,
-    };
-  },
-  dispatch(id, args, action = "fleetJob") {
-    const t = turtles.get(id);
-    if (t?.socket) dispatch(t, action, args);
-  },
-});
-let queueStorageError = null;
-let lastQueueJson;
-let queueEmergencyHold = false;
+const queues = Object.fromEntries(DIMENSIONS.map((d) => [d, makeQueue(d)]));
+const queueFor = (dimension) => queues[dimensionOf(dimension)];
 
-function queueView() {
-  const queue = jobQueue.snapshot();
-  return { ...queue, paused: queue.paused || queueEmergencyHold, error: queueStorageError };
+function queueView(q) {
+  const queue = q.jobs.snapshot();
+  return { ...queue, paused: queue.paused || q.emergencyHold, error: q.storageError };
 }
 
-function broadcastJobQueue() {
-  const queue = queueView();
+function broadcastJobQueue(q) {
+  const queue = queueView(q);
   const json = JSON.stringify(queue);
-  if (json === lastQueueJson) return;
-  lastQueueJson = json;
-  broadcast({ type: "jobQueue", queue });
+  if (json === q.lastJson) return;
+  q.lastJson = json;
+  broadcast({ type: "jobQueue", dimension: q.dimension, queue });
 }
 
-function queueAction(ws, action) {
+function queueAction(ws, q, action) {
   try {
     const result = action();
-    queueStorageError = null;
-    broadcastJobQueue();
+    q.storageError = null;
+    broadcastJobQueue(q);
     send(ws, { type: "queueResult", ok: result.ok, msg: result.msg });
     return result;
   } catch (err) {
-    queueStorageError = `Could not save the fleet queue: ${err.message}`;
-    broadcastJobQueue();
-    send(ws, { type: "queueResult", ok: false, msg: queueStorageError });
+    q.storageError = `Could not save the fleet queue: ${err.message}`;
+    broadcastJobQueue(q);
+    send(ws, { type: "queueResult", ok: false, msg: q.storageError });
     return { ok: false };
   }
 }
 
-function pauseJobQueue(ws, paused) {
+function pauseJobQueue(ws, q, paused) {
   // Keep emergency controls working even if the queue file cannot be written.
-  if (paused) queueEmergencyHold = true;
-  const result = queueAction(ws, () => jobQueue.pause(paused));
-  if (result.ok) queueEmergencyHold = false;
-  else queueStorageError = result.msg;
-  broadcastJobQueue();
+  if (paused) q.emergencyHold = true;
+  const result = queueAction(ws, q, () => q.jobs.pause(paused));
+  if (result.ok) q.emergencyHold = false;
+  else q.storageError = result.msg;
+  broadcastJobQueue(q);
   return result;
 }
 
 function queueOwns(id) {
-  return jobQueue.snapshot().jobs.some((job) =>
-    ["running", "blocked"].includes(job.state) && job.assignments.some((a) => a.id === id && !a.done));
+  return Object.values(queues).some((q) => q.jobs.snapshot().jobs.some((job) =>
+    ["running", "blocked"].includes(job.state) && job.assignments.some((a) => a.id === id && !a.done)));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,51 +331,60 @@ function setFleet(next) {
   for (const t of turtles.values()) send(t.socket, { type: "fleet", fleet });
 }
 
-function depotView() {
+// Each dimension has its own dock, with its own turns.
+function depotView(dimension) {
+  const depot = depots[dimension];
   return { holder: depot.holder, queue: depot.queue, since: depot.since };
 }
 
-function grant(id) {
+const depotViews = () => Object.fromEntries(DIMENSIONS.map((d) => [d, depotView(d)]));
+
+function grant(dimension, id) {
+  const depot = depots[dimension];
   depot.holder = id;
   depot.since = Date.now();
   send(turtles.get(id)?.socket, { type: "lease", resource: "depot", granted: true });
 }
 
-function pumpDepot() {
+function pumpDepot(dimension) {
+  const depot = depots[dimension];
   if (depot.holder === null && Date.now() - startedAt >= LEASE_GRACE_MS) {
     while (depot.queue.length) {
       const id = depot.queue.shift();
       if (turtles.get(id)?.socket) {
-        grant(id);
+        grant(dimension, id);
         break;
       }
     }
   }
-  broadcast({ type: "depot", depot: depotView() });
+  broadcast({ type: "depot", dimension, depot: depotView(dimension) });
 }
 
-function releaseDepot(id) {
+function releaseDepot(dimension, id) {
+  const depot = depots[dimension];
   depot.queue = depot.queue.filter((q) => q !== id);
   if (depot.holder === id) depot.holder = null;
-  pumpDepot();
+  pumpDepot(dimension);
 }
 
 function handleLease(turtle, msg) {
   if (msg.resource !== "depot") return;
+  const dimension = dimOf(turtle);
+  const depot = depots[dimension];
   if (msg.op === "release") {
-    releaseDepot(turtle.id);
+    releaseDepot(dimension, turtle.id);
   } else if (msg.op === "acquire") {
     if (depot.holder === turtle.id) {
-      grant(turtle.id);
+      grant(dimension, turtle.id);
     } else if (!depot.queue.includes(turtle.id)) {
       depot.queue.push(turtle.id);
     }
-    pumpDepot();
+    pumpDepot(dimension);
   }
 }
 
 // Turtles that can take a fleet job right now.
-function readyTurtles(ids, kind) {
+function readyTurtles(ids, kind, dimension = "overworld") {
   const ready = [];
   const skipped = [];
   for (const id of ids) {
@@ -353,6 +392,7 @@ function readyTurtles(ids, kind) {
     if (!t) continue;
     const s = t.status ?? {};
     if (!t.socket) skipped.push(`${nameOf(t)} is offline`);
+    else if (dimOf(t) !== dimension) skipped.push(`${nameOf(t)} works in the ${dimensionName(dimOf(t))}`);
     else if (!t.freshStatus) skipped.push(`${nameOf(t)} is still reporting its status`);
     else if (!s.gpsTrusted && !(kind === "branchMine" && !s.miningRoute && onHomeRow(s.world))) skipped.push(`${nameOf(t)} doesn't know its GPS position yet`);
     else if (kind === "branchMine" && !s.staircaseSupported) skipped.push(`${nameOf(t)} needs the latest script for staircase mining`);
@@ -367,11 +407,11 @@ function readyTurtles(ids, kind) {
   return { ready: ready.sort((a, b) => a.id - b.id), skipped };
 }
 
-function startFleetJob(ws, { kind, ids, params }) {
+function startFleetJob(ws, { kind, ids, params, dimension }) {
   if (!Array.isArray(ids) || typeof kind !== "string") return;
-  const { ready, skipped } = readyTurtles([...new Set(ids.slice(0, 256).map(Number))], kind);
-  const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.miningRoute?.home ?? t.status?.homeWorld }));
-  const plan = planFleetJob(fleet, kind, params ?? {}, ready, homes);
+  dimension = dimensionOf(dimension);
+  const { ready, skipped } = readyTurtles([...new Set(ids.slice(0, 256).map(Number))], kind, dimension);
+  const plan = planFleetJob(dimensionFleet(fleet, dimension), kind, params ?? {}, ready, homesIn(dimension));
   if (plan.error) {
     send(ws, { type: "fleetJobResult", ok: false, msg: [plan.error, ...skipped].join(" ") });
     return;
@@ -401,11 +441,11 @@ function joinFleetJob(ws, { jobId, ids }) {
   if (old) return reply(false, `Update ${nameOf(old)}'s script so it can share its job.`);
   if (members.some((t) => t.status.fleetJob.args.pattern !== "staggered")) return reply(false, "Only staggered level jobs can take more turtles.");
   const memberIds = new Set(members.map((t) => t.id));
-  const { ready, skipped } = readyTurtles([...new Set(ids.slice(0, 256).map(Number))].filter((id) => !memberIds.has(id)), "branchMine");
-  const homes = [...turtles.values()].map((t) => ({ name: nameOf(t), home: t.status?.miningRoute?.home ?? t.status?.homeWorld }));
-  const plan = planJoin(fleet, members.map((t) => ({
+  const dimension = dimOf(members[0]);
+  const { ready, skipped } = readyTurtles([...new Set(ids.slice(0, 256).map(Number))].filter((id) => !memberIds.has(id)), "branchMine", dimension);
+  const plan = planJoin(dimensionFleet(fleet, dimension), members.map((t) => ({
     id: t.id, name: nameOf(t), args: t.status.fleetJob.args, at: t.status.fleetJob.at,
-  })), ready, homes);
+  })), ready, homesIn(dimension));
   if (plan.error) return reply(false, [plan.error, ...skipped].join(" "));
   for (const { id, args } of plan.updates) dispatch(turtles.get(id), "jobUpdate", args);
   for (const join of plan.assignments) {
@@ -476,6 +516,7 @@ function handleTurtle(ws) {
         freshStatus: false,
         pendingFleetUntil: 0,
       });
+      setDimension(turtle, msg.dimension);
       if (turtle.updateFlow?.stage === "updating") turtle.updateFlow.stage = "rebooted";
       send(ws, { type: "welcome" });
 
@@ -485,13 +526,14 @@ function handleTurtle(ws) {
       else if (theirs < fleet.updatedAt) send(ws, { type: "fleet", fleet });
 
       // A turtle that was at the dock when the server restarted gets it back.
+      const depot = depots[dimOf(turtle)];
       if (msg.holding && (depot.holder === null || depot.holder === id)) {
         depot.holder = id;
         depot.since = Date.now();
       } else if (!msg.holding && depot.holder === id) {
         depot.holder = null;
       }
-      pumpDepot();
+      pumpDepot(dimOf(turtle));
 
       addLog(turtle, "info", "Connected");
       broadcast({ type: "turtle", turtle: turtleView(turtle) });
@@ -513,6 +555,7 @@ function handleTurtle(ws) {
         }
         turtle.statusJson = json;
         turtle.status = status;
+        setDimension(turtle, status.dimension);
         advanceUpdate(turtle);
         advanceJoin(turtle);
         turtle.label = typeof status.label === "string" ? status.label : null;
@@ -558,9 +601,10 @@ function handleTurtle(ws) {
     turtle.online = false;
     // It leaves the queue. It keeps the dock only if it's physically there;
     // the dashboard can still release that by hand.
+    const depot = depots[dimOf(turtle)];
     depot.queue = depot.queue.filter((q) => q !== turtle.id);
-    if (depot.holder === turtle.id && !atDock(turtle.status?.world)) depot.holder = null;
-    pumpDepot();
+    if (depot.holder === turtle.id && !atDock(turtle)) depot.holder = null;
+    pumpDepot(dimOf(turtle));
     addLog(turtle, "warn", "Disconnected");
     broadcast({ type: "turtle", turtle: turtleView(turtle) });
   });
@@ -601,21 +645,25 @@ function advanceUpdate(turtle) {
 
 // A turtle disconnected inside the space around the dock is physically in
 // the way, so it keeps its turn. Anywhere else, the next turtle goes.
-function atDock(w) {
-  const D = fleet.depot;
+function atDock(turtle) {
+  const D = dimensionFleet(fleet, dimOf(turtle)).depot;
+  const w = turtle.status?.world;
   return Boolean(D && w) && Math.abs(w.x - D.x) <= 2 && Math.abs(w.y - D.y) <= 2 && Math.abs(w.z - D.z) <= 2;
 }
 
-function handleCommand(ws, { id, ids, action, args }) {
+function handleCommand(ws, { id, ids, action, args, dimension }) {
   if (typeof action !== "string" || action.length > 32) return;
   args = args && typeof args === "object" ? args : {};
+  // "All" means every turtle in the dimension the dashboard is showing.
+  dimension = dimensionOf(dimension);
 
   // A fleet-wide halt must also prevent the scheduler from starting more work.
   if (id === "all" && ["pause", "stop", "goHome", "forceHome", "resume"].includes(action)) {
-    pauseJobQueue(ws, action !== "resume");
+    const q = queues[dimension];
+    pauseJobQueue(ws, q, action !== "resume");
     if (action === "goHome" || action === "forceHome") {
-      for (const job of jobQueue.snapshot().jobs.filter((job) => ["running", "blocked"].includes(job.state))) {
-        queueAction(ws, () => jobQueue.cancel(job.id));
+      for (const job of q.jobs.snapshot().jobs.filter((job) => ["running", "blocked"].includes(job.state))) {
+        queueAction(ws, q, () => q.jobs.cancel(job.id));
       }
     }
   }
@@ -637,7 +685,7 @@ function handleCommand(ws, { id, ids, action, args }) {
 
   if (id === "all") {
     if (!BROADCAST_ACTIONS.has(action)) return;
-    for (const t of turtles.values()) if (t.socket) controlled(t);
+    for (const t of turtles.values()) if (t.socket && dimOf(t) === dimension) controlled(t);
     return;
   }
   // An explicit selection of turtles from the fleet page.
@@ -688,8 +736,10 @@ function handleDashboard(ws) {
         type: "snapshot",
         turtles: [...turtles.values()].map((t) => turtleView(t, true)),
         fleet,
-        jobQueue: queueView(),
-        depot: depotView(),
+        jobQueue: queueView(queues.overworld),
+        jobQueues: Object.fromEntries(DIMENSIONS.map((d) => [d, queueView(queues[d])])),
+        depot: depotView("overworld"),
+        depots: depotViews(),
         server: { instance: INSTANCE, build: BUILD, startedAt },
       });
       return;
@@ -718,12 +768,14 @@ function handleDashboard(ws) {
     } else if (msg.type === "joinFleetJob") {
       joinFleetJob(ws, msg);
     } else if (msg.type === "queueFleetJob") {
-      queueAction(ws, () => jobQueue.add(msg));
+      const q = queueFor(msg.dimension);
+      queueAction(ws, q, () => q.jobs.add(msg));
     } else if (msg.type === "pauseJobQueue" && typeof msg.paused === "boolean") {
-      pauseJobQueue(ws, msg.paused);
+      pauseJobQueue(ws, queueFor(msg.dimension), msg.paused);
     } else if (msg.type === "cancelQueuedJob") {
-      const job = jobQueue.snapshot().jobs.find((job) => job.id === msg.id);
-      const result = queueAction(ws, () => jobQueue.cancel(msg.id));
+      const q = Object.values(queues).find((q) => q.jobs.snapshot().jobs.some((job) => job.id === msg.id)) ?? queues.overworld;
+      const job = q.jobs.snapshot().jobs.find((job) => job.id === msg.id);
+      const result = queueAction(ws, q, () => q.jobs.cancel(msg.id));
       if (result.ok) for (const id of result.recall ?? []) {
         const t = turtles.get(id);
         const assignment = job.assignments.find((a) => a.id === id);
@@ -733,14 +785,17 @@ function handleDashboard(ws) {
         if (t?.socket && (matches || awaiting)) dispatch(t, "goHome", {});
       }
     } else if (msg.type === "releaseDepot") {
-      if (depot.holder !== null) releaseDepot(depot.holder);
+      const dimension = dimensionOf(msg.dimension);
+      if (depots[dimension].holder !== null) releaseDepot(dimension, depots[dimension].holder);
     } else if (msg.type === "mined") {
       ws.wantsMap = true;
-      send(ws, minedSnapshot());
+      ws.mapDimension = dimensionOf(msg.dimension);
+      send(ws, minedSnapshot(ws.mapDimension));
     } else if (msg.type === "clearMined") {
-      mined.clear();
-      pendingMined = [];
-      broadcast({ type: "minedCleared" });
+      const dimension = dimensionOf(msg.dimension);
+      minedBy[dimension].blocks.clear();
+      minedBy[dimension].pending = [];
+      broadcast({ type: "minedCleared", dimension });
     }
   }));
 
@@ -843,7 +898,7 @@ setInterval(() => {
     const cells = [];
     const parked = [];
     for (const o of located) {
-      if (o === r || !near(o.status.world, here)) continue;
+      if (o === r || dimOf(o) !== dimOf(r) || !near(o.status.world, here)) continue;
       if (!o.socket || !o.status.moving) {
         parked.push(o.status.world);
       } else if (o.id < r.id) {
@@ -854,7 +909,7 @@ setInterval(() => {
     // Other turtles' homes, so nobody waits in one (homes are often in a row).
     const homes = [...turtles.values()]
       .map((o) => ({ turtle: o, home: o.status?.miningRoute?.home ?? o.status?.homeWorld }))
-      .filter((o) => o.turtle !== r && o.home && near(o.home, here))
+      .filter((o) => o.turtle !== r && dimOf(o.turtle) === dimOf(r) && o.home && near(o.home, here))
       .map((o) => o.home);
     if (cells.length || parked.length || homes.length) send(r.socket, { type: "traffic", cells, parked, homes });
   }
@@ -862,28 +917,35 @@ setInterval(() => {
 
 // Stream newly dug blocks to open 3D maps a couple of times a second.
 setInterval(() => {
-  if (!pendingMined.length) return;
-  broadcastMap({ type: "dug", names: minedNames, blocks: pendingMined });
-  pendingMined = [];
+  for (const dimension of DIMENSIONS) {
+    const m = minedBy[dimension];
+    if (!m.pending.length) continue;
+    broadcastMap({ type: "dug", dimension, names: minedNames, blocks: m.pending });
+    m.pending = [];
+  }
 }, 500);
 
 // Hands out dock turns that were held back during the post-restart grace period.
 setInterval(() => {
-  if (depot.holder === null && depot.queue.length) pumpDepot();
+  for (const dimension of DIMENSIONS) {
+    if (depots[dimension].holder === null && depots[dimension].queue.length) pumpDepot(dimension);
+  }
 }, 2_000);
 
 setInterval(() => {
-  try {
-    if (!queueEmergencyHold) {
-      jobQueue.tick();
-      queueStorageError = null;
+  for (const q of Object.values(queues)) {
+    try {
+      if (!q.emergencyHold) {
+        q.jobs.tick();
+        q.storageError = null;
+      }
+    } catch (err) {
+      const message = `Could not save the fleet queue: ${err.message}`;
+      if (message !== q.storageError) console.error("[error]", message);
+      q.storageError = message;
     }
-  } catch (err) {
-    const message = `Could not save the fleet queue: ${err.message}`;
-    if (message !== queueStorageError) console.error("[error]", message);
-    queueStorageError = message;
+    broadcastJobQueue(q);
   }
-  broadcastJobQueue();
 }, 1_000);
 
 process.on("uncaughtException", (err) => console.error("[error] uncaught:", err));

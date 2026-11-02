@@ -26,7 +26,21 @@ export const DEFAULT_FLEET = {
     fuel: ["minecraft:coal", "minecraft:charcoal", "minecraft:coal_block"],
   },
   veinBlocks: ["*_ore", "*ancient_debris*"],
+  // The depot and protected areas above are the Overworld's. Each other
+  // dimension has its own; everything else is shared.
+  dimensions: { nether: { depot: null, areas: [] } },
 };
+
+export const DIMENSIONS = ["overworld", "nether"];
+export const dimensionOf = (value) => (value === "nether" ? "nether" : "overworld");
+
+// Fleet settings as one dimension's turtles see them: that dimension's depot
+// and protected areas, with everything else shared.
+export function dimensionFleet(fleet, dimension) {
+  if (dimensionOf(dimension) === "overworld") return fleet;
+  const own = fleet.dimensions?.nether ?? {};
+  return { ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] } };
+}
 
 function int(v, lo, hi) {
   const n = Math.round(Number(v));
@@ -45,21 +59,22 @@ function patterns(list, fallback) {
     .slice(0, 60);
 }
 
-export function sanitizeFleet(input = {}) {
-  const d = input.depot;
+function sanitizeDepot(d) {
   const depotCoords = d && [coord(d.x), height(d.y), coord(d.z)];
-  const depot =
-    depotCoords && depotCoords.every((n) => n !== null)
-      ? {
-          x: depotCoords[0],
-          y: depotCoords[1],
-          z: depotCoords[2],
-          junk: SIDES.includes(d.junk) ? d.junk : "down",
-          valuables: SIDES.includes(d.valuables) ? d.valuables : "north",
-          fuel: SIDES.includes(d.fuel) ? d.fuel : "west",
-        }
-      : null;
-  const areas = (Array.isArray(input.protect?.areas) ? input.protect.areas : [])
+  return depotCoords && depotCoords.every((n) => n !== null)
+    ? {
+        x: depotCoords[0],
+        y: depotCoords[1],
+        z: depotCoords[2],
+        junk: SIDES.includes(d.junk) ? d.junk : "down",
+        valuables: SIDES.includes(d.valuables) ? d.valuables : "north",
+        fuel: SIDES.includes(d.fuel) ? d.fuel : "west",
+      }
+    : null;
+}
+
+function sanitizeAreas(list) {
+  return (Array.isArray(list) ? list : [])
     .slice(0, 50)
     .map((a) => ({
       name: String(a?.name ?? "").slice(0, 40),
@@ -67,6 +82,11 @@ export function sanitizeFleet(input = {}) {
       x2: coord(a?.x2), y2: height(a?.y2), z2: coord(a?.z2),
     }))
     .filter((a) => [a.x1, a.y1, a.z1, a.x2, a.y2, a.z2].every((n) => n !== null));
+}
+
+export function sanitizeFleet(input = {}) {
+  const depot = sanitizeDepot(input.depot);
+  const areas = sanitizeAreas(input.protect?.areas);
   let blocks = patterns(input.protect?.blocks, DEFAULT_FLEET.protect.blocks);
   let updatedAt = Number(input.updatedAt) || 0;
   // Settings saved before exceptions existed protected Create's ores with
@@ -86,6 +106,12 @@ export function sanitizeFleet(input = {}) {
       fuel: patterns(input.items?.fuel, DEFAULT_FLEET.items.fuel),
     },
     veinBlocks: patterns(input.veinBlocks, DEFAULT_FLEET.veinBlocks),
+    dimensions: {
+      nether: {
+        depot: sanitizeDepot(input.dimensions?.nether?.depot),
+        areas: sanitizeAreas(input.dimensions?.nether?.areas),
+      },
+    },
   };
 }
 
@@ -147,9 +173,12 @@ function depotBox(D) {
 
 // Returns an error message, or null if the settings are usable.
 export function validateFleet(fleet) {
-  if (!fleet.depot) return null;
-  const { junk, valuables, fuel } = fleet.depot;
-  if (new Set([junk, valuables, fuel]).size < 3) return "Each depot chest needs its own side of the dock.";
+  for (const dimension of DIMENSIONS) {
+    const depot = dimensionFleet(fleet, dimension).depot;
+    if (!depot) continue;
+    const { junk, valuables, fuel } = depot;
+    if (new Set([junk, valuables, fuel]).size < 3) return "Each depot chest needs its own side of the dock.";
+  }
   return null;
 }
 
