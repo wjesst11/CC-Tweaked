@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.3"
+local VERSION = "2.4.4"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1761,7 +1761,7 @@ function rowRoute.walkStep(w, known)
         if reason then error("Saved route blocked: " .. reason, 0) end
         -- Below the protected area named Home, anything else in the way of
         -- its saved route is dug through too, so it can always get back.
-        local floor = rowRoute.homeFloor()
+        local floor = rowRoute.routeFloor()
         local plain = not (nav.hasFallen(block.name) or rowRoute.REFILL[block.name])
         if plain and not (floor and current.y < floor and w.y < floor) then
           error("Saved route blocked by " .. block.name .. "; it will not dig a new route", 0)
@@ -1774,7 +1774,7 @@ function rowRoute.walkStep(w, known)
             error(("Saved route blocked by %s at %d, %d, %d: it is still there after digging (a claim or spawn protection putting it back)"):format(block.name, w.x, w.y, w.z), 0)
           end
         elseif plain then
-          log("warn", ("Saved route blocked by %s at %d, %d, %d: below the Home area, digging through"):format(block.name, w.x, w.y, w.z))
+          log("warn", ("Saved route blocked by %s at %d, %d, %d: digging through"):format(block.name, w.x, w.y, w.z))
         end
         local ok2, why = SIDES[dir].dig()
         if not ok2 then error("Can't clear " .. block.name .. " from its saved route: " .. tostring(why), 0) end
@@ -1917,10 +1917,20 @@ function rowRoute.flatMine(target)
 end
 
 -- The lowest Y of the protected area named "Home": the floor of the base.
+-- Below it a turtle may dig a new way back onto its route.
 function rowRoute.homeFloor()
   for _, a in ipairs(compiled.areas) do
     if tostring(a.name or ""):lower() == "home" then return math.min(a.y1, a.y2) end
   end
+end
+
+-- Below this Y, anything in the way of its saved route (its own stairs,
+-- tunnels and shafts) may be dug through: the Home floor, or, where its
+-- dimension has no protected areas at all, up to its home row. It only
+-- clears blocks of the saved route itself, never a new way.
+function rowRoute.routeFloor()
+  if #compiled.areas == 0 then return miningRoute.home.y + 1 end
+  return rowRoute.homeFloor()
 end
 
 -- Off its saved route (an ore pocket whose path it lost, a neighbour's

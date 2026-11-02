@@ -215,12 +215,25 @@ end)
 
 test("return refuses rock that couldn't have formed in an opened stair cell", function()
   local api,sim,files,a=rowMiner()
+  -- A protected area elsewhere, and none named Home.
+  api.protection({{name="Base",x1=500,x2=510,y1=0,y2=100,z1=500,z2=510}})
   api.row.enter(a)
   sim.blocks["0,-4,5"]="minecraft:deepslate"
   local digs,moves=sim.digs,sim.moves
   local ok,why=pcall(api.row.exit,"recall")
   assert(not ok and tostring(why):find("will not dig a new route"))
   assert(sim.digs==digs and sim.moves==moves and sim.blocks["0,-4,5"])
+end)
+
+test("with nothing protected, return digs through rock in its own stairs, and only there", function()
+  local api,sim,files,a=rowMiner()
+  api.protection({})
+  api.row.enter(a)
+  sim.blocks["0,-4,5"]="minecraft:deepslate"
+  local digs=sim.digs
+  api.row.exit("recall")
+  same(api.state().world,a.routeHome)
+  assert(sim.blocks["0,-4,5"]==nil and sim.digs==digs+1,"dug more than the one stair block")
 end)
 
 test("return clears stone, cobblestone and obsidian that lava and water formed in its stairs", function()
@@ -258,6 +271,8 @@ end)
 
 test("a later descent reuses opened cells and never receives initial excavation permission", function()
   local api,sim,files,a=rowMiner()
+  -- A protected area elsewhere, and none named Home.
+  api.protection({{name="Base",x1=500,x2=510,y1=0,y2=100,z1=500,z2=510}})
   api.row.enter(a); api.row.exit("recall")
   local digs=sim.digs
   api.row.enter(a); api.row.exit("recall")

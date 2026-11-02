@@ -772,7 +772,7 @@ test("a turtle off its route below the Home protected area digs back to its shaf
   assert(said,"didn't say it was digging back")
 end)
 
-test("an off-route turtle at or above the Home floor, or with no Home area, stays where it is",function()
+test("an off-route turtle at or above the Home floor, or with no Home area, never digs a new way back",function()
   for _,areas in ipairs({{homeArea(50)},{},{{name="Base",x1=-2500,x2=2500,y1=64,y2=320,z1=-2500,z2=2500}}}) do
     local api,sim,files,a=offRoute()
     api.protection(areas)
@@ -783,13 +783,14 @@ test("an off-route turtle at or above the Home floor, or with no Home area, stay
   end
 end)
 
-test("rock blocking its saved way back is dug through only below the Home protected area",function()
-  for _,guarded in ipairs({true,false}) do
+test("rock blocking its saved way back is dug through below the Home protected area, or with nothing protected",function()
+  for _,setup in ipairs({{true,{homeArea(64)}},{true,{}},{false,{{name="Base",x1=-2500,x2=2500,y1=64,y2=320,z1=-2500,z2=2500}}}}) do
+    local guarded,areas=setup[1],setup[2]
     local api,sim,files,a=stoppedDeep()
     -- On its way along the tunnel to the shaft.
     local cell=lkey({x=99,y=58,z=-53})
     sim.blocks[cell]="minecraft:deepslate"
-    api.protection(guarded and {homeArea(64)} or {})
+    api.protection(areas)
     local p=sim.pos
     api.command({action="goHome"})
     if guarded then
@@ -871,14 +872,17 @@ test("outside its radius below the Home area it may only step back toward the ci
   assert(not row.mayReach({x=100,y=50,z=-61},{x=100,y=50,z=-62}),"allowed a step further out")
   assert(not row.mayReach({x=100,y=50,z=-61},{x=100,y=49,z=-61}),"allowed a step down outside the circle")
   assert(not row.mayReach({x=100,y=64,z=-61},{x=100,y=64,z=-60}),"allowed it at the Home floor")
-  api.protection({})
+  api.protection({{name="Base",x1=-2500,x2=2500,y1=64,y2=320,z1=-2500,z2=2500}})
   assert(not row.mayReach({x=100,y=50,z=-61},{x=100,y=50,z=-60}),"allowed it with no Home area")
+  -- Nor with nothing protected: that only clears its saved route.
+  api.protection({})
+  assert(not row.mayReach({x=100,y=50,z=-61},{x=100,y=50,z=-60}),"allowed a new way with nothing protected")
 end)
 
 test("a turtle outside its radius below the Home area comes back into the circle and goes home",function()
   for _,guarded in ipairs({true,false}) do
     local api,sim,files,a=stoppedDeep()
-    api.protection(guarded and {homeArea(64)} or {})
+    api.protection(guarded and {homeArea(64)} or {{name="Base",x1=-2500,x2=2500,y1=64,y2=320,z1=-2500,z2=2500}})
     -- At (99, 58, -52), outside a radius of 2. Once back in that circle,
     -- the real radius (4) returns for the stairs it dug.
     local route=api.state().miningRoute
@@ -1042,6 +1046,17 @@ test("a turtle standing still takes its position from GPS again once a wrong GPS
   -- A matching fix changes nothing.
   api.fix({x=0,y=0,z=0},{x=50,y=97,z=-55})
   same(api.state().world,{x=50,y=97,z=-55})
+end)
+
+test("with nothing protected, nylium grown into its own stairs is dug through on the way home",function()
+  local api,sim,files,a=stoppedDeep()
+  api.protection({})
+  local cell=lkey({x=100,y=67-2,z=stairZ(2,4)})
+  sim.blocks[cell]="regions_unexplored:glistering_nylium"
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  assert(sim.blocks[cell]==nil,"didn't dig the nylium")
+  for _,p in ipairs(sim.history) do assert(p.y<=0,"went above its home row") end
 end)
 
 assert(#failures==0,table.concat(failures,"\n"))
