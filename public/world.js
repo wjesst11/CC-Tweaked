@@ -590,14 +590,14 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
   // towards) turns with it. Let go mid-drag and it turns on a little, slowing
   // to a stop.
   const pointers = new Set();
-  const look = new THREE.Vector3(), aim = new THREE.Spherical();
+  const gaze = new THREE.Vector3(), aim = new THREE.Spherical();
   const spin = { theta: 0, phi: 0, at: 0 }; // radians per second, and when last dragged
   let lookFrom = null;
   function turnView(theta, phi) {
-    aim.setFromVector3(look.copy(controls.target).sub(camera.position));
+    aim.setFromVector3(gaze.copy(controls.target).sub(camera.position));
     aim.theta += theta;
     aim.phi = THREE.MathUtils.clamp(aim.phi + phi, 0.01, Math.PI - 0.01);
-    controls.target.copy(camera.position).add(look.setFromSpherical(aim));
+    controls.target.copy(camera.position).add(gaze.setFromSpherical(aim));
   }
   renderer.domElement.addEventListener("pointerdown", (e) => {
     pointers.add(e.pointerId);

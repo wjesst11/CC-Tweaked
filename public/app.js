@@ -571,10 +571,10 @@ async function saveMinedCopies() {
   const dims = [...minedDirty];
   minedDirty.clear();
   try {
-    const store = (await minedDb()).transaction("mined", "readwrite").objectStore("mined");
+    const saved = (await minedDb()).transaction("mined", "readwrite").objectStore("mined");
     for (const d of dims) {
       const c = minedCopies[d];
-      store.put({ epoch: c.epoch, names: c.names, blocks: Int32Array.from(c.blocks) }, d);
+      saved.put({ epoch: c.epoch, names: c.names, blocks: Int32Array.from(c.blocks) }, d);
     }
   } catch {
     // Not saved here; the server still has the history.
