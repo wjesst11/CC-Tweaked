@@ -161,10 +161,10 @@ The **3D map** tab draws the world in Minecraft's own coordinates.
 
 **Turtles** are drawn about a block in size, colored by status, with a nose showing which way each one faces. You also see the depot and its chests, protected areas (red), job areas, homes and a ground grid in chunks (bigger squares for a big area).
 
-**Mined blocks** are every block any turtle has dug since the server started, colored by what it was. Ores stand out.
+**Mined blocks** are every block any turtle has dug (the latest 250,000 per dimension), colored by what it was. Ores stand out. The server's copy starts again whenever it restarts (every deploy), so each browser that opens the dashboard keeps a copy too, updated as turtles dig, and sends it back after a restart. Blocks dug while no dashboard was open and the server then restarted are lost. **Clear history** clears every copy.
 
 **Using it:**
-- Drag to spin, right-drag or the arrow keys to pan, **W** and **S** to move up and down, and scroll to zoom.
+- Drag to look around: the view turns where the camera stands, as moving the mouse does in Minecraft. Right-drag or the arrow keys pan, **W** and **S** move up and down, and scroll zooms. Held keys speed up over about half a second, and the camera glides to a stop when you let go; a quick drag keeps turning briefly after you release.
 - Click a turtle to select it, or double-click to open its page.
 - Hover a turtle or a mined block for details, including which turtle mined the block.
 - **Fit** frames everything. **Follow** keeps the camera on the selected turtle.

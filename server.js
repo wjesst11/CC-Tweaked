@@ -87,14 +87,19 @@ const dashboards = new Set();
 // copy a reconnecting turtle reports is adopted again.
 let fleet = structuredClone(DEFAULT_FLEET);
 // Blocks turtles have dug, for the dashboard's 3D map: "x,y,z" ->
-// name code + turtle id * 65536. The oldest are dropped past MAX_MINED, and
-// the history starts again after a redeploy.
+// name code + turtle id * 65536. The oldest are dropped past MAX_MINED.
+// The history starts again after a redeploy, so dashboards keep a copy in the
+// browser and send it back (restoreMined). Each dimension's history has an
+// epoch, new when the server starts and when it's cleared: a dashboard whose
+// copy came from an older epoch sends it back, except from a cleared one.
 const MAX_MINED = 250_000;
 const minedNames = [];
 const minedNameCodes = new Map();
 // Each dimension's dug blocks, and those not yet sent to dashboards as
 // [x, y, z, code, turtle id, ...].
 const minedBy = Object.fromEntries(DIMENSIONS.map((d) => [d, { blocks: new Map(), pending: [] }]));
+const minedEpoch = Object.fromEntries(DIMENSIONS.map((d) => [d, crypto.randomUUID()]));
+const clearedEpochs = new Set();
 
 function nameCode(name) {
   let code = minedNameCodes.get(name);
@@ -130,10 +135,27 @@ function minedSnapshot(dimension) {
     const [x, y, z] = key.split(",").map(Number);
     blocks.push(x, y, z, value % 65536, Math.floor(value / 65536));
   }
-  return { type: "mined", dimension, names: minedNames, blocks };
+  return { type: "mined", dimension, epoch: minedEpoch[dimension], names: minedNames, blocks };
 }
 
-// Only dashboards that have that dimension's 3D map open get its dug blocks.
+// A dashboard's saved copy, a piece at a time: { names, blocks: [x, y, z,
+// name index, turtle id, ...] }. Adds only blocks the server doesn't have,
+// and never pushes newer ones out past MAX_MINED.
+function restoreMined(dimension, { names, blocks }) {
+  if (!Array.isArray(names) || !Array.isArray(blocks)) return;
+  const mined = minedBy[dimension].blocks;
+  const codes = names.slice(0, 400).map((n) => nameCode(String(n).slice(0, 64)));
+  for (let i = 0; i + 4 < blocks.length && i < 5 * 2000 && mined.size < MAX_MINED; i += 5) {
+    const [x, y, z, name, id] = blocks.slice(i, i + 5);
+    const code = codes[name];
+    if (![x, y, z, id].every(Number.isInteger) || code === undefined || id < 0 || id >= 65536) continue;
+    if (Math.abs(x) > 3e7 || Math.abs(z) > 3e7 || y < -64 || y > 320) continue;
+    const key = `${x},${y},${z}`;
+    if (!mined.has(key)) mined.set(key, code + id * 65536);
+  }
+}
+
+// Only dashboards that have that dimension's 3D map open get its history.
 function broadcastMap(msg) {
   const data = JSON.stringify(msg);
   for (const ws of dashboards) {
@@ -729,6 +751,7 @@ function handleDashboard(ws) {
         jobQueues: Object.fromEntries(DIMENSIONS.map((d) => [d, queueView(queues[d])])),
         depot: depotView("overworld"),
         depots: depotViews(),
+        minedEpochs: minedEpoch,
         server: { instance: INSTANCE, build: BUILD, startedAt },
       });
       return;
@@ -780,11 +803,21 @@ function handleDashboard(ws) {
       ws.wantsMap = true;
       ws.mapDimension = dimensionOf(msg.dimension);
       send(ws, minedSnapshot(ws.mapDimension));
+    } else if (msg.type === "minedBackup") {
+      // The whole history for the browser's copy, without opening the map.
+      send(ws, { ...minedSnapshot(dimensionOf(msg.dimension)), type: "minedBackup" });
+    } else if (msg.type === "restoreMined") {
+      const dimension = dimensionOf(msg.dimension);
+      if (typeof msg.epoch !== "string" || msg.epoch === minedEpoch[dimension] || clearedEpochs.has(msg.epoch)) return;
+      restoreMined(dimension, msg);
+      if (msg.done) broadcastMap(minedSnapshot(dimension));
     } else if (msg.type === "clearMined") {
       const dimension = dimensionOf(msg.dimension);
       minedBy[dimension].blocks.clear();
       minedBy[dimension].pending = [];
-      broadcast({ type: "minedCleared", dimension });
+      clearedEpochs.add(minedEpoch[dimension]);
+      minedEpoch[dimension] = crypto.randomUUID();
+      broadcast({ type: "minedCleared", dimension, epoch: minedEpoch[dimension] });
     }
   }));
 
@@ -904,12 +937,13 @@ setInterval(() => {
   }
 }, 1_000);
 
-// Stream newly dug blocks to open 3D maps a couple of times a second.
+// Stream newly dug blocks to dashboards a couple of times a second: to open
+// 3D maps, and to every browser's saved copy.
 setInterval(() => {
   for (const dimension of DIMENSIONS) {
     const m = minedBy[dimension];
     if (!m.pending.length) continue;
-    broadcastMap({ type: "dug", dimension, names: minedNames, blocks: m.pending });
+    broadcast({ type: "dug", dimension, names: minedNames, blocks: m.pending });
     m.pending = [];
   }
 }, 500);

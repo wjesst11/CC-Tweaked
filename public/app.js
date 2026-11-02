@@ -285,6 +285,7 @@ function handle(msg) {
       ensureSelection();
       invalidate("list", "detail", "log", "fleet", "map");
       setFleet(msg.fleet);
+      syncMined(msg.minedEpochs);
       if (world) sendRaw({ type: "mined", dimension: state.dimension }); // reconnected: fetch the history again
       break;
 
@@ -324,7 +325,12 @@ function handle(msg) {
       invalidate("fleet", "map");
       break;
 
+    case "minedBackup":
+      setMinedCopy(dimOf(msg), msg.epoch, msg.names ?? [], msg.blocks ?? []);
+      break;
+
     case "mined":
+      setMinedCopy(dimOf(msg), msg.epoch, msg.names ?? [], msg.blocks ?? []);
       if (dimOf(msg) !== state.dimension) break;
       world?.clearMined();
       world?.addMined(msg.names, msg.blocks);
@@ -332,6 +338,7 @@ function handle(msg) {
       break;
 
     case "dug":
+      addToMinedCopy(dimOf(msg), msg.names, msg.blocks);
       if (dimOf(msg) !== state.dimension) break;
       world?.addMined(msg.names, msg.blocks);
       // The server keeps the latest 250,000; past that, start again from its copy.
@@ -343,6 +350,8 @@ function handle(msg) {
       break;
 
     case "minedCleared":
+      minedEpochs[dimOf(msg)] = msg.epoch;
+      setMinedCopy(dimOf(msg), msg.epoch, [], []);
       if (dimOf(msg) !== state.dimension) break;
       world?.clearMined();
       invalidate("map");
@@ -517,6 +526,106 @@ function renderBulkRenamePreview() {
     ? `${plan.length} turtle${plan.length === 1 ? "" : "s"} in ID order: ${sample}${plan.length > 3 ? ", …" : ""}.` +
       (offline ? ` ${offline} offline turtle${offline === 1 ? "" : "s"} will be skipped.` : "")
     : "Pick turtles above first.";
+}
+
+// Mined blocks, kept in this browser too ------------------------------------------
+// The server's history starts again whenever it restarts (every deploy).
+// After one, this copy is sent back, so the 3D map keeps every block. Per
+// dimension: the server epoch it came from, the block names, and
+// [x, y, z, name, turtle id, ...]. Saved in IndexedDB; without it, only the
+// server's copy is left.
+const minedCopies = {};
+const minedEpochs = {};
+const minedDirty = new Set();
+const MINED_COPY_MAX = 250_000; // blocks, as on the server
+let minedDbOpen, minedLoaded;
+
+function minedDb() {
+  return (minedDbOpen ??= new Promise((resolve, reject) => {
+    const open = indexedDB.open("minerdash", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("mined");
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(open.error);
+  }));
+}
+
+async function loadMinedCopies() {
+  try {
+    const db = await minedDb();
+    await Promise.all(Object.keys(DIMENSION_NAMES).map((d) => new Promise((resolve) => {
+      const req = db.transaction("mined").objectStore("mined").get(d);
+      req.onsuccess = () => {
+        const v = req.result;
+        if (v && typeof v.epoch === "string") minedCopies[d] = { epoch: v.epoch, names: v.names ?? [], blocks: Array.from(v.blocks ?? []) };
+        resolve();
+      };
+      req.onerror = () => resolve();
+    })));
+  } catch {
+    // Private windows and blocked storage have no saved copy.
+  }
+}
+
+async function saveMinedCopies() {
+  if (!minedDirty.size) return;
+  const dims = [...minedDirty];
+  minedDirty.clear();
+  try {
+    const store = (await minedDb()).transaction("mined", "readwrite").objectStore("mined");
+    for (const d of dims) {
+      const c = minedCopies[d];
+      store.put({ epoch: c.epoch, names: c.names, blocks: Int32Array.from(c.blocks) }, d);
+    }
+  } catch {
+    // Not saved here; the server still has the history.
+  }
+}
+
+function setMinedCopy(dimension, epoch, names, blocks) {
+  if (typeof epoch !== "string") return;
+  minedCopies[dimension] = { epoch, names: [...names], blocks: [...blocks] };
+  minedDirty.add(dimension);
+}
+
+const quietSend = (msg) => state.ws?.readyState === WebSocket.OPEN && state.ws.send(JSON.stringify(msg));
+
+// Sent back a piece at a time (the server takes messages up to 64 KB), each
+// with just the names its blocks use.
+function sendMinedCopy(dimension, copy) {
+  const per = 1200 * 5;
+  for (let i = 0; i < copy.blocks.length; i += per) {
+    const names = [], index = new Map(), blocks = [];
+    for (let j = i; j + 4 < Math.min(i + per, copy.blocks.length); j += 5) {
+      const name = copy.names[copy.blocks[j + 3]];
+      if (typeof name !== "string") continue;
+      if (!index.has(name)) index.set(name, names.push(name) - 1);
+      blocks.push(copy.blocks[j], copy.blocks[j + 1], copy.blocks[j + 2], index.get(name), copy.blocks[j + 4]);
+    }
+    quietSend({ type: "restoreMined", dimension, epoch: copy.epoch, names, blocks, done: i + per >= copy.blocks.length });
+  }
+}
+
+// After (re)connecting: a copy from before the server restarted goes back
+// to it, then this browser takes the whole history again.
+async function syncMined(epochs) {
+  if (!epochs) return; // a server from before saved copies
+  Object.assign(minedEpochs, epochs);
+  await (minedLoaded ??= loadMinedCopies());
+  for (const d of Object.keys(DIMENSION_NAMES)) {
+    const copy = minedCopies[d];
+    if (copy?.blocks.length && copy.epoch !== minedEpochs[d]) sendMinedCopy(d, copy);
+    quietSend({ type: "minedBackup", dimension: d });
+  }
+}
+
+// Newly dug blocks join the copy once it's from the server's current history.
+function addToMinedCopy(dimension, names, blocks) {
+  const c = minedCopies[dimension];
+  if (!c || c.epoch !== minedEpochs[dimension] || !Array.isArray(blocks)) return;
+  c.names = names;
+  for (const v of blocks) c.blocks.push(v);
+  if (c.blocks.length > 5 * MINED_COPY_MAX) c.blocks.splice(0, c.blocks.length - 5 * MINED_COPY_MAX);
+  minedDirty.add(dimension);
 }
 
 // Selection & views ------------------------------------------------------------
@@ -2273,6 +2382,8 @@ function bindEvents() {
     rememberServer();
   }, 15000);
   addEventListener("pagehide", rememberServer);
+  setInterval(saveMinedCopies, 15000);
+  addEventListener("pagehide", saveMinedCopies);
 }
 
 applyTheme(store.get("theme"));

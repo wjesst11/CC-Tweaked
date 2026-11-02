@@ -98,6 +98,10 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
   controls.dampingFactor = 0.12;
   controls.zoomSpeed = 3; // each wheel notch or pinch moves three times the default
   controls.maxDistance = 3000;
+  // Dragging with one finger or the left button turns the view in place (see
+  // "look around" below) rather than swinging the camera around the map.
+  controls.mouseButtons.LEFT = null;
+  controls.touches.ONE = null;
   scene.add(new THREE.HemisphereLight(0xffffff, 0x556070, 1.4));
   const sun = new THREE.DirectionalLight(0xffffff, 1.4);
   sun.position.set(0.4, 1, 0.25);
@@ -508,6 +512,7 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
     const middle = box.getCenter(new THREE.Vector3());
     const radius = Math.max(12, size.length() / 2);
     const distance = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2));
+    stopGliding();
     controls.target.copy(middle);
     camera.position.copy(middle).add(new THREE.Vector3(0.55, 0.65, 0.75).normalize().multiplyScalar(distance));
     camera.near = Math.max(0.1, distance / 500);
@@ -579,10 +584,71 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
   let follow = false;
   const shift = new THREE.Vector3();
 
+  // Look around: dragging with the left button or one finger turns the view
+  // where the camera stands, as moving the mouse does in Minecraft: right to
+  // look right, up to look up. The point it looks at (which zooming moves
+  // towards) turns with it. Let go mid-drag and it turns on a little, slowing
+  // to a stop.
+  const pointers = new Set();
+  const look = new THREE.Vector3(), aim = new THREE.Spherical();
+  const spin = { theta: 0, phi: 0, at: 0 }; // radians per second, and when last dragged
+  let lookFrom = null;
+  function turnView(theta, phi) {
+    aim.setFromVector3(look.copy(controls.target).sub(camera.position));
+    aim.theta += theta;
+    aim.phi = THREE.MathUtils.clamp(aim.phi + phi, 0.01, Math.PI - 0.01);
+    controls.target.copy(camera.position).add(look.setFromSpherical(aim));
+  }
+  renderer.domElement.addEventListener("pointerdown", (e) => {
+    pointers.add(e.pointerId);
+    const looking = pointers.size === 1 && (e.pointerType === "touch" || e.button === 0);
+    lookFrom = looking ? [e.clientX, e.clientY, e.timeStamp] : null;
+    spin.theta = spin.phi = 0;
+    if (looking) renderer.domElement.setPointerCapture?.(e.pointerId);
+  });
+  const stopLooking = (e) => {
+    pointers.delete(e.pointerId);
+    // Held still before letting go: no glide.
+    if (!lookFrom || e.timeStamp - spin.at > 80) spin.theta = spin.phi = 0;
+    lookFrom = null;
+  };
+  renderer.domElement.addEventListener("pointerup", stopLooking);
+  renderer.domElement.addEventListener("pointercancel", stopLooking);
+  renderer.domElement.addEventListener("pointermove", (e) => {
+    if (!lookFrom || pointers.size !== 1) return;
+    const dx = e.clientX - lookFrom[0], dy = e.clientY - lookFrom[1];
+    const dt = Math.max(1, e.timeStamp - lookFrom[2]) / 1000;
+    lookFrom = [e.clientX, e.clientY, e.timeStamp];
+    if (!dx && !dy) return;
+    if (follow) {
+      follow = false;
+      onFollowChange(false);
+    }
+    const turn = Math.PI / Math.max(1, renderer.domElement.clientHeight);
+    turnView(-dx * turn, dy * turn);
+    // Its speed, smoothed over the last few moves, for the glide.
+    spin.theta = 0.6 * spin.theta + 0.4 * (-dx * turn / dt);
+    spin.phi = 0.6 * spin.phi + 0.4 * (dy * turn / dt);
+    spin.at = e.timeStamp;
+  });
+  function stopGliding() {
+    velocity.set(0, 0, 0);
+    spin.theta = spin.phi = 0;
+  }
+  function glide(seconds) {
+    if (lookFrom || (!spin.theta && !spin.phi)) return;
+    turnView(spin.theta * seconds, spin.phi * seconds);
+    const keep = Math.exp(-5 * seconds);
+    spin.theta *= keep;
+    spin.phi *= keep;
+    if (Math.abs(spin.theta) + Math.abs(spin.phi) < 0.01) spin.theta = spin.phi = 0;
+  }
+
   // Arrow keys move over the ground while the map is on screen: up and down
   // along the way the camera looks, left and right sideways. W and S move
-  // straight up and down. Faster the further out it is zoomed. Typing in a
-  // field keeps its keys.
+  // straight up and down. Faster the further out it is zoomed. Held, they
+  // speed up over about half a second; let go, the camera glides to a stop.
+  // Typing in a field keeps its keys.
   const MOVE_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "w", "s"]);
   const moveKey = (event) => (event.key.length === 1 ? event.key.toLowerCase() : event.key);
   const held = new Set();
@@ -600,19 +666,28 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
   addEventListener("keyup", (event) => held.delete(moveKey(event)));
   addEventListener("blur", () => held.clear());
   const ahead = new THREE.Vector3(), aside = new THREE.Vector3(), step = new THREE.Vector3();
+  const velocity = new THREE.Vector3(); // blocks per second
   let lastFrame = 0;
   function moveWithKeys(seconds) {
     const along = (held.has("ArrowUp") ? 1 : 0) - (held.has("ArrowDown") ? 1 : 0);
     const across = (held.has("ArrowRight") ? 1 : 0) - (held.has("ArrowLeft") ? 1 : 0);
     const rise = (held.has("w") ? 1 : 0) - (held.has("s") ? 1 : 0);
-    if (!along && !across && !rise) return;
-    camera.getWorldDirection(ahead).setY(0);
-    // Looking straight down, "ahead" is the top of the screen.
-    if (ahead.lengthSq() < 1e-6) ahead.set(0, 1, 0).applyQuaternion(camera.quaternion).setY(0);
-    ahead.normalize();
-    aside.crossVectors(ahead, camera.up).normalize();
-    step.copy(ahead).multiplyScalar(along).addScaledVector(aside, across).setY(rise).normalize()
-      .multiplyScalar(camera.position.distanceTo(controls.target) * 0.5 * seconds);
+    const speed = camera.position.distanceTo(controls.target) * 0.5;
+    step.set(0, 0, 0);
+    if (along || across || rise) {
+      camera.getWorldDirection(ahead).setY(0);
+      // Looking straight down, "ahead" is the top of the screen.
+      if (ahead.lengthSq() < 1e-6) ahead.set(0, 1, 0).applyQuaternion(camera.quaternion).setY(0);
+      ahead.normalize();
+      aside.crossVectors(ahead, camera.up).normalize();
+      step.copy(ahead).multiplyScalar(along).addScaledVector(aside, across).setY(rise).normalize().multiplyScalar(speed);
+    } else if (velocity.lengthSq() < (speed * 0.01) ** 2) {
+      velocity.set(0, 0, 0);
+      return;
+    }
+    // Eases towards the wanted speed: a little quicker to stop than to start.
+    velocity.lerp(step, 1 - Math.exp(-(along || across || rise ? 5 : 7) * seconds));
+    step.copy(velocity).multiplyScalar(seconds);
     camera.position.add(step);
     controls.target.add(step);
   }
@@ -673,6 +748,7 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
     lastFrame = now;
     if (!container.offsetParent && !document.fullscreenElement) return; // hidden
     moveWithKeys(seconds);
+    glide(seconds);
     if (minedDirty && now - lastBuild > 700) {
       rebuildMined();
       lastBuild = now;
@@ -716,6 +792,8 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
     fit,
     setFollow(on) {
       follow = on;
+      // Following takes over from any glide still going.
+      if (on) stopGliding();
     },
     setOptions({ oresOnly: ores, areas, jobs, names: showNames }) {
       info.hidden = true; // what it described may be gone

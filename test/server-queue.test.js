@@ -464,3 +464,34 @@ test("an Overworld turtle whose home is at Y 80, Z 20 gets a job from there: the
   assert.equal(args.y, 75);
   assert.equal(args.z, 20);
 });
+
+test("a dashboard's saved copy of the mined blocks comes back after a restart, but not from a cleared history", async (t) => {
+  const { dashboard: openDashboard } = await harness(t);
+  const dashboard = await openDashboard();
+  const snapshot = dashboard.messages.find((msg) => msg.type === "snapshot");
+  const epoch = snapshot.minedEpochs.overworld;
+  assert.equal(typeof epoch, "string");
+  const backup = () => dashboard.exchange({ type: "minedBackup", dimension: "overworld" }, (msg) => msg.type === "minedBackup");
+  // A copy saved before the server restarted, with a bad entry among its blocks.
+  dashboard.send({
+    type: "restoreMined", dimension: "overworld", epoch: "before-restart", done: true,
+    names: ["minecraft:stone", "minecraft:diamond_ore"],
+    blocks: [1, 2, 3, 0, 7, 4, 5, 6, 1, 7, 1.5, 2, 3, 0, 7, 9, 9, 9, 5, 7],
+  });
+  let copy = await backup();
+  assert.equal(copy.epoch, epoch);
+  assert.deepEqual(copy.blocks, [1, 2, 3, 0, 7, 4, 5, 6, 1, 7]);
+  assert.deepEqual([copy.names[copy.blocks[3]], copy.names[copy.blocks[8]]], ["minecraft:stone", "minecraft:diamond_ore"]);
+  // The same copy again (another browser) adds nothing; one from the current history is ignored.
+  dashboard.send({ type: "restoreMined", dimension: "overworld", epoch: "before-restart", done: true, names: ["minecraft:stone"], blocks: [1, 2, 3, 0, 7] });
+  dashboard.send({ type: "restoreMined", dimension: "overworld", epoch, done: true, names: ["minecraft:stone"], blocks: [8, 8, 8, 0, 7] });
+  copy = await backup();
+  assert.equal(copy.blocks.length, 10);
+  // Cleared: the history and its epoch are gone, and a copy from it can't bring blocks back.
+  const cleared = await dashboard.exchange({ type: "clearMined", dimension: "overworld" }, (msg) => msg.type === "minedCleared");
+  assert.notEqual(cleared.epoch, epoch);
+  dashboard.send({ type: "restoreMined", dimension: "overworld", epoch, done: true, names: ["minecraft:stone"], blocks: [1, 2, 3, 0, 7] });
+  copy = await backup();
+  assert.equal(copy.epoch, cleared.epoch);
+  assert.deepEqual(copy.blocks, []);
+});
