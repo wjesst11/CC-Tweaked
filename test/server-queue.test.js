@@ -495,3 +495,31 @@ test("a dashboard's saved copy of the mined blocks comes back after a restart, b
   assert.equal(copy.epoch, cleared.epoch);
   assert.deepEqual(copy.blocks, []);
 });
+
+test("after a restart, dashboards bring back offline turtles the server lost, and a reconnect takes over", async (t) => {
+  const { dashboard: openDashboard, turtle } = await harness(t);
+  const dashboard = await openDashboard();
+  const at = { x: 412, y: 12, z: -80 };
+  const restored = await dashboard.exchange({
+    type: "restoreTurtles",
+    turtles: [{ id: 31, label: "Miner31", version: "2.5.2", lastSeen: 1000, status: { world: at, dimension: "nether", fuel: 900 } }],
+  }, (msg) => msg.type === "turtle" && msg.turtle.id === 31);
+  assert.equal(restored.turtle.online, false);
+  assert.equal(restored.turtle.label, "Miner31");
+  assert.deepEqual(restored.turtle.status.world, at);
+  assert.equal(restored.turtle.status.dimension, "nether");
+  // A turtle the server knows is never replaced, and an oversized status is refused.
+  const live = await turtle({ ...IDLE }, true);
+  const before = dashboard.messages.length;
+  dashboard.send({
+    type: "restoreTurtles",
+    turtles: [{ id: 7, label: "Old copy", status: { world: { x: 0, y: 0, z: 0 } } }, { id: 32, status: { junk: "x".repeat(61_000) } }],
+  });
+  await dashboard.exchange({ type: "minedBackup", dimension: "overworld" }, (msg) => msg.type === "minedBackup", before);
+  const later = dashboard.messages.slice(before).filter((msg) => msg.type === "turtle");
+  assert.equal(later.some((msg) => msg.turtle.id === 32 || msg.turtle.label === "Old copy"), false);
+  // The restored turtle reconnecting is online again.
+  await turtle({ ...IDLE, world: at, dimension: "nether" }, true, { id: 31, dimension: "nether" });
+  await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.id === 31 && msg.turtle.online);
+  assert.ok(live);
+});

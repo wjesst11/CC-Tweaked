@@ -34,7 +34,7 @@ turtles (Lua) ──wss──▶  server.js (Node, App Platform)  ◀──wss�
 
 If you use `doctl`, you can create the app from the included spec with `doctl apps create --spec .do/app.yaml` and then set the two secrets in the app's settings. Edit `repo:` in the spec first if your GitHub repo has a different name.
 
-Every push to `main` redeploys. Turtles and open dashboards reconnect on their own. Fleet settings survive redeploys because every turtle keeps a copy and hands it back.
+Every push to `main` redeploys. Turtles and open dashboards reconnect on their own. Fleet settings survive redeploys because every turtle keeps a copy and hands it back. Offline turtles can't report in, so each dashboard remembers every turtle it has seen and hands back the ones the restarted server doesn't know; they show as offline at their last known position until they reconnect.
 
 ## Set up turtles
 
@@ -171,11 +171,11 @@ The **3D map** tab draws the world in Minecraft's own coordinates.
 - Checkboxes show only ores, or hide areas, jobs or names.
 - **Clear history** forgets the mined blocks.
 
-The map keeps the most recent 250,000 mined blocks in the server's memory, so a redeploy clears it. It needs WebGL and loads its 3D library from cdn.jsdelivr.net.
+The map keeps the most recent 250,000 mined blocks per dimension; browsers' copies bring them back after a redeploy (see above). It needs WebGL and loads its 3D library from cdn.jsdelivr.net.
 
 ## Turtles that go offline far away
 
-A turtle only runs while its chunk is loaded. Usually that means a player is nearby. Mining far from where you are, or after you log off, it stops and shows as offline. The sidebar shows where it was last seen.
+A turtle only runs while its chunk is loaded. Usually that means a player is nearby. Mining far from where you are, or after you log off, it stops and shows as offline. The sidebar shows where it was last seen, even after a server restart (your browser remembers it). A turtle the browser never saw report, but whose digs are in the saved mined blocks, shows as "Last dug a block at" its last dig. **Forget** removes a turtle for good: it isn't brought back after a restart unless it reconnects.
 
 When you come back near it, it switches back on and carries on with its job by itself. To keep a mining area running while you're away, keep its chunks loaded:
 - `/forceload add <x1> <z1> <x2> <z2>` if you're an operator;

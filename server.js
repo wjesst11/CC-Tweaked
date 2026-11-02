@@ -216,6 +216,27 @@ function addLog(t, level, msg) {
 
 const nameOf = (t) => t.label || `Turtle #${t.id}`;
 
+// Offline turtles don't report, so after a restart (every deploy) only the
+// dashboards remember them: each keeps a copy and sends back the ones the
+// server doesn't know, { id, label, version, lastSeen, status }. They come
+// back offline, at their last known position, until they reconnect.
+function restoreTurtle(saved) {
+  const id = Number(saved?.id);
+  if (!Number.isInteger(id) || id < 0 || id > 1e9 || turtles.has(id)) return null;
+  const status = saved.status && typeof saved.status === "object" && !Array.isArray(saved.status) ? saved.status : {};
+  if (JSON.stringify(status).length > 60_000) return null;
+  const turtle = {
+    id, logs: [], status: { ...status, type: undefined }, socket: null, online: false,
+    label: typeof saved.label === "string" ? saved.label.slice(0, 64) : null,
+    version: typeof saved.version === "string" ? saved.version.slice(0, 32) : null,
+    lastSeen: Number.isFinite(saved.lastSeen) ? saved.lastSeen : null,
+    freshStatus: false, pendingFleetUntil: 0,
+  };
+  setDimension(turtle, status.dimension);
+  turtles.set(id, turtle);
+  return turtle;
+}
+
 // The dimension a turtle works in, as it last said. Older scripts don't say,
 // and work in the Overworld.
 const dimOf = (t) => dimensionOf(t?.dimension);
@@ -759,6 +780,11 @@ function handleDashboard(ws) {
 
     if (msg.type === "cmd") {
       handleCommand(ws, msg);
+    } else if (msg.type === "restoreTurtles") {
+      for (const saved of Array.isArray(msg.turtles) ? msg.turtles.slice(0, 50) : []) {
+        const turtle = restoreTurtle(saved);
+        if (turtle) broadcast({ type: "turtle", turtle: turtleView(turtle) });
+      }
     } else if (msg.type === "forget") {
       const turtle = turtles.get(Number(msg.id));
       if (turtle && !turtle.socket) {

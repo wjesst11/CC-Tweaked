@@ -285,13 +285,15 @@ function handle(msg) {
       ensureSelection();
       invalidate("list", "detail", "log", "fleet", "map");
       setFleet(msg.fleet);
-      syncMined(msg.minedEpochs);
+      for (const t of state.turtles.values()) rememberTurtle(t);
+      syncMined(msg.minedEpochs).then(restoreTurtles);
       if (world) sendRaw({ type: "mined", dimension: state.dimension }); // reconnected: fetch the history again
       break;
 
     case "turtle": {
       const t = { ...msg.turtle, logs: state.turtles.get(msg.turtle.id)?.logs ?? [] };
       state.turtles.set(t.id, t);
+      rememberTurtle(t);
       recordTrail(t);
       if (!shown(state.turtles.get(state.selected))) {
         ensureSelection();
@@ -314,6 +316,10 @@ function handle(msg) {
 
     case "removed":
       state.turtles.delete(msg.id);
+      // Forgotten on purpose: not brought back after a restart.
+      delete knownTurtles[msg.id];
+      forgottenTurtles.add(msg.id);
+      knownDirty = true;
       state.trails.delete(msg.id);
       state.picked.delete(msg.id);
       ensureSelection();
@@ -628,6 +634,62 @@ function addToMinedCopy(dimension, names, blocks) {
   minedDirty.add(dimension);
 }
 
+// Turtles, remembered in this browser too ------------------------------------------
+// Offline turtles don't report, so after a server restart only dashboards
+// know them: this browser keeps each turtle's last report and sends back the
+// ones the server has lost. One it never saw report since then, but whose
+// digs are in the saved mined blocks, comes back at the last block it dug.
+// Saved as { turtles: { id: { id, label, version, lastSeen, status } },
+// forgotten: [id, ...] } (forgotten on purpose: never brought back).
+let knownTurtles = {}, forgottenTurtles = new Set();
+let knownDirty = false;
+try {
+  const saved = JSON.parse(store.get("knownTurtles") ?? "null");
+  knownTurtles = saved?.turtles ?? {};
+  forgottenTurtles = new Set(saved?.forgotten ?? []);
+} catch {
+  // Nothing saved, or unreadable: start again.
+}
+
+function rememberTurtle(t) {
+  if (!t || !Number.isInteger(t.id) || t.status?.lastDug) return;
+  knownTurtles[t.id] = { id: t.id, label: t.label ?? null, version: t.version ?? null, lastSeen: t.online ? Date.now() : t.lastSeen ?? null, status: t.status ?? null };
+  if (t.online) forgottenTurtles.delete(t.id);
+  knownDirty = true;
+}
+
+function saveKnownTurtles() {
+  if (!knownDirty) return;
+  knownDirty = false;
+  try {
+    store.set("knownTurtles", JSON.stringify({ turtles: knownTurtles, forgotten: [...forgottenTurtles] }));
+  } catch {
+    // Full or blocked storage: the server still has the online turtles.
+  }
+}
+
+// The last block each turtle dug in the saved mined blocks, by turtle ID.
+function lastDigs() {
+  const last = new Map();
+  for (const [dimension, copy] of Object.entries(minedCopies)) {
+    for (let i = 0; i + 4 < copy.blocks.length; i += 5) {
+      const b = copy.blocks;
+      last.set(b[i + 4], { x: b[i], y: b[i + 1], z: b[i + 2], dimension });
+    }
+  }
+  return last;
+}
+
+async function restoreTurtles() {
+  await (minedLoaded ??= loadMinedCopies());
+  const lost = Object.values(knownTurtles).filter((t) => !state.turtles.has(t.id) && !forgottenTurtles.has(t.id));
+  for (const [id, w] of lastDigs()) {
+    if (state.turtles.has(id) || knownTurtles[id] || forgottenTurtles.has(id)) continue;
+    lost.push({ id, label: null, version: null, lastSeen: null, status: { world: { x: w.x, y: w.y, z: w.z }, dimension: w.dimension, lastDug: true } });
+  }
+  for (const t of lost) quietSend({ type: "restoreTurtles", turtles: [t] });
+}
+
 // Selection & views ------------------------------------------------------------
 
 // Each turtle works in one dimension; messages without one are the Overworld's.
@@ -829,7 +891,8 @@ function updateListItem(li, t, st) {
   if (!t.online) {
     // Usually its chunk unloaded: this is where to find it.
     const w = t.status?.world;
-    sub = `Last seen ${ago(t.lastSeen)}` + (w ? ` at ${w.x}, ${w.y}, ${w.z}` : "");
+    const where = w ? ` at ${w.x}, ${w.y}, ${w.z}` : "";
+    sub = t.status?.lastDug ? `Last dug a block${where}` : `Last seen ${ago(t.lastSeen)}${where}`;
   }
   else if (t.status?.job) sub = t.status.job.detail ?? "";
   else if (t.status?.fleetJob?.failed) sub = t.status.fleetJob.failed;
@@ -2384,6 +2447,8 @@ function bindEvents() {
   addEventListener("pagehide", rememberServer);
   setInterval(saveMinedCopies, 15000);
   addEventListener("pagehide", saveMinedCopies);
+  setInterval(saveKnownTurtles, 10000);
+  addEventListener("pagehide", saveKnownTurtles);
 }
 
 applyTheme(store.get("theme"));
