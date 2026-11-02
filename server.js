@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { DEFAULT_FLEET, DIMENSIONS, dimensionFleet, dimensionOf, planFleetJob, planJoin, sanitizeFleet, validateFleet } from "./fleet.js";
+import { DEFAULT_FLEET, DIMENSIONS, atTurtleHome, dimensionFleet, dimensionOf, planFleetJob, planJoin, sanitizeFleet, turtleHome, validateFleet } from "./fleet.js";
 import { FleetJobQueue } from "./fleet-queue.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -213,34 +213,9 @@ function setDimension(turtle, value) {
   if (old && old !== turtle.dimension) releaseDepot(old, turtle.id);
 }
 
-// The home row in a turtle's dimension, { y, z }, from that dimension's settings.
-function homeRowOf(t) {
-  const f = dimensionFleet(fleet, dimOf(t));
-  return { y: f.homeY, z: f.homeZ };
-}
-
-function onHomeRow(position, row) {
-  return Boolean(position && row) && [position.x, position.y, position.z].every(Number.isInteger) &&
-    position.y === row.y && position.z === row.z;
-}
-
-// A saved home keeps the row it was saved on.
-function rowHome(status, row) {
-  const saved = status?.miningRoute?.home;
-  if (onHomeRow(saved, saved)) return { x: saved.x, y: saved.y, z: saved.z, facing: "south" };
-  if (onHomeRow(status?.world, row)) return { x: status.world.x, y: row.y, z: row.z, facing: "south" };
-  return null;
-}
-
-function atRowHome(status, row) {
-  const home = rowHome(status, row);
-  const w = status?.world;
-  return Boolean(home && w) && w.x === home.x && w.y === home.y && w.z === home.z;
-}
-
 function plannerTurtle(id) {
   const t = turtles.get(id);
-  return { id, name: t ? nameOf(t) : `Turtle #${id}`, home: rowHome(t?.status, homeRowOf(t)), position: t?.status?.world };
+  return { id, name: t ? nameOf(t) : `Turtle #${id}`, home: turtleHome(t?.status), position: t?.status?.world };
 }
 
 // Queued work outlives browser sessions and server restarts. Persist before
@@ -278,10 +253,6 @@ function makeQueue(dimension) {
     dispatch(id, args, action = "fleetJob") {
       const t = turtles.get(id);
       if (t?.socket) dispatch(t, action, args);
-    },
-    homeRow: () => {
-      const f = dimensionFleet(fleet, dimension);
-      return { y: f.homeY, z: f.homeZ };
     },
   });
   // Dashboards get each queue in their snapshot, then only its changes.
@@ -407,15 +378,17 @@ function readyTurtles(ids, kind, dimension = "overworld") {
     if (!t.socket) skipped.push(`${nameOf(t)} is offline`);
     else if (dimOf(t) !== dimension) skipped.push(`${nameOf(t)} works in the ${dimensionName(dimOf(t))}`);
     else if (!t.freshStatus) skipped.push(`${nameOf(t)} is still reporting its status`);
-    else if (!s.gpsTrusted && !(kind === "branchMine" && !s.miningRoute && onHomeRow(s.world, homeRowOf(t)))) skipped.push(`${nameOf(t)} doesn't know its GPS position yet`);
+    // Before its first level job a turtle at its home finds its facing itself.
+    else if (!s.gpsTrusted && !(kind === "branchMine" && !s.miningRoute && atTurtleHome(s))) skipped.push(`${nameOf(t)} doesn't know its GPS position yet`);
     else if (kind === "branchMine" && !s.staircaseSupported) skipped.push(`${nameOf(t)} needs the latest script for staircase mining`);
     else if (kind === "branchMine" && !s.oreScanSupported) skipped.push(`${nameOf(t)} needs the latest script for complete side checks`);
     else if (kind === "branchMine" && !s.southRowSupported) skipped.push(`${nameOf(t)} needs script 2.0.0 for the saved south staircase`);
     else if (kind === "branchMine" && !s.radiusSupported) skipped.push(`${nameOf(t)} needs script 2.1.0 for the home mining radius`);
     else if (kind === "branchMine" && !s.staggeredSupported) skipped.push(`${nameOf(t)} needs script 2.2.0 for staggered tunnels`);
-    else if (kind === "branchMine" && !atRowHome(s, homeRowOf(t))) {
-      const at = rowHome(s, homeRowOf(t)) ?? homeRowOf(t);
-      skipped.push(`${nameOf(t)} must be at its saved home on Y=${at.y}, Z=${at.z}`);
+    else if (kind === "branchMine" && !turtleHome(s)) skipped.push(`${nameOf(t)} has no saved home yet: use Set home`);
+    else if (kind === "branchMine" && !atTurtleHome(s)) {
+      const at = turtleHome(s);
+      skipped.push(`${nameOf(t)} must be at its saved home at ${at.x}, ${at.y}, ${at.z}`);
     }
     else if (s.job || s.fleetJob || s.miningRoute?.intent || s.queued > 0 || t.pendingFleetUntil > Date.now() || queueOwns(t.id)) skipped.push(`${nameOf(t)} is busy or has saved work`);
     else ready.push(plannerTurtle(t.id));

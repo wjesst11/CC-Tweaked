@@ -58,7 +58,7 @@ const validPoint = (p) => p && [p.x, p.y, p.z].every(Number.isFinite);
 
 // World Z of staircase step `step`, switching back at the radius. Same as
 // stairZ in fleet.js and the turtle script.
-// From the home's Z (Z -55 in the Overworld's home row).
+// From the home's Z.
 function stairZ(step, radius, z0 = -55) {
   if (!Number.isInteger(radius) || radius < 1) return z0 + step;
   const p = step % (2 * radius);

@@ -267,7 +267,8 @@ test("Force home can interrupt a queued assignment and its cancellation pauses t
 test("new level jobs wait for all-side support and send the checked ore bounds", { timeout: 15000 }, async (t) => {
   const app = await harness(t);
   const dashboard = await app.dashboard();
-  const initial = { ...IDLE, world: { x: 100, y: 67, z: -55 }, homeWorld: null, gpsTrusted: false };
+  // Before its first level job GPS needn't know its facing yet: it finds it at its home.
+  const initial = { ...IDLE, world: { x: 100, y: 67, z: -55 }, homeWorld: { x: 100, y: 67, z: -55 }, gpsTrusted: false };
   const turtle = await app.turtle({ ...initial, oreScanSupported: false });
   const result = await dashboard.exchange({
     type: "queueFleetJob", kind: "branchMine", ids: [7],
@@ -423,14 +424,14 @@ test("each dimension has its own dock turns, job queue and fleet-wide commands",
   assert.equal(dashboard.messages.some((msg) => msg.type === "jobQueue" && msg.dimension === "overworld" && msg.queue.paused), false);
 });
 
-test("a Nether turtle on a Y 97, Z 6 home row gets a job saved from that row", async (t) => {
+test("a Nether turtle whose home is at Y 97, Z 6 gets a job from there", async (t) => {
   const { dashboard: openDashboard, turtle } = await harness(t);
   const dashboard = await openDashboard();
   const fleet = {
     ...FLEET,
-    dimensions: { nether: { homeY: 97, homeZ: 6, depot: { x: 5, y: 97, z: 6, junk: "down", valuables: "north", fuel: "west" }, areas: [] } },
+    dimensions: { nether: { depot: { x: 5, y: 97, z: 6, junk: "down", valuables: "north", fuel: "west" }, areas: [] } },
   };
-  const status = { ...IDLE, dimension: "nether", world: { x: 100, y: 97, z: 6 }, homeWorld: null };
+  const status = { ...IDLE, dimension: "nether", world: { x: 100, y: 97, z: 6 }, homeWorld: { x: 100, y: 97, z: 6 } };
   const nether = await turtle(status, true, { dimension: "nether", fleet });
   await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.status?.dimension === "nether");
   dashboard.send({
@@ -445,11 +446,11 @@ test("a Nether turtle on a Y 97, Z 6 home row gets a job saved from that row", a
   assert.equal(args.z, 6);
 });
 
-test("an Overworld turtle on a home row moved to Y 80, Z 20 gets a job saved from that row", async (t) => {
+test("an Overworld turtle whose home is at Y 80, Z 20 gets a job from there: there's no home row", async (t) => {
   const { dashboard: openDashboard, turtle } = await harness(t);
   const dashboard = await openDashboard();
-  const fleet = { ...FLEET, homeY: 80, homeZ: 20, depot: { x: 5, y: 80, z: 20, junk: "down", valuables: "north", fuel: "west" } };
-  const status = { ...IDLE, world: { x: 100, y: 80, z: 20 }, homeWorld: null };
+  const fleet = { ...FLEET, depot: { x: 5, y: 80, z: 20, junk: "down", valuables: "north", fuel: "west" } };
+  const status = { ...IDLE, world: { x: 100, y: 80, z: 20 }, homeWorld: { x: 100, y: 80, z: 20 } };
   const miner = await turtle(status, true, { fleet });
   await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.status?.world?.y === 80);
   dashboard.send({

@@ -58,17 +58,20 @@ test("requires the new layout explicitly so saved old jobs cannot silently chang
   assert.equal(args.entryY, 67);
 });
 
-test("requires real saved homes in the south-facing Y=67, Z=-55 surface row", () => {
-  const invalid = [undefined, { x: 100, y: 66, z: -55, facing: "south" },
-    { x: 100, y: 67, z: -54, facing: "south" }, { x: 100, y: 67, z: -55, facing: "north" },
+test("requires each turtle's own saved home, at the dock's height, anywhere else", () => {
+  const invalid = [undefined, { x: 100, y: 67, z: -55, facing: "north" },
     { x: 100.5, y: 67, z: -55, facing: "south" }, { x: 30_000_001, y: 67, z: -55, facing: "south" }];
   for (const home of invalid) {
-    assert.match(plan(fleet(), settings, [{ ...ready[0], home, position: ready[0].home }]).error, /confirmed south-facing home/);
+    assert.match(plan(fleet(), settings, [{ ...ready[0], home, position: ready[0].home }]).error, /no saved home yet/);
   }
-  assert.match(plan(fleet(), settings, [ready[0], turtle(3, 100)]).error, /own X position/);
+  // There's no home row: any Z works.
+  assert.equal(plan(fleet(), settings, [{ ...ready[0], home: { x: 100, y: 67, z: -54, facing: "south" } }]).error, undefined);
+  assert.match(plan(fleet(), settings, [{ ...ready[0], home: { x: 100, y: 66, z: -55, facing: "south" } }]).error,
+    /Miner 1's home is at Y 66 but the dock is at Y 67/);
+  assert.match(plan(fleet(), settings, [ready[0], turtle(3, 100)]).error, /own home X/);
   const f = fleet();
   f.depot.y = 66;
-  assert.match(plan(f).error, /depot must be at Y=67/);
+  assert.match(plan(f).error, /home is at Y 67 but the dock is at Y 66/);
 });
 
 test("allows protected areas on every initial stair foot and headroom cell away from the work volume", () => {

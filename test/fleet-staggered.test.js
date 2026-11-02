@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_FLEET, STAGGERED_HIGHEST, STAGGERED_LOWEST, dimensionFleet, planFleetJob, sanitizeFleet, staggeredTunnel, stairZ } from "../fleet.js";
+import { DEFAULT_FLEET, STAGGERED_LOWEST, dimensionFleet, planFleetJob, sanitizeFleet, staggeredTunnel, stairZ } from "../fleet.js";
 
 const fleet = () => ({
   ...structuredClone(DEFAULT_FLEET),
@@ -93,19 +93,19 @@ test("a single level checks every block on it with tunnels one above and one bel
   }
 });
 
-test("levels stay above bedrock and below the home row", () => {
+test("levels stay above bedrock and at least three below the turtles' homes", () => {
   assert.match(plan({ ...SETTINGS, yBottom: STAGGERED_LOWEST - 1 }).error, /bedrock/);
-  assert.match(plan({ ...SETTINGS, yTop: STAGGERED_HIGHEST + 1 }).error, /Choose levels/);
+  assert.match(plan({ ...SETTINGS, yTop: 65 }).error, /Choose levels from Y -58 to Y 64/);
   assert.match(plan({ ...SETTINGS, yTop: -58, yBottom: -50 }).error, /bottom at or below the top/);
-  assert.equal(plan({ ...SETTINGS, yTop: STAGGERED_HIGHEST, yBottom: STAGGERED_HIGHEST }).error, undefined);
+  assert.equal(plan({ ...SETTINGS, yTop: 64, yBottom: 64 }).error, undefined);
 });
 
 test("deep levels with a small radius get switchback stairs inside the circle", () => {
   const result = plan({ ...SETTINGS, radius: 6 }, [turtle(1, 100)]);
   assert.equal(result.error, undefined);
   const { args: a } = result.assignments[0];
-  assert.deepEqual(a.stairBottom, { x: 100, y: a.y, z: stairZ(67 - a.y, 6) });
-  for (let step = 1; step <= 67 - a.y; step++) assert.ok(Math.abs(stairZ(step, 6) + 55) <= 6);
+  assert.deepEqual(a.stairBottom, { x: 100, y: a.y, z: stairZ(67 - a.y, 6, -55) });
+  for (let step = 1; step <= 67 - a.y; step++) assert.ok(Math.abs(stairZ(step, 6, -55) + 55) <= 6);
 });
 
 test("far-apart homes mine their own circles and leave the gap between them", () => {
@@ -190,9 +190,9 @@ test("helpers go to the busiest turtles, one each, and only inside their own rad
   assert.match(planJoin(fleet(), [busy], [turtle(4, 300)], []).error, /enough columns left to share/);
 });
 
-test("a Nether home row at Y 97, Z 6 plans its stairs, corridor, depot and top level from there", () => {
+test("a Nether turtle's home at Y 97, Z 6 plans its stairs, corridor, depot and top level from there", () => {
   const nether = (depotY) => dimensionFleet(sanitizeFleet({
-    dimensions: { nether: { homeY: 97, homeZ: 6, depot: { x: 1000, y: depotY, z: 1000, junk: "down", valuables: "north", fuel: "west" } } },
+    dimensions: { nether: { depot: { x: 1000, y: depotY, z: 1000, junk: "down", valuables: "north", fuel: "west" } } },
   }), "nether");
   const home = (id, x) => ({ id, name: `Miner ${id}`, home: { x, y: 97, z: 6, facing: "south" } });
   const params = { ...SETTINGS, yTop: 90, yBottom: 86, radius: 6 };
@@ -206,8 +206,16 @@ test("a Nether home row at Y 97, Z 6 plans its stairs, corridor, depot and top l
   assert.equal(a.z, 6, "the corridor runs along the Nether home row");
   assert.equal(a.stairBottom.z, stairZ(97 - 92, 6, 6));
   assert.ok(a.veinBounds.z1 >= 6 - 7 && a.veinBounds.z2 <= 6 + 7, "ore checks centre on the Nether row");
-  assert.match(planFleetJob(nether(67), "branchMine", params, [home(1, 100)], []).error, /depot must be at Y=97/);
+  assert.match(planFleetJob(nether(67), "branchMine", params, [home(1, 100)], []).error, /home is at Y 97 but the dock is at Y 67/);
   assert.match(planFleetJob(nether(97), "branchMine", { ...params, yTop: 95 }, [home(1, 100)], []).error, /to Y 94/);
-  // An Overworld home (Y 67, Z -55) isn't a Nether home.
-  assert.match(planFleetJob(nether(97), "branchMine", params, [turtle(1, 100)], []).error, /home at Y=97, Z=6/);
+});
+
+test("turtles with homes at different Z each get their corridor along their own home's Z", () => {
+  const at = (id, x, z) => ({ id, name: `Miner ${id}`, home: { x, y: 67, z, facing: "south" } });
+  const result = plan({ ...SETTINGS, yTop: -50, yBottom: -52, radius: 8 }, [at(1, 100, -55), at(2, 110, 20)]);
+  assert.equal(result.error, undefined);
+  const byId = new Map(result.assignments.map(({ id, args }) => [id, args]));
+  assert.equal(byId.get(1).z, -55);
+  assert.equal(byId.get(2).z, 20);
+  assert.equal(byId.get(2).stairBottom.z, stairZ(67 - byId.get(2).y, 8, 20));
 });

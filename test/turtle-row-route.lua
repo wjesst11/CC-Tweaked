@@ -37,6 +37,7 @@ local function rowMiner(y, laneX)
   local a, f = args(y, laneX), config()
   api.config(f)
   api.fix({x=0,y=0,z=0},{x=100,y=67,z=-55})
+  sim.gpsHome={x=100,y=67,z=-55}
   for step=1,67-a.y do
     sim.blocks["0," .. (1-step) .. "," .. step] = "minecraft:stone"
     sim.blocks["0," .. (-step) .. "," .. step] = "minecraft:stone"
@@ -104,19 +105,23 @@ local function pausedVein()
   return api,sim,files,a,f
 end
 
-test("captures the initial home before moving and descends south forward/down at every step", function()
+test("finds its facing by stepping aside and back, captures its home, and descends south forward/down at every step", function()
   local api, sim, files, a = rowMiner()
   api.row.ensure(a)
   local saved = decoded(files[".minerdash_state"])
   same(saved.miningRoute.home,a.routeHome)
   assert(not saved.miningRoute.bottomSaved and saved.miningRoute.stair.completed==0)
-  assert(sim.moves==0)
+  -- One block out and back, digging nothing, to learn its facing from GPS.
+  assert(sim.moves==2 and sim.digs==0)
+  same(sim.pos,{x=0,y=0,z=0})
+  local before=#sim.history
   sim.beforeMove=function()
     same(decoded(files[".minerdash_state"]).miningRoute.home,a.routeHome)
   end
   api.row.enter(a)
-  assert(sim.moves==10 and sim.digs==10)
-  for i,p in ipairs(sim.history) do
+  assert(sim.moves==12 and sim.digs==10)
+  for i=1,#sim.history-before do
+    local p=sim.history[before+i]
     local step=math.floor((i+1)/2)
     same(p,{x=0,y=i%2==1 and 1-step or -step,z=step})
     assert(p.dir==(i%2==1 and "forward" or "down"))
@@ -145,7 +150,8 @@ test("initial staircase excavation never mines protected block types", function(
     sim.blocks["0,0,1"]=block
     local ok,why=pcall(api.row.enter,a)
     assert(not ok and tostring(why):find("protected"),"did not reject "..block..": "..tostring(why))
-    assert(sim.blocks["0,0,1"]==block and sim.digs==0 and sim.moves==0,"dug "..block)
+    assert(sim.blocks["0,0,1"]==block and sim.digs==0,"dug "..block)
+    same(sim.pos,{x=0,y=0,z=0})
   end
 end)
 
@@ -156,8 +162,9 @@ test("assembly reaches the assigned lane only after saving the own staircase bot
     sim.blocks[x..",-4,5"]="minecraft:stone"
   end
   sim.beforeMove=function(target)
-    if target.x~=0 then
-      local saved=decoded(files[".minerdash_state"]).miningRoute
+    local saved=decoded(files[".minerdash_state"]).miningRoute
+    -- Its step aside to find its facing comes before it has a route.
+    if target.x~=0 and saved then
       assert(saved.bottomSaved and saved.stair.complete)
       same(saved.bottom,a.stairBottom)
     end
@@ -165,7 +172,7 @@ test("assembly reaches the assigned lane only after saving the own staircase bot
   api.row.enter(a)
   same(api.state().world,{x=96,y=62,z=-50})
   same(api.state().miningRoute.bottom,{x=100,y=62,z=-50})
-  assert(sim.moves==14)
+  assert(sim.moves==16)
 end)
 
 test("assembly mining retains normal protected-area checks", function()
@@ -182,12 +189,14 @@ end)
 test("return climbs the exact saved staircase in reverse without digging", function()
   local api,sim,files,a=rowMiner()
   api.row.enter(a)
+  -- Its first two moves are its step aside to find its facing.
   local first,digs=#sim.history,sim.digs
+  local down=first-2
   api.row.exit("recall")
   same(api.state().world,a.routeHome)
-  assert(#sim.history==2*first and sim.digs==digs)
-  for index=1,first do
-    local expected=index==first and {x=0,y=0,z=0} or sim.history[first-index]
+  assert(#sim.history==first+down and sim.digs==digs)
+  for index=1,down do
+    local expected=index==down and {x=0,y=0,z=0} or sim.history[first-index]
     same(sim.history[first+index],expected)
   end
   assert(sim.heading==0 and api.state().miningRoute.phase=="home")

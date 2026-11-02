@@ -6,6 +6,7 @@ function ready(label = "Miner") {
   return { online: true, fresh: true, label, status: {
     queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: true, radiusSupported: true, staggeredSupported: true,
     gpsTrusted: true, queued: 0, world: { x: label === "Two" ? 2 : 1, y: 67, z: -55 },
+    homeWorld: { x: label === "Two" ? 2 : 1, y: 67, z: -55 },
   } };
 }
 
@@ -114,12 +115,27 @@ test("waits for every selected turtle to be online, fresh, updated, GPS ready, a
   }
 });
 
-test("first row placement supplies south orientation once without a calibration move", () => {
+test("a first level job starts from the turtle's saved home before GPS knows its facing; it finds that itself", () => {
   const h = setup();
   h.turtles.get(1).status.gpsTrusted = false;
   h.add();
   h.queue.tick();
   assert.equal(h.sends.length, 1);
+});
+
+test("a level job waits for a turtle with no saved home, and for one away from it", () => {
+  const h = setup();
+  delete h.turtles.get(1).status.homeWorld;
+  h.add();
+  h.queue.tick();
+  assert.equal(h.sends.length, 0);
+  assert.match(h.queue.snapshot().jobs[0].message, /One to get a saved home \(Set home\)/);
+  h.turtles.get(1).status.homeWorld = { x: 40, y: 80, z: 20 };
+  h.queue.tick();
+  assert.match(h.queue.snapshot().jobs[0].message, /One at its home at 40, 80, 20/);
+  h.turtles.get(1).status.world = { x: 40, y: 80, z: 20 };
+  h.queue.tick();
+  assert.equal(h.sends.length, 1, "any home works: there is no home row");
 });
 
 test("initial plan errors reject the job; changed safety checks block and pause before dispatch", () => {

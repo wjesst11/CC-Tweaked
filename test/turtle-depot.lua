@@ -34,6 +34,7 @@ local function setup(radius)
   }
   api.config(f)
   api.fix({x=0,y=0,z=0},{x=100,y=67,z=-55})
+  sim.gpsHome={x=100,y=67,z=-55}
   for step=1,5 do
     sim.blocks["0,"..(1-step)..","..step]="minecraft:stone"
     sim.blocks["0,"..(-step)..","..step]="minecraft:stone"

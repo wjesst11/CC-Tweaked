@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.4.8"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.5.0"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -161,7 +161,7 @@ function notReady(t) {
   const reason = notQueueReady(t);
   if (reason) return reason;
   if (s.job || s.fleetJob || s.miningRoute?.intent || s.queued > 0) return "busy";
-  const home = fleetTab() === "branchMine" && southRowHome(t);
+  const home = fleetTab() === "branchMine" && turtleHome(t);
   if (home && (!worldPoint(s.world) || ["x", "y", "z"].some((axis) => s.world[axis] !== home[axis]))) return "return to the saved home first";
   return null;
 }
@@ -172,9 +172,10 @@ function notQueueReady(t) {
   const s = t.status ?? {};
   if (fleetTab() === "branchMine") {
     if (!s.radiusSupported || !s.staggeredSupported) return "update script for staggered tunnels";
-    if (!s.southRowSupported) return "update script for home-row mining";
-    if (!southRowHome(t)) return `place at Y ${homeRowY()}, Z ${homeRowZ()}, facing south`;
-    if (!s.gpsTrusted && (s.miningRoute || !onSouthRow(s.world))) return "no confirmed GPS position yet";
+    if (!s.southRowSupported) return "update script for level mining";
+    if (!turtleHome(t)) return "no saved home: use Set home";
+    // Before its first level job a turtle at its home finds its facing itself.
+    if (!s.gpsTrusted && (s.miningRoute || !atHome(t))) return "no confirmed GPS position yet";
   } else if (!s.gpsTrusted) return "no GPS facing yet";
   return null;
 }
@@ -183,17 +184,17 @@ function worldPoint(p) {
   return p && [p.x, p.y, p.z].every(Number.isFinite);
 }
 
-// The shown dimension's home row: Y 67, Z -55 in the Overworld. A saved home
-// keeps the row it was saved on.
-function onSouthRow(p, y = homeRowY(), z = homeRowZ()) {
-  return worldPoint(p) && Number.isInteger(p.x) && p.y === y && p.z === z;
+// Matches fleet.js turtleHome: its saved staircase's home, or where Set home
+// put it. Level jobs start there, facing south.
+function turtleHome(t) {
+  const saved = t.status?.miningRoute?.home ?? t.status?.homeWorld;
+  if (!worldPoint(saved) || ![saved.x, saved.y, saved.z].every(Number.isInteger)) return null;
+  return { x: saved.x, y: saved.y, z: saved.z, facing: "south" };
 }
 
-function southRowHome(t) {
-  const saved = t.status?.miningRoute?.home;
-  if (onSouthRow(saved, saved?.y, saved?.z)) return { x: saved.x, y: saved.y, z: saved.z, facing: "south" };
-  const fix = t.status?.world;
-  return onSouthRow(fix) ? { x: fix.x, y: fix.y, z: fix.z, facing: "south" } : null;
+function atHome(t) {
+  const home = turtleHome(t), w = t.status?.world;
+  return Boolean(home && worldPoint(w)) && ["x", "y", "z"].every((axis) => w[axis] === home[axis]);
 }
 
 // Where to draw a turtle: world coordinates once GPS knows its facing,
@@ -201,7 +202,7 @@ function southRowHome(t) {
 function mapPos(t) {
   const s = t.status;
   const num = (p) => p && { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
-  if (s?.world && (s.facing || (s.southRowSupported && onSouthRow(s.world)))) {
+  if (s?.world) {
     return { frame: "world", ...num(s.world), dir: COMPASS.indexOf(s.facing ?? "south"), home: num(s.miningRoute?.home ?? s.homeWorld) };
   }
   if (s?.pos) return { frame: "local", ...num(s.pos), dir: Number(s.heading), home: num(s.home) };
@@ -527,20 +528,13 @@ const currentDepot = () => state.depots[state.dimension] ?? { holder: null, queu
 const currentQueue = () => state.jobQueues[state.dimension] ?? { paused: false, jobs: [] };
 
 // The fleet settings as the shown dimension's turtles see them: its own depot,
-// protected areas and home row, everything else shared.
+// and protected areas, everything else shared.
 function dimFleet(fleet = state.fleet, dimension = state.dimension) {
   if (!fleet) return fleet;
-  if (dimension === "overworld") return { ...fleet, homeY: fleet.homeY ?? 67, homeZ: fleet.homeZ ?? -55 };
+  if (dimension === "overworld") return fleet;
   const own = fleet.dimensions?.nether ?? {};
-  return {
-    ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] },
-    homeY: own.homeY ?? 67, homeZ: own.homeZ ?? -55,
-  };
+  return { ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] } };
 }
-
-// The home row in the shown dimension, from its settings.
-const homeRowY = () => dimFleet()?.homeY ?? 67;
-const homeRowZ = () => dimFleet()?.homeZ ?? -55;
 
 function setDimension(dimension) {
   if (dimension === state.dimension) return;
@@ -817,8 +811,7 @@ function renderPosition(s) {
   if (world) {
     $("#pos-label").textContent = "Position · GPS";
     $("#pos-value").innerHTML = coordsHtml(world);
-    parts.push(s.facing ? `Facing ${capital(s.facing)}` : s.southRowSupported && onSouthRow(world)
-      ? "Facing south from home-row setup" : "Move one block so it can find north");
+    parts.push(s.facing ? `Facing ${capital(s.facing)}` : "Facing not known yet: it steps aside to find it before a level job");
   } else if (s.pos) {
     $("#pos-label").textContent = "Position · relative to start";
     $("#pos-value").innerHTML = coordsHtml(s.pos);
@@ -1018,12 +1011,18 @@ function stairEntrance(params) {
 }
 
 function southRowPlan(turtles = pickedTurtles()) {
-  return turtles.map((t) => ({ t, home: southRowHome(t) }));
+  return turtles.map((t) => ({ t, home: turtleHome(t) }));
 }
 
 // Matches fleet.js: the levels staggered tunnels can fully check.
-// Tunnels stay above bedrock and at least three below the home row.
-const STAGGERED_LEVELS = { lowest: -58, get highest() { return homeRowY() - 3; } };
+// Tunnels stay above bedrock and at least three below every picked turtle's home.
+const STAGGERED_LEVELS = {
+  lowest: -58,
+  get highest() {
+    const ys = pickedTurtles().map(turtleHome).filter(Boolean).map((home) => home.y);
+    return (ys.length ? Math.min(...ys) : 319) - 3;
+  },
+};
 
 function validLevels(p) {
   return Number.isInteger(p.yTop) && Number.isInteger(p.yBottom) && p.yBottom <= p.yTop &&
@@ -1107,7 +1106,7 @@ function renderWorld() {
     const s = t.status ?? {};
     return {
       id: t.id, name: nameOf(t), state: st.key, stateLabel: st.label,
-      world: s.world ?? null, facing: s.facing ?? (s.southRowSupported && onSouthRow(s.world) ? "south" : undefined),
+      world: s.world ?? null, facing: s.facing,
       home: s.miningRoute?.home ?? s.homeWorld, route: s.miningRoute, job: s.fleetJob?.args,
     };
   });
@@ -1374,8 +1373,8 @@ function renderFleet() {
   $("#btn-dock-here").disabled = !sel?.status?.world;
   $("#btn-dock-here").textContent = selName ? `Dock at ${selName}'s position` : "Dock at selected turtle";
   $("#btn-release-dock").disabled = currentDepot().holder == null;
-  // Tunnels stay at least three below the home row.
-  for (const name of ["levelTop", "levelBottom", "levelPeak"]) $("#fleet-job-form").elements[name].max = homeRowY() - 3;
+  // Tunnels stay at least three below every picked turtle's home.
+  for (const name of ["levelTop", "levelBottom", "levelPeak"]) $("#fleet-job-form").elements[name].max = STAGGERED_LEVELS.highest;
 }
 
 // "minecraft:deepslate_diamond_ore" and "minecraft:diamond_ore" are both diamond.
@@ -1431,8 +1430,10 @@ function renderJobOres(turtles) {
 function renderFleetWarnings(turtles, f) {
   const notes = [];
   if (!f.depot) notes.push("Set up the depot below before starting fleet jobs.");
-  else if (fleetTab() === "branchMine" && f.depot.y !== (f.homeY ?? 67)) {
-    notes.push(`Home-row mining needs the depot at the home row's height, Y ${f.homeY ?? 67}. Change Dock Y in Fleet settings.`);
+  else if (fleetTab() === "branchMine") {
+    // Depot trips stay at home height, so level jobs need the dock there.
+    const off = turtles.filter((t) => { const home = turtleHome(t); return home && home.y !== f.depot.y; });
+    if (off.length) notes.push(`${off.map(nameOf).join(", ")}: home not at the dock's height, Y ${f.depot.y}. Level jobs need the dock at each turtle's home height.`);
   }
   const old = turtles.filter((t) => t.online && t.version && olderVersion(t.version, SCRIPT_VERSION));
   if (old.length) notes.push(`${old.length} turtle${old.length === 1 ? " runs" : "s run"} an older script. Use Update all scripts.`);
@@ -1528,7 +1529,7 @@ function renderFleetPreview() {
   } else if (kind === "branchMine") {
     const missing = routes.filter((row) => !row.home);
     if (missing.length) {
-      text = `Waiting for saved homes for ${missing.map((row) => nameOf(row.t)).join(", ")}.`;
+      text = `No saved home yet for ${missing.map((row) => nameOf(row.t)).join(", ")}: use Set home where each should mine from.`;
     } else if (validLevels(p) && Number.isInteger(p.radius) && p.radius >= 1 && p.radius <= 1024) {
       const n = queueable.length;
       const levels = p.yTop === p.yBottom ? `Y ${p.yTop}` : `Y ${p.yTop} to ${p.yBottom}`;
@@ -1553,7 +1554,7 @@ function renderFleetPreview() {
   const busy = picked.filter((t) => !notQueueReady(t) && notReady(t)).length;
   if (busy) text += ` ${busy} picked turtle${busy === 1 ? " is" : "s are"} busy; queue the job to wait for them.`;
   const unavailable = picked.filter(notQueueReady).length;
-  if (unavailable) text += ` ${unavailable} picked turtle${unavailable === 1 ? " needs" : "s need"} a current script and a known home-row GPS position.`;
+  if (unavailable) text += ` ${unavailable} picked turtle${unavailable === 1 ? " needs" : "s need"} a current script, a saved home and a GPS position there.`;
   $("#fleet-job-preview").textContent = text;
   if (!$("#bulk-rename").hidden) renderBulkRenamePreview();
 }
@@ -1573,7 +1574,7 @@ function queuedJobLocation(job) {
     const entrance = stairEntrance(p);
     return `Bottom X ${p.x}, Y ${p.y}, Z ${p.z} · ${p.dir} · ${p.length} blocks` +
       (entrance ? ` · Stair entrance ${entrance.x}, ${entrance.y}, ${entrance.z}` : "") +
-      (["queued", "blocked"].includes(job.state) ? " · Legacy route: cancel and recreate for home-row mining" : "");
+      (["queued", "blocked"].includes(job.state) ? " · Legacy route: cancel and recreate this level job" : "");
   }
   if (job.kind === "areaQuarry") {
     return `X ${span(p.x1, p.x2)}, Z ${span(p.z1, p.z2)} · Y ${span(p.yTop, p.yBottom)}`;
@@ -1819,19 +1820,15 @@ function collectFleet() {
   if (out.protect.areas.some((a) => ["x1", "y1", "z1", "x2", "y2", "z2"].some((k) => a[k] === null))) {
     return { error: "Every protected area needs both corners filled in." };
   }
-  const { homeY, homeZ, ...shared } = out;
-  if (!Number.isInteger(homeY) || !Number.isInteger(homeZ)) return { error: "Fill in the home row Y and Z." };
-  if (state.dimension === "overworld") return { fleet: { ...shared, homeY, homeZ } };
-  // The depot, areas and home row edited here are the Nether's; the Overworld's stay.
+  if (state.dimension === "overworld") return { fleet: out };
+  // The depot and areas edited here are the Nether's; the Overworld's stay.
   const base = state.fleet ?? {};
   return {
     fleet: {
-      ...shared,
+      ...out,
       depot: base.depot ?? null,
-      protect: { ...shared.protect, areas: base.protect?.areas ?? [] },
-      homeY: base.homeY ?? 67,
-      homeZ: base.homeZ ?? -55,
-      dimensions: { ...base.dimensions, nether: { depot: shared.depot, areas: shared.protect.areas, homeY, homeZ } },
+      protect: { ...out.protect, areas: base.protect?.areas ?? [] },
+      dimensions: { ...base.dimensions, nether: { depot: out.depot, areas: out.protect.areas } },
     },
   };
 }
@@ -1952,8 +1949,7 @@ function bindEvents() {
     if (!t) return;
     const other = dimOf(t) === "nether" ? "overworld" : "nether";
     const name = DIMENSION_NAMES[other];
-    const row = dimFleet(state.fleet, other);
-    if (!confirm(`Make ${nameOf(t)} a ${name} turtle? Its saved home, stairs and any paused job are forgotten. In the ${name}, place it at its home row (Y ${row?.homeY ?? 67}, Z ${row?.homeZ ?? -55}) facing south.`)) return;
+    if (!confirm(`Make ${nameOf(t)} a ${name} turtle? Its saved home, stairs and any paused job are forgotten. In the ${name}, use Set home where it should mine from.`)) return;
     command("setDimension", { dimension: other });
     toast(`${nameOf(t)} moves to the ${name} tab once it switches.`, "info");
   });
@@ -2020,7 +2016,8 @@ function bindEvents() {
   $("#home-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const form = event.target;
-    if (currentTurtle()?.status?.miningRoute && !confirm("Make these coordinates its new home? Its saved staircase is forgotten, so it can no longer climb back up it.")) return;
+    const s = currentTurtle()?.status;
+    if ((s?.miningRoute || s?.fleetJob) && !confirm("Make these coordinates its new home? Its saved staircase, route and job are forgotten, so it can no longer climb back up its old stairs.")) return;
     command("setHome", {
       x: Number(form.elements.x.value), y: Number(form.elements.y.value), z: Number(form.elements.z.value),
       facing: form.elements.facing.value,
@@ -2031,7 +2028,8 @@ function bindEvents() {
   for (const btn of $$("[data-cmd]")) {
     btn.addEventListener("click", () => {
       if (btn.dataset.cmd === "forceHome" && !confirm("Cancel this job and return home? Mine back to the saved stair bottom at the target safe Y, then climb the exact stairs north. Protections stay active.")) return;
-      if (btn.dataset.cmd === "setHome" && currentTurtle()?.status?.miningRoute && !confirm("Make this spot its new home? Its saved staircase is forgotten, so it can no longer climb back up it.")) return;
+      const s = currentTurtle()?.status;
+      if (btn.dataset.cmd === "setHome" && (s?.miningRoute || s?.fleetJob) && !confirm("Make this spot its new home? Its saved staircase, route and job are forgotten, so it can no longer climb back up its old stairs.")) return;
       command(btn.dataset.cmd);
     });
   }
@@ -2144,7 +2142,7 @@ function bindEvents() {
       const n = `${ids.length} turtle${ids.length === 1 ? "" : "s"}`;
       if (action === "goHome" && !confirm(`Cancel the jobs of ${n} and send them home?`)) return;
       if (action === "forceHome" && !confirm(`Cancel the jobs of ${n} and return home? Mine back to their own saved stair bottoms at the target safe Y, then climb the exact stairs north. Protections stay active.`)) return;
-      if (action === "setHome" && !confirm(`Make the current spot of each of ${n} its new home? Saved staircases are forgotten, so they can no longer climb back up them.`)) return;
+      if (action === "setHome" && !confirm(`Make the current spot of each of ${n} its new home? Their saved staircases, routes and jobs are forgotten, so they can no longer climb back up their old stairs.`)) return;
       sendRaw({ type: "cmd", ids, action, args: {} });
     });
   }

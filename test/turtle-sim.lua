@@ -70,6 +70,7 @@ end
 
 local function miner(files, initial)
   files = files or {}
+  local api
   local sim = {
     pos = {x=0,y=0,z=0}, heading = 0, moves = 0, turns = 0, digs = 0,
     blocks = {}, time = 0, history = {}, slots = {}, items = {}, inspected = {},
@@ -205,7 +206,10 @@ local function miner(files, initial)
       return nil, "offline"
     end},
     shell={getRunningProgram=function() return "minerdash.lua" end},
-    gps={locate=function() if sim.gps then return sim.gps() end end},
+    gps={locate=function()
+      if sim.gps then return sim.gps() end
+      if sim.gpsHome then local w=sim.world(); return w.x,w.y,w.z end
+    end},
     peripheral={getType=function(side)
       local direction = side == "top" and "up" or side == "bottom" and "down" or "forward"
       return inventory(direction) and "inventory" or nil
@@ -214,6 +218,9 @@ local function miner(files, initial)
     textutils={serialize=serialize,unserialize=function(text) return assert(load("return "..text, "saved", "t", {}))() end},
     sleep=function(seconds)
       sim.time=sim.time+math.max(seconds,0.01)
+      -- With gpsHome set (the world position of the starting cell, facing
+      -- south), GPS reports where it really is whenever it waits.
+      if sim.gpsHome and api then api.fix(api.state().pos, sim.world()) end
       if sim.onSleep then sim.onSleep(seconds) end
     end,
     print=function(...)
@@ -254,7 +261,13 @@ local function miner(files, initial)
       }
     end},
   }, {__index=_G})
-  local api = assert(load(source, "minerdash", "t", env))()
+  -- Where the simulated turtle really is, from gpsHome: local +Z is south and
+  -- local +X is west.
+  sim.world=function()
+    local h,p=sim.gpsHome,sim.pos
+    return {x=h.x-p.x,y=h.y+p.y,z=h.z+p.z}
+  end
+  api = assert(load(source, "minerdash", "t", env))()
   api.init()
   local p = api.state().pos
   sim.pos, sim.heading = {x=p.x,y=p.y,z=p.z}, p.heading

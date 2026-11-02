@@ -38,6 +38,10 @@ local function setup(r,yTop,yBottom,first,last)
   local A,low=yTop+2,math.max(yBottom-1,-59)
   api.config(fleetConfig())
   api.fix({x=0,y=0,z=0},HOME)
+  -- GPS that reports where it really is, as it steps aside to find its facing.
+  local function at(p) return HOME.x-p.x,HOME.y+p.y,HOME.z+p.z end
+  sim.gps=function() return at(sim.pos) end
+  sim.onSleep=function() local x,y,z=at(sim.pos); api.fix(api.state().pos,{x=x,y=y,z=z}) end
   -- Solid stone under the surface, so every tunnel and stair block is dug.
   for x=HOME.x-r-1,HOME.x+r+1 do
     for y=low-2,66 do
@@ -503,6 +507,8 @@ test("a turtle joining a running job takes over columns, and between them they m
   sim2.pos,sim2.heading={x=-1,y=0,z=0},0
   api2.config(fleetConfig())
   api2.fix({x=-1,y=0,z=0},{x=101,y=67,z=-55})
+  sim2.gps=function() return HOME.x-sim2.pos.x,HOME.y+sim2.pos.y,HOME.z+sim2.pos.z end
+  sim2.onSleep=function() api2.fix(api2.state().pos,{x=HOME.x-sim2.pos.x,y=HOME.y+sim2.pos.y,z=HOME.z+sim2.pos.z}) end
   api2.lease("granted")
   sim2.beforeMove=function()
     local route=api2.state().miningRoute
@@ -580,7 +586,9 @@ test("a turtle in the way is waited for however long it takes, instead of stoppi
   assert(tunnel(100,60))
   sim.blocks[cell]="computercraft:turtle_normal"
   local waits,shown=0,false
-  sim.onSleep=function()
+  local gpsFix=sim.onSleep
+  sim.onSleep=function(...)
+    gpsFix(...)
     if sim.blocks[cell]=="computercraft:turtle_normal" then
       waits=waits+1
       local job=api.status().job
@@ -994,7 +1002,7 @@ test("a turtle put back on the home row by hand walks along the surface to its o
   assert(sim.digs==digs,"dug on the surface")
 end)
 
-test("a Nether turtle with its home row at Y 97, Z 6 digs its stairs from there, mines, and comes home",function()
+test("a Nether turtle with its home at Y 97, Z 6 digs its stairs from there, mines, and comes home",function()
   local NHOME={x=100,y=97,z=6}
   -- Stair Z from the Nether row instead of Z -55.
   local function nStairZ(step,r) return stairZ(step,r)+55+NHOME.z end
@@ -1002,10 +1010,12 @@ test("a Nether turtle with its home row at Y 97, Z 6 digs its stairs from there,
   local r,yTop,yBottom=4,90,86
   local api,sim=miner()
   local settings=fleetConfig()
-  settings.dimensions={nether={depot={x=108,y=97,z=6,junk="down",valuables="north",fuel="west"},areas={},homeY=97,homeZ=6}}
+  settings.dimensions={nether={depot={x=108,y=97,z=6,junk="down",valuables="north",fuel="west"},areas={}}}
   api.config(settings)
   api.command({action="setDimension",args={dimension="nether"}})
   api.fix({x=0,y=0,z=0},NHOME)
+  sim.gps=function() return NHOME.x-sim.pos.x,NHOME.y+sim.pos.y,NHOME.z+sim.pos.z end
+  sim.onSleep=function() api.fix(api.state().pos,{x=NHOME.x-sim.pos.x,y=NHOME.y+sim.pos.y,z=NHOME.z+sim.pos.z}) end
   local A,low=yTop+2,yBottom-1
   for x=NHOME.x-r-1,NHOME.x+r+1 do
     for y=low-2,96 do
@@ -1033,10 +1043,10 @@ test("a Nether turtle with its home row at Y 97, Z 6 digs its stairs from there,
   finished(api,a)
   for _,p in ipairs(sim.history) do assert(p.y<=0,"went above its Y 97 home row") end
   local home=api.state().miningRoute.home
-  assert(home.y==97 and home.z==6,"saved its home off the Nether row")
+  assert(home.y==97 and home.z==6,"saved its home somewhere else")
 end)
 
-test("an Overworld turtle on a home row moved to Y 80, Z 20 digs its stairs from there, mines, and comes home",function()
+test("a turtle whose home is at Y 80, Z 20 digs its stairs from there, mines, and comes home: there's no home row",function()
   local OHOME={x=300,y=80,z=20}
   local function oStairZ(step,r) return stairZ(step,r)+55+OHOME.z end
   local function okey(w) return key({x=OHOME.x-w.x,y=w.y-OHOME.y,z=w.z-OHOME.z}) end
@@ -1044,9 +1054,10 @@ test("an Overworld turtle on a home row moved to Y 80, Z 20 digs its stairs from
   local api,sim=miner()
   local settings=fleetConfig()
   settings.depot={x=308,y=80,z=20,junk="down",valuables="north",fuel="west"}
-  settings.homeY,settings.homeZ=80,20
   api.config(settings)
   api.fix({x=0,y=0,z=0},OHOME)
+  sim.gps=function() return OHOME.x-sim.pos.x,OHOME.y+sim.pos.y,OHOME.z+sim.pos.z end
+  sim.onSleep=function() api.fix(api.state().pos,{x=OHOME.x-sim.pos.x,y=OHOME.y+sim.pos.y,z=OHOME.z+sim.pos.z}) end
   local A,low=yTop+2,yBottom-1
   for x=OHOME.x-r-1,OHOME.x+r+1 do
     for y=low-2,79 do
@@ -1074,7 +1085,7 @@ test("an Overworld turtle on a home row moved to Y 80, Z 20 digs its stairs from
   finished(api,a)
   for _,p in ipairs(sim.history) do assert(p.y<=0,"went above its Y 80 home row") end
   local home=api.state().miningRoute.home
-  assert(home.y==80 and home.z==20,"saved its home off the moved row")
+  assert(home.y==80 and home.z==20,"saved its home somewhere else")
 end)
 
 test("a turtle standing still takes its position from GPS again once a wrong GPS host is corrected",function()
@@ -1106,7 +1117,7 @@ test("set home forgets the saved staircase, so the turtle can quarry an area",fu
   finished(api,a)
   local ok,msg=api.actions.setHome({})
   assert(ok,msg)
-  assert(msg:find("staircase is forgotten"),msg)
+  assert(msg:find("forgot its saved staircase and route"),msg)
   assert(api.state().miningRoute==nil,"kept its saved staircase")
   local saved=assert(load("return "..files[".minerdash_state"]))()
   assert(saved.miningRoute==nil,"saved staircase is still on disk")
@@ -1123,11 +1134,21 @@ test("set home forgets the saved staircase, so the turtle can quarry an area",fu
   same(state.world,a.routeHome)
 end)
 
-test("set home is refused while a level job is saved, and keeps the staircase",function()
+test("set home on a turtle stopped mid-job forgets its old route and job, and go home no longer heads for the old shaft",function()
   local api,sim,files,a=stoppedDeep()
+  local at=api.state().world
   local ok,msg=api.actions.setHome({})
-  assert(not ok and msg=="Cancel its saved level job first",tostring(msg))
-  assert(api.state().miningRoute,"lost its saved staircase")
+  assert(ok,msg)
+  assert(msg:find("forgot its saved staircase and route and saved job"),msg)
+  local state=api.state()
+  assert(state.miningRoute==nil and state.fleetJob==nil,"kept old route or job")
+  assert(state.lastFleetResult.id==a.queueId and state.lastFleetResult.ok==false,"the queue isn't told the job was cancelled")
+  local saved=assert(load("return "..files[".minerdash_state"]))()
+  assert(saved.miningRoute==nil and saved.fleetJob==nil,"old route or job is still on disk")
+  local digs=sim.digs
+  api.command({action="goHome"})
+  assert(sim.digs==digs,"dug toward its old route")
+  same(api.state().world,at)
 end)
 
 -- A turtle that has never mined a level: home (100, 67, -55) facing south,
@@ -1243,6 +1264,87 @@ test("a quarry drops its junk where it digs, and reaches the depot from its far 
   assert(not sim.deposits["-8,-1,0"],"hauled junk to the depot")
   assert((sim.worldDrops["minecraft:stone"] or 0)>0,"didn't drop its junk")
   same(state.world,HOME)
+end)
+
+test("a turtle placed facing north finds its facing with GPS before its first job and digs its stairs south",function()
+  local api,sim,files,a=setup(4,60,58,96,104)
+  -- The script counts from the way it faces; it really faces north.
+  sim.heading=2
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  assert(not sim.blocks[lkey({x=100,y=66,z=stairZ(1,4)})],"didn't dig its first step south")
+  for k=1,3 do assert(sim.blocks[lkey({x=100,y=67-k,z=-55-k})],"dug north at step "..k) end
+end)
+
+-- A turtle that script 2.4.8 or older started facing another way than south:
+-- it dug its first stairs that way (step k: k blocks along, k down), then
+-- GPS stopped it. Its saved route says south; GPS now knows its facing.
+local function strayed(dx,dz,k,upper,offX)
+  local _,world,_,a=setup(24,40,38,96,104)
+  for i=1,k do
+    for y=67-i,68-i do world.blocks[lkey({x=100+dx*i,y=y,z=-55+dz*i})]=nil end
+  end
+  local w={x=100+dx*k+(offX or 0),y=67-k+(upper and 1 or 0),z=-55+dz*k}
+  world.blocks[lkey(w)]=nil
+  local l={x=HOME.x-w.x,y=w.y-HOME.y,z=w.z-HOME.z}
+  local b=a.stairBottom
+  local state={
+    pos={x=l.x,y=l.y,z=l.z},heading=0,home={x=0,y=0,z=0,heading=0},
+    calib={l={x=0,y=0,z=0},w={x=HOME.x,y=HOME.y,z=HOME.z},f0=2},
+    miningRoute={version=1,home={x=100,y=67,z=-55,facing="south"},bottom={x=b.x,y=b.y,z=b.z},targetY=a.y,radius=a.radius,
+      stair={completed=k-1,half=false,complete=false},bottomSaved=false,phase="building"},
+  }
+  local api,sim=miner({[".minerdash_state"]=common.serialize(state)})
+  sim.blocks,sim.chests=world.blocks,world.chests
+  sim.pos,sim.heading={x=l.x,y=l.y,z=l.z},0
+  api.config(fleetConfig())
+  api.lease("granted")
+  sim.beforeMove=function()
+    local route=api.state().miningRoute
+    if route and route.phase=="toDepot" then api.lease("granted") end
+  end
+  local function at(p) return {x=HOME.x-p.x,y=HOME.y+p.y,z=HOME.z+p.z} end
+  sim.gps=function() local r=at(sim.pos) return r.x,r.y,r.z end
+  sim.onSleep=function() api.fix(api.state().pos,at(sim.pos)) end
+  api.fix(api.state().pos,at(sim.pos))
+  return api,sim,a
+end
+
+test("a turtle whose first stairs went north, east or west climbs them home without digging",function()
+  for _,c in ipairs({{0,-1,"north"},{1,0,"east"},{-1,0,"west"}}) do
+    for _,upper in ipairs({false,true}) do
+      local api,sim=strayed(c[1],c[2],5,upper)
+      local digs=sim.digs
+      api.command({action="goHome"})
+      local state=api.state()
+      same(state.world,HOME)
+      assert(sim.digs==digs,c[3]..": dug on the way home")
+      assert(state.miningRoute.stair.completed==0 and state.miningRoute.phase=="home",c[3]..": its saved stairs weren't reset")
+      for _,p in ipairs(sim.history) do assert(p.y<=0,c[3]..": went above its home") end
+      assert(table.concat(sim.prints,"\n"):find("Its stairs went "..c[3].." instead of south",1,true),c[3]..": didn't say what happened")
+    end
+  end
+end)
+
+test("after climbing home from stairs that went north, its next job digs its stairs south",function()
+  local api,sim,a=strayed(0,-1,4,false)
+  api.command({action="goHome"})
+  same(api.state().world,HOME)
+  local b={}
+  for key,value in pairs(a) do b[key]=value end
+  b.queueId="after"
+  api.command({action="fleetJob",args=b})
+  finished(api,b)
+  for k=1,4 do assert(not sim.blocks[lkey({x=100,y=67-k,z=stairZ(k,24)})],"didn't dig step "..k.." south") end
+end)
+
+test("a turtle off its stairs, not on any line from home, still doesn't dig its way back",function()
+  -- One block east of its stairs.
+  local api,sim=strayed(0,-1,4,false,1)
+  local digs=sim.digs
+  api.command({action="goHome"})
+  assert(sim.digs==digs,"dug a way back")
+  assert(not (api.state().world.x==100 and api.state().world.y==67),"got home some other way")
 end)
 
 assert(#failures==0,table.concat(failures,"\n"))

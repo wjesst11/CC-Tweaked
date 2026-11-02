@@ -55,15 +55,10 @@ test("each dimension's depot needs every chest on its own side", () => {
   assert.match(validateFleet(fleet), /own side/);
 });
 
-test("the Overworld's home row is a setting of its own, Y 67, Z -55 until changed", () => {
-  const before = dimensionFleet(sanitizeFleet({ depot: { x: 1, y: 67, z: 2 } }), "overworld");
-  assert.equal(before.homeY, 67);
-  assert.equal(before.homeZ, -55);
+test("there's no home row setting: old saved home row fields are dropped", () => {
   const fleet = sanitizeFleet({ homeY: 80, homeZ: 20, dimensions: { nether: { homeY: 97, homeZ: 6 } } });
-  const overworld = dimensionFleet(fleet, "overworld");
-  assert.equal(overworld.homeY, 80);
-  assert.equal(overworld.homeZ, 20);
-  const nether = dimensionFleet(fleet, "nether");
-  assert.equal(nether.homeY, 97);
-  assert.equal(nether.homeZ, 6);
+  assert.equal(fleet.homeY, undefined);
+  assert.equal(fleet.homeZ, undefined);
+  assert.equal(fleet.dimensions.nether.homeY, undefined);
+  assert.equal(dimensionFleet(fleet, "nether").homeY, undefined);
 });

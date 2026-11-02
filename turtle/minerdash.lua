@@ -8,8 +8,8 @@
 -- wireless/ender modem and a GPS network, the turtle also works out its world
 -- coordinates and compass facing.
 --
--- Row miners capture their own home on the home row (its Y and Z from their
--- dimension's Fleet settings) before their first job.
+-- Row miners capture their own home (where Set home put it) before their
+-- first job, and their stairs go south from it.
 -- A saved south staircase and bottom waypoint are their only mining-home route.
 --
 -- Two kinds of jobs:
@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.8"
+local VERSION = "2.5.0"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -409,7 +409,7 @@ end
 
 -- Fleet settings & protection ---------------------------------------------------
 
-local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {}, areas = {}, homeY = 67, homeZ = -55 }
+local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {}, areas = {} }
 
 -- "*" is the only wildcard; everything else matches literally.
 function cfg.glob(pattern)
@@ -442,11 +442,9 @@ function cfg.compileFleet()
   -- The depot and protected areas belong to its dimension; the rest is shared.
   if cfg.dimension == "nether" then
     local n = fleet.dimensions and fleet.dimensions.nether or {}
-    compiled.depot, compiled.areas, compiled.homeY = n.depot, n.areas or {}, tonumber(n.homeY) or 67
-    compiled.homeZ = tonumber(n.homeZ) or -55
+    compiled.depot, compiled.areas = n.depot, n.areas or {}
   else
     compiled.depot, compiled.areas = fleet.depot, protect.areas or {}
-    compiled.homeY, compiled.homeZ = tonumber(fleet.homeY) or 67, tonumber(fleet.homeZ) or -55
   end
 end
 
@@ -1648,14 +1646,13 @@ function rowRoute.save(phase)
   changed()
 end
 
--- The home row's height and Z, from its dimension's Fleet settings. A saved
--- home keeps the row it was saved on.
+-- Its saved home's height and Z.
 function rowRoute.homeY()
-  return miningRoute and miningRoute.home.y or compiled.homeY
+  return miningRoute and miningRoute.home.y
 end
 
 function rowRoute.homeZ()
-  return miningRoute and miningRoute.home.z or compiled.homeZ
+  return miningRoute and miningRoute.home.z
 end
 
 function rowRoute.surfacePhase()
@@ -1796,7 +1793,7 @@ end
 function rowRoute.surface(target)
   if not gpsTrusted() then error("GPS is required for the saved row route", 0) end
   if target.y ~= rowRoute.homeY() or toWorld(pos).y ~= rowRoute.homeY() then
-    error(("Depot travel must remain at Y %d, the home row's height"):format(rowRoute.homeY()), 0)
+    error(("Depot travel must remain at Y %d, its home's height"):format(rowRoute.homeY()), 0)
   end
   local goal = cellGoal(fromWorld(target))
   local level = fromWorld(target).y
@@ -1811,8 +1808,8 @@ function rowRoute.validate(a)
   end
   local function integer(n, lo, hi) return type(n) == "number" and n == math.floor(n) and n >= lo and n <= hi end
   local h, b = a.routeHome, a.stairBottom
-  if type(h) ~= "table" or not integer(h.x, -3e7, 3e7) or h.y ~= rowRoute.homeY() or h.z ~= rowRoute.homeZ() or h.facing ~= "south" then
-    error("Invalid saved south-facing home row", 0)
+  if type(h) ~= "table" or not integer(h.x, -3e7, 3e7) or not integer(h.y, -64, 319) or not integer(h.z, -3e7, 3e7) or h.facing ~= "south" then
+    error("Invalid saved south-facing home", 0)
   end
   if not integer(a.y, -64, h.y) or not integer(a.x, -3e7, 3e7) or not integer(a.z, -3e7, 3e7)
     or (a.band or 0) ~= 0 or (a.dir ~= "south" and a.dir ~= 2) then
@@ -1840,19 +1837,17 @@ end
 
 function rowRoute.ensure(a)
   rowRoute.validate(a)
-  if not compiled.depot or compiled.depot.y ~= rowRoute.homeY() then
-    error(("The shared depot dock must be at the home row's height, Y %d, for row mining"):format(rowRoute.homeY()), 0)
+  local h = a.routeHome
+  if not compiled.depot or compiled.depot.y ~= h.y then
+    error(("The depot dock must be at its home's height, Y %d: depot trips stay at that height"):format(h.y), 0)
   end
   local deadline = os.clock() + 10
   while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
   if not miningRoute then
-    local w = worldPos()
-    if gpsState ~= "ok" or not w or w.y ~= compiled.homeY or w.z ~= compiled.homeZ or w.x ~= a.routeHome.x then
-      error(("Place the turtle at its home row (Y %d, Z %d), facing south, with a GPS fix"):format(compiled.homeY, compiled.homeZ), 0)
+    rowRoute.settleFacing()
+    if not gpsTrusted() then
+      error("Couldn't confirm which way it faces with GPS: it needs an open block beside its home to step into and back", 0)
     end
-    -- At first setup the user supplies the known south facing. No calibration
-    -- movement is needed, and the captured home never follows later jobs.
-    calib = { l = { x = pos.x, y = pos.y, z = pos.z }, w = { x = w.x, y = compiled.homeY, z = compiled.homeZ }, f0 = (2 - heading) % 4 }
     blocked, blockedCount, traffic, trafficCount, parked, homesNear = {}, 0, {}, 0, {}, {}
     forgetVisited()
     remember(pos)
@@ -1865,16 +1860,16 @@ function rowRoute.ensure(a)
   end
   local w = toWorld(pos)
   if not miningRoute then
-    if not samePos(w, a.routeHome) then error("The first row job must start at the turtle's own saved row position", 0) end
+    if not samePos(w, a.routeHome) then error("The first level job must start at the turtle's saved home", 0) end
     faceCompass(2)
     home = fromWorld(a.routeHome)
     home.heading = (2 - calib.f0) % 4
     miningRoute = {
-      version = 1, home = { x = a.routeHome.x, y = compiled.homeY, z = compiled.homeZ, facing = "south" },
+      version = 1, home = { x = h.x, y = h.y, z = h.z, facing = "south" },
       bottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }, targetY = a.y,
       radius = a.radius,
-      stair = { completed = 0, half = false, complete = a.y == compiled.homeY },
-      bottomSaved = a.y == compiled.homeY, phase = "home",
+      stair = { completed = 0, half = false, complete = a.y == h.y },
+      bottomSaved = a.y == h.y, phase = "home",
     }
     rowRoute.save()
   elseif not samePos(miningRoute.home, a.routeHome) then
@@ -1978,7 +1973,7 @@ function rowRoute.intoCircle()
   end
 end
 
--- On the home row (Z -55, at its home's height) it's at the surface, wherever its saved
+-- In line with its home (its Z, at its height) it's at the surface, wherever its saved
 -- phase says it was: put back there by hand, it walks along the surface to
 -- its own home without digging.
 function rowRoute.onHomeRow(w)
@@ -2125,6 +2120,31 @@ function rowRoute.lookAround(w)
   return false
 end
 
+-- Before its first level job it learns which way it faces from GPS, never
+-- from how it was placed: from a fresh fix, it steps into an open block
+-- beside it and back. It digs nothing.
+function rowRoute.settleFacing()
+  local x, y, z
+  for _ = 1, 3 do
+    x, y, z = gps.locate(2)
+    if x then break end
+  end
+  if not x then error("No GPS fix here", 0) end
+  calib = { l = { x = pos.x, y = pos.y, z = pos.z }, w = { x = math.floor(x + 0.5), y = math.floor(y + 0.5), z = math.floor(z + 0.5) } }
+  saveState()
+  setDetail("Finding its facing with GPS")
+  for _ = 1, 4 do
+    local found, block = SIDES.forward.inspect()
+    if (not found or LIQUIDS[block.name]) and rowRoute.nudge("forward") then
+      rowRoute.awaitFacing()
+      rowRoute.nudge("back")
+      rowRoute.awaitFacing()
+      if gpsTrusted() then return end
+    end
+    turn(true)
+  end
+end
+
 -- When GPS disagreed with where it thought it was, its facing is unsure and
 -- it won't travel. It looks at all 6 sides for open space, steps in and back,
 -- and a GPS fix there settles the facing. Open space above or below doesn't
@@ -2181,6 +2201,44 @@ function rowRoute.findFacing()
   end
 end
 
+-- Script 2.4.8 and older took the way a turtle faced at its first level job
+-- for south, so one placed facing another way dug its first stairs that
+-- way: from home, one block that way and one down per step. Where it stands
+-- on such stairs, within what it dug, this gives their direction, the step
+-- and whether it's in the upper half of it.
+function rowRoute.astray(w)
+  local h, r = miningRoute.home, miningRoute
+  for d = 0, 3 do
+    if d ~= 2 then
+      local k = CX[d] ~= 0 and (w.x - h.x) * CX[d] or (w.z - h.z) * CZ[d]
+      local inLine = CX[d] ~= 0 and w.z == h.z or CX[d] == 0 and w.x == h.x
+      if inLine and k >= 1 and k <= r.stair.completed + 1 and (not r.radius or k <= r.radius) then
+        if w.y == h.y - k then return d, k, false end
+        if w.y == h.y - k + 1 then return d, k, true end
+      end
+    end
+  end
+end
+
+-- It climbs those stairs home through the blocks it dug, then its stairs
+-- count as not started: its next job digs them south from home.
+function rowRoute.climbAstray(d, k, upper)
+  local h = miningRoute.home
+  log("warn", ("Its stairs went %s instead of south: climbing them home, then starting its stairs again"):format(COMPASS[d]))
+  rowRoute.save("climbing")
+  setDetail("Climbing its stairs home")
+  while k > 0 do
+    if not upper then rowRoute.walkStep({ x = h.x + CX[d] * k, y = h.y + 1 - k, z = h.z + CZ[d] * k }, true) end
+    rowRoute.walkStep({ x = h.x + CX[d] * (k - 1), y = h.y + 1 - k, z = h.z + CZ[d] * (k - 1) }, true)
+    k, upper = k - 1, false
+  end
+  local stair = miningRoute.stair
+  stair.completed, stair.half, stair.pending = 0, false, nil
+  stair.complete = miningRoute.targetY == h.y
+  miningRoute.bottomSaved = stair.complete
+  miningRoute.work, miningRoute.veinPath, miningRoute.columns = nil, nil, nil
+end
+
 function rowRoute.exit(intent)
   if not miningRoute then error("No saved south-row route. Start a new row job first.", 0) end
   local deadline = os.clock() + 10
@@ -2202,6 +2260,14 @@ function rowRoute.exit(intent)
     rowRoute.surface(miningRoute.home)
   else
     local step, upper = rowRoute.position(w)
+    local d, k, up
+    if not step then d, k, up = rowRoute.astray(w) end
+    if d then
+      rowRoute.climbAstray(d, k, up)
+      faceCompass(2)
+      rowRoute.save("home")
+      return
+    end
     if step and not rowRoute.opened(w) then
       -- On its own staircase below where its saved progress says it dug
       -- (a step's save went astray, as on a GPS correction mid-descent): it
@@ -2283,7 +2349,7 @@ end
 function depotVisit(minFuel)
   if not miningRoute then return rowRoute.sharedDepotVisit(minFuel, false) end
   if not compiled.depot or compiled.depot.y ~= miningRoute.home.y then
-    error(("The shared depot dock must be at the home row's height, Y %d"):format(miningRoute.home.y), 0)
+    error(("The depot dock must be at its home's height, Y %d"):format(miningRoute.home.y), 0)
   end
   miningRoute.minFuel = math.max(miningRoute.minFuel or 0, minFuel or 0)
   local flown = 0
@@ -3101,7 +3167,7 @@ function rowRoute.jobArgs(a)
     kind = a.kind, x = clampInt(a.x, -3e7, 3e7, 0), z = clampInt(a.z, -3e7, 3e7, 0),
     y = a.y, dir = 2,
     radius = a.radius,
-    length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (a.z - rowRoute.homeZ()) + 1, scan = true,
+    length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (a.z - a.routeHome.z) + 1, scan = true,
     spacing = 2, band = 0,
     goal = 0, goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
   }
@@ -3110,8 +3176,8 @@ function rowRoute.jobArgs(a)
     args.yTop, args.yBottom = tonumber(a.yTop), tonumber(a.yBottom)
     args.length = nil
   end
-  args.routeMode, args.access, args.entryY = "southRow", "southStairs", rowRoute.homeY()
-  args.routeHome = { x = a.routeHome.x, y = rowRoute.homeY(), z = rowRoute.homeZ(), facing = "south" }
+  args.routeMode, args.access, args.entryY = "southRow", "southStairs", a.routeHome.y
+  args.routeHome = { x = a.routeHome.x, y = a.routeHome.y, z = a.routeHome.z, facing = "south" }
   args.stairBottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }
   if a.coverage == "allSides" then
     local bounds = a.veinBounds
@@ -3218,7 +3284,7 @@ end
 -- portion have the same restrictions as every other saved-stair return.
 function jobs.forceHome()
   if not miningRoute then
-    error(("No saved south staircase. Line up at Y %d, Z %d and start a new row job first."):format(compiled.homeY, compiled.homeZ), 0)
+    error("No saved south staircase. Set home and start a level job first.", 0)
   end
   jobs.goHome()
 end
@@ -3310,16 +3376,23 @@ actions.dropAll = function()
 end
 
 -- Home is set once on first run; this moves it, either to the current spot or
--- to world coordinates (x, y, z and a facing). A row miner's saved staircase
--- belongs to its old home and is forgotten; its next row job starts a new one.
+-- to world coordinates (x, y, z and a facing). Everything tied to the old home
+-- is forgotten: a row miner's saved staircase and route, and any saved job,
+-- which the queue is told was cancelled. Its next row job starts new stairs.
 actions.setHome = function(a)
-  if miningRoute and fleetJob then return false, "Cancel its saved level job first" end
   if a.x ~= nil and not gpsTrusted() then return false, "Needs GPS to set home by coordinates" end
-  local forgot = miningRoute and "; its saved staircase is forgotten" or ""
-  if miningRoute then
-    miningRoute = nil
-    log("info", "Saved staircase forgotten for a new home")
+  local gone = {}
+  if miningRoute then gone[#gone + 1] = "saved staircase and route" end
+  if fleetJob then
+    gone[#gone + 1] = "saved job"
+    lastFleetResult = { id = fleetJob.queueId, ok = false, msg = "Cancelled by Set home", jobId = fleetJob.args.jobId, ores = fleetJob.ores }
   end
+  miningRoute, fleetJob, pendingTrip = nil, nil, nil
+  -- A home kept from before it was moved by hand would come back once GPS
+  -- settles its facing.
+  if calib then calib.home = nil end
+  local forgot = #gone > 0 and "; forgot its " .. table.concat(gone, " and ") or ""
+  if #gone > 0 then log("info", "Forgot its " .. table.concat(gone, " and ") .. " for a new home") end
   if a.x ~= nil then
     local w = { x = clampInt(a.x, -3e7, 3e7, 0), y = clampInt(a.y, -64, 320, 64), z = clampInt(a.z, -3e7, 3e7, 0) }
     home = fromWorld(w)
@@ -3348,9 +3421,8 @@ actions.update = installUpdate
 
 -- Which dimension it works in: its depot and protected areas are that
 -- dimension's. Its saved home, stairs, GPS frame and any paused job belong to
--- the old one and are forgotten. In the new dimension, place it at its home
--- row (that dimension's home row Y and Z) facing south; its first
--- row job saves the new home.
+-- the old one and are forgotten. In the new dimension, Set home where it
+-- should mine from; its first level job saves that home.
 actions.setDimension = function(a)
   local d = (a.dimension == "nether" or a.dimension == "overworld") and a.dimension or nil
   if not d then return false, "Unknown dimension" end
@@ -3364,7 +3436,7 @@ actions.setDimension = function(a)
   cfg.compileFleet()
   setHome()
   log("info", "Now a " .. name .. " turtle")
-  return true, ("Now a %s turtle. Its saved home, stairs and any paused job are forgotten: place it at its home row (Y %d, Z %d) facing south."):format(name, compiled.homeY, compiled.homeZ)
+  return true, ("Now a %s turtle. Its saved home, stairs and any paused job are forgotten: use Set home where it should mine from."):format(name)
 end
 
 actions.forgetJob = function()
@@ -3491,7 +3563,8 @@ function net.status()
     heading = heading,
     home = home,
     world = worldPos(),
-    homeWorld = toWorld(home),
+    -- Before GPS knows its facing, home is still known if it's where the fix was.
+    homeWorld = toWorld(home) or (calib and samePos(home, calib.l) and calib.w) or nil,
     homeFacing = calib and calib.f0 and COMPASS[(calib.f0 + home.heading) % 4] or nil,
     facing = calib and calib.f0 and COMPASS[(calib.f0 + heading) % 4] or nil,
     gpsState = gpsState,
