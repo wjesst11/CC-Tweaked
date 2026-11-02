@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.6"
+local VERSION = "2.4.7"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -986,7 +986,7 @@ local function navigate(goal)
       if heading ~= path[i].h then break end -- inspecting behind changed the approach; replan
     end
     tries = tries + 1
-    if tries > 600 then
+    if tries > (goal.tries or 600) then
       travelNext = nil
       error((goal.mining and "Gave up finding a safe mining route to %s" or "Gave up finding an open way to %s"):format(nav.describe(goal.centre)), 0)
     end
@@ -2827,16 +2827,21 @@ KINDS.areaQuarry = {
     return w.x >= a.x1 and w.x <= a.x2 and w.z >= a.z1 and w.z <= a.z2 and w.y <= a.yTop and w.y >= a.yBottom
   end,
   walk = function(a, t) goWorld(t, "xzy") end,
-  -- Fly without digging to any open block just above the box, then dig down
-  -- into it. Nothing above the box is ever dug.
+  -- Fly to any open block above the box, or dig its way there when there's no
+  -- open way, then dig straight down into it. Protected areas and blocks are
+  -- never dug.
   enter = function(a)
     local cols, top = quarryColumns(a)
-    local ok, err = pcall(navigate, columnsGoal(cols, top + 1))
+    local goal = columnsGoal(cols, top + 1, true)
+    goal.tries = 100
+    local ok, err = pcall(navigate, goal)
     if not ok then
       if err == STOP then error(STOP, 0) end
-      error(("Can't get into the quarry from above without digging. Its top (Y %d) must be at or above the ground."):format(a.yTop), 0)
+      goal = columnsGoal(cols, top + 1, true)
+      goal.mining, goal.blocked = true, {}
+      navigate(goal)
     end
-    digMove("down")
+    while pos.y > top do digMove("down") end
   end,
   -- Up through the dug layers to the top; the way out above is open.
   exit = function(a)
@@ -3153,7 +3158,7 @@ function jobs.fleetJob(a)
   else
     error("Unknown fleet job " .. tostring(a.kind), 0)
   end
-  if miningRoute and args.kind ~= "branchMine" then error("This row miner uses its saved staircase. Start a south-row level job.", 0) end
+  if miningRoute and args.kind ~= "branchMine" then error("This row miner has a saved staircase. Set home first to forget it, then it can quarry.", 0) end
   fleetJob = { kind = args.kind, args = args, step = 0, phase = "work" }
   if type(a.queueId) == "string" and #a.queueId <= 96 then fleetJob.queueId = a.queueId end
   saveState()

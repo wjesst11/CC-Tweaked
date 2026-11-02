@@ -426,6 +426,8 @@ function safetyError(fleet, jobs, homes) {
           if (intersectsWork(part, area, job.circle)) return `The job would dig into the protected area "${area.name || "unnamed"}".`;
         }
       }
+      // A quarry only has to stay out of the protected areas.
+      if (job.args.kind === "areaQuarry") continue;
       if (intersectsWork(part, depot, job.circle)) return "The job would dig at the depot, or where turtles wait for it (within 5 blocks).";
       for (const { name, home } of homes) {
         if (home && intersectsWork(part, box(home.x, home.y, home.z, home.x, home.y, home.z), job.circle)) {

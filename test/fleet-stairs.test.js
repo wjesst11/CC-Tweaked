@@ -138,3 +138,13 @@ test("quarry assignments retain their original box without requiring surface-row
   assert.equal(result.assignments[0].args.access, undefined);
   assert.equal(result.assignments[0].args.entryY, undefined);
 });
+
+test("a quarry only has to stay out of the protected areas", () => {
+  const f = fleet();
+  const quarry = (params, homes = []) => planFleetJob(f, "areaQuarry", { yTop: 70, yBottom: 60, ...params }, [{ id: 1 }], homes);
+  // Beside the depot and over a turtle's home is fine.
+  assert.equal(quarry({ x1: 998, z1: 998, x2: 1002, z2: 1002 }).error, undefined);
+  assert.equal(quarry({ x1: 0, z1: 0, x2: 4, z2: 4 }, [{ name: "Miner 1", home: { x: 2, y: 65, z: 2 } }]).error, undefined);
+  f.protect.areas = [point(3, 62, 3, "Base")];
+  assert.match(quarry({ x1: 0, z1: 0, x2: 4, z2: 4 }).error, /protected area "Base"/);
+});

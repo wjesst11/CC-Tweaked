@@ -1089,5 +1089,91 @@ test("set home is refused while a level job is saved, and keeps the staircase",f
   assert(api.state().miningRoute,"lost its saved staircase")
 end)
 
+-- A turtle that has never mined a level: home (100, 67, -55) facing south,
+-- with the depot's chests.
+local function quarrier()
+  local api,sim,files=miner()
+  api.config(fleetConfig())
+  api.fix({x=0,y=0,z=0},HOME)
+  api.fix({x=0,y=0,z=1},{x=100,y=67,z=-54})
+  assert(api.trusted(),"GPS facing not settled")
+  sim.blocks["-8,-1,0"]="minecraft:chest"
+  sim.blocks["-8,0,-1"]="minecraft:chest"
+  sim.blocks["-7,0,0"]="minecraft:chest"
+  sim.chests["-7,0,0"]={name="minecraft:coal",count=200}
+  sim.onPullEvent=function() if api.leases().depot=="waiting" then api.lease("granted") end end
+  return api,sim,files
+end
+
+local function stone(sim,x1,x2,y1,y2,z1,z2)
+  for x=x1,x2 do for y=y1,y2 do for z=z1,z2 do sim.blocks[lkey({x=x,y=y,z=z})]="minecraft:stone" end end end
+end
+
+local function quarried(sim,q)
+  for x=q.x1,q.x2 do for y=q.yBottom,q.yTop do for z=q.z1,q.z2 do
+    assert(not sim.blocks[lkey({x=x,y=y,z=z})],"left "..x..","..y..","..z)
+  end end end
+end
+
+test("a quarry with its top below the ground is dug down to from above",function()
+  local api,sim=quarrier()
+  stone(sim,96,106,58,66,-60,-48)
+  local q={kind="areaQuarry",x1=101,x2=102,z1=-52,z2=-51,yTop=64,yBottom=62,queueId="quarry:buried"}
+  api.command({action="fleetJob",args=q})
+  local state=api.state()
+  assert(state.lastFleetResult and state.lastFleetResult.ok,"quarry didn't finish: "..tostring(state.lastFleetResult and state.lastFleetResult.msg))
+  quarried(sim,q)
+  -- Above the box it dug one shaft, and nothing beside the box.
+  local shaft=0
+  for x=96,106 do for y=58,66 do for z=-60,-48 do
+    local inBox=x>=q.x1 and x<=q.x2 and z>=q.z1 and z<=q.z2
+    if not sim.blocks[lkey({x=x,y=y,z=z})] then
+      assert(inBox,"dug outside the quarry at "..x..","..y..","..z)
+      if y>q.yTop then shaft=shaft+1 end
+    end
+  end end end
+  assert(shaft==2,"dug "..shaft.." blocks above the box")
+  same(state.world,HOME)
+end)
+
+test("a turtle with no open way to its quarry digs its way there",function()
+  local api,sim=quarrier()
+  -- Shut in underground: only a tunnel from home to the depot is open.
+  stone(sim,88,112,55,80,-67,-43)
+  for x=100,108 do sim.blocks[lkey({x=x,y=68,z=-55})]=nil end
+  sim.blocks[lkey(HOME)]=nil
+  sim.blocks[lkey({x=108,y=67,z=-55})]=nil
+  sim.blocks["-8,-1,0"]="minecraft:chest"
+  sim.blocks["-8,0,-1"]="minecraft:chest"
+  sim.blocks["-7,0,0"]="minecraft:chest"
+  local q={kind="areaQuarry",x1=95,x2=96,z1=-50,z2=-49,yTop=64,yBottom=62,queueId="quarry:shut"}
+  api.command({action="fleetJob",args=q})
+  local state=api.state()
+  assert(state.lastFleetResult and state.lastFleetResult.ok,"quarry didn't finish: "..tostring(state.lastFleetResult and state.lastFleetResult.msg).." / "..tostring(state.fleetJob and state.fleetJob.failed))
+  quarried(sim,q)
+  local dug=0
+  for x=88,112 do for y=55,80 do for z=-67,-43 do
+    local w={x=x,y=y,z=z}
+    local opened=(y==68 and z==-55 and x>=100 and x<=108) or (x==100 and y==67 and z==-55) or (x==108 and y==67 and z==-55)
+    local inBox=x>=q.x1 and x<=q.x2 and z>=q.z1 and z<=q.z2 and y>=q.yBottom and y<=q.yTop
+    if not opened and not inBox and not sim.blocks[lkey(w)] then dug=dug+1 end
+  end end end
+  assert(dug>0,"never dug a way to the quarry")
+  same(state.world,HOME)
+end)
+
+test("a quarry under a protected area is not dug down to",function()
+  local api,sim=quarrier()
+  stone(sim,96,106,58,66,-60,-48)
+  api.protection({{name="Lid",x1=96,x2=106,y1=65,y2=66,z1=-60,z2=-48}})
+  local q={kind="areaQuarry",x1=101,x2=102,z1=-52,z2=-51,yTop=64,yBottom=62,queueId="quarry:lid"}
+  api.command({action="fleetJob",args=q})
+  local state=api.state()
+  assert(state.fleetJob and tostring(state.fleetJob.failed):find("protected area Lid"),"didn't stop at the protected area: "..tostring(state.fleetJob and state.fleetJob.failed))
+  for x=96,106 do for y=65,66 do for z=-60,-48 do
+    assert(sim.blocks[lkey({x=x,y=y,z=z})],"dug the protected area at "..x..","..y..","..z)
+  end end end
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")
