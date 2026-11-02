@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.2"
+local VERSION = "2.4.3"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -409,7 +409,7 @@ end
 
 -- Fleet settings & protection ---------------------------------------------------
 
-local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {}, areas = {}, homeY = 67 }
+local compiled = { protect = {}, unprotect = {}, valuables = {}, fuel = {}, vein = {}, areas = {}, homeY = 67, homeZ = -55 }
 
 -- "*" is the only wildcard; everything else matches literally.
 function cfg.glob(pattern)
@@ -443,8 +443,9 @@ function cfg.compileFleet()
   if cfg.dimension == "nether" then
     local n = fleet.dimensions and fleet.dimensions.nether or {}
     compiled.depot, compiled.areas, compiled.homeY = n.depot, n.areas or {}, tonumber(n.homeY) or 67
+    compiled.homeZ = tonumber(n.homeZ) or -55
   else
-    compiled.depot, compiled.areas, compiled.homeY = fleet.depot, protect.areas or {}, 67
+    compiled.depot, compiled.areas, compiled.homeY, compiled.homeZ = fleet.depot, protect.areas or {}, 67, -55
   end
 end
 
@@ -1639,10 +1640,14 @@ function rowRoute.save(phase)
   changed()
 end
 
--- The home row's height: 67 in the Overworld, the Nether's own from Fleet
--- settings. A saved home keeps the height it was saved at.
+-- The home row's height and Z: Y 67, Z -55 in the Overworld, the Nether's
+-- own from Fleet settings. A saved home keeps the row it was saved on.
 function rowRoute.homeY()
   return miningRoute and miningRoute.home.y or compiled.homeY
+end
+
+function rowRoute.homeZ()
+  return miningRoute and miningRoute.home.z or compiled.homeZ
 end
 
 function rowRoute.surfacePhase()
@@ -1670,12 +1675,13 @@ end
 
 -- World Z of staircase step `step` (0 is the home). Step n has its foot n
 -- below the home row. When the radius is smaller than the depth, the stairs switch
--- back: south to Z -55 + radius, north to Z -55, south again, and so on.
--- The server plans the same cells (fleet.js stairZ).
-function rowRoute.stairZ(step, radius)
-  if not radius then return -55 + step end
+-- back: south to radius blocks past the home row, north to the row, south
+-- again, and so on. The server plans the same cells (fleet.js stairZ).
+function rowRoute.stairZ(step, radius, z0)
+  z0 = z0 or rowRoute.homeZ()
+  if not radius then return z0 + step end
   local p = step % (2 * radius)
-  return -55 + (p <= radius and p or 2 * radius - p)
+  return z0 + (p <= radius and p or 2 * radius - p)
 end
 
 function rowRoute.position(w)
@@ -1797,7 +1803,7 @@ function rowRoute.validate(a)
   end
   local function integer(n, lo, hi) return type(n) == "number" and n == math.floor(n) and n >= lo and n <= hi end
   local h, b = a.routeHome, a.stairBottom
-  if type(h) ~= "table" or not integer(h.x, -3e7, 3e7) or h.y ~= rowRoute.homeY() or h.z ~= -55 or h.facing ~= "south" then
+  if type(h) ~= "table" or not integer(h.x, -3e7, 3e7) or h.y ~= rowRoute.homeY() or h.z ~= rowRoute.homeZ() or h.facing ~= "south" then
     error("Invalid saved south-facing home row", 0)
   end
   if not integer(a.y, -64, h.y) or not integer(a.x, -3e7, 3e7) or not integer(a.z, -3e7, 3e7)
@@ -1806,7 +1812,7 @@ function rowRoute.validate(a)
   end
   if not integer(a.radius, 1, 1024) then error("Set a mining radius from 1 to 1024 blocks", 0) end
   local staggered = a.pattern == "staggered"
-  if type(b) ~= "table" or b.x ~= h.x or b.y ~= a.y or b.z ~= rowRoute.stairZ(h.y - a.y, a.radius)
+  if type(b) ~= "table" or b.x ~= h.x or b.y ~= a.y or b.z ~= rowRoute.stairZ(h.y - a.y, a.radius, h.z)
     or a.z ~= (staggered and h.z or b.z) then
     error("The staircase bottom must match the saved home and target Y", 0)
   end
@@ -1833,12 +1839,12 @@ function rowRoute.ensure(a)
   while not gpsChecked and os.clock() < deadline do waitSeconds(0.5) end
   if not miningRoute then
     local w = worldPos()
-    if gpsState ~= "ok" or not w or w.y ~= compiled.homeY or w.z ~= -55 or w.x ~= a.routeHome.x then
-      error(("Place the turtle at its home row (Y %d, Z -55), facing south, with a GPS fix"):format(compiled.homeY), 0)
+    if gpsState ~= "ok" or not w or w.y ~= compiled.homeY or w.z ~= compiled.homeZ or w.x ~= a.routeHome.x then
+      error(("Place the turtle at its home row (Y %d, Z %d), facing south, with a GPS fix"):format(compiled.homeY, compiled.homeZ), 0)
     end
     -- At first setup the user supplies the known south facing. No calibration
     -- movement is needed, and the captured home never follows later jobs.
-    calib = { l = { x = pos.x, y = pos.y, z = pos.z }, w = { x = w.x, y = compiled.homeY, z = -55 }, f0 = (2 - heading) % 4 }
+    calib = { l = { x = pos.x, y = pos.y, z = pos.z }, w = { x = w.x, y = compiled.homeY, z = compiled.homeZ }, f0 = (2 - heading) % 4 }
     blocked, blockedCount, traffic, trafficCount, parked, homesNear = {}, 0, {}, 0, {}, {}
     forgetVisited()
     remember(pos)
@@ -1856,7 +1862,7 @@ function rowRoute.ensure(a)
     home = fromWorld(a.routeHome)
     home.heading = (2 - calib.f0) % 4
     miningRoute = {
-      version = 1, home = { x = a.routeHome.x, y = compiled.homeY, z = -55, facing = "south" },
+      version = 1, home = { x = a.routeHome.x, y = compiled.homeY, z = compiled.homeZ, facing = "south" },
       bottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }, targetY = a.y,
       radius = a.radius,
       stair = { completed = 0, half = false, complete = a.y == compiled.homeY },
@@ -3061,7 +3067,7 @@ function rowRoute.jobArgs(a)
     kind = a.kind, x = clampInt(a.x, -3e7, 3e7, 0), z = clampInt(a.z, -3e7, 3e7, 0),
     y = a.y, dir = 2,
     radius = a.radius,
-    length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (a.z + 55) + 1, scan = true,
+    length = math.floor(math.sqrt(a.radius^2 - (a.x - a.routeHome.x)^2)) - (a.z - rowRoute.homeZ()) + 1, scan = true,
     spacing = 2, band = 0,
     goal = 0, goalItem = GOAL_ITEMS[a.goalItem] and a.goalItem or "valuables",
   }
@@ -3071,7 +3077,7 @@ function rowRoute.jobArgs(a)
     args.length = nil
   end
   args.routeMode, args.access, args.entryY = "southRow", "southStairs", rowRoute.homeY()
-  args.routeHome = { x = a.routeHome.x, y = rowRoute.homeY(), z = -55, facing = "south" }
+  args.routeHome = { x = a.routeHome.x, y = rowRoute.homeY(), z = rowRoute.homeZ(), facing = "south" }
   args.stairBottom = { x = a.stairBottom.x, y = a.y, z = a.stairBottom.z }
   if a.coverage == "allSides" then
     local bounds = a.veinBounds
@@ -3178,7 +3184,7 @@ end
 -- portion have the same restrictions as every other saved-stair return.
 function jobs.forceHome()
   if not miningRoute then
-    error(("No saved south staircase. Line up at Y %d, Z -55 and start a new row job first."):format(compiled.homeY), 0)
+    error(("No saved south staircase. Line up at Y %d, Z %d and start a new row job first."):format(compiled.homeY, compiled.homeZ), 0)
   end
   jobs.goHome()
 end
@@ -3318,7 +3324,7 @@ actions.setDimension = function(a)
   cfg.compileFleet()
   setHome()
   log("info", "Now a " .. name .. " turtle")
-  return true, ("Now a %s turtle. Its saved home, stairs and any paused job are forgotten: place it at its home row (Y %d, Z -55) facing south."):format(name, compiled.homeY)
+  return true, ("Now a %s turtle. Its saved home, stairs and any paused job are forgotten: place it at its home row (Y %d, Z %d) facing south."):format(name, compiled.homeY, compiled.homeZ)
 end
 
 actions.forgetJob = function()

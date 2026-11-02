@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.4.2"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.4.3"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -173,7 +173,7 @@ function notQueueReady(t) {
   if (fleetTab() === "branchMine") {
     if (!s.radiusSupported || !s.staggeredSupported) return "update script for staggered tunnels";
     if (!s.southRowSupported) return "update script for home-row mining";
-    if (!southRowHome(t)) return `place at Y ${homeRowY()}, Z −55, facing south`;
+    if (!southRowHome(t)) return `place at Y ${homeRowY()}, Z ${homeRowZ()}, facing south`;
     if (!s.gpsTrusted && (s.miningRoute || !onSouthRow(s.world))) return "no confirmed GPS position yet";
   } else if (!s.gpsTrusted) return "no GPS facing yet";
   return null;
@@ -183,15 +183,15 @@ function worldPoint(p) {
   return p && [p.x, p.y, p.z].every(Number.isFinite);
 }
 
-// The home row: Z -55, at the shown dimension's home row height. A saved home
-// keeps the height it was saved at.
-function onSouthRow(p, y = homeRowY()) {
-  return worldPoint(p) && Number.isInteger(p.x) && p.y === y && p.z === -55;
+// The shown dimension's home row: Y 67, Z -55 in the Overworld. A saved home
+// keeps the row it was saved on.
+function onSouthRow(p, y = homeRowY(), z = homeRowZ()) {
+  return worldPoint(p) && Number.isInteger(p.x) && p.y === y && p.z === z;
 }
 
 function southRowHome(t) {
   const saved = t.status?.miningRoute?.home;
-  if (onSouthRow(saved, saved?.y)) return { x: saved.x, y: saved.y, z: saved.z, facing: "south" };
+  if (onSouthRow(saved, saved?.y, saved?.z)) return { x: saved.x, y: saved.y, z: saved.z, facing: "south" };
   const fix = t.status?.world;
   return onSouthRow(fix) ? { x: fix.x, y: fix.y, z: fix.z, facing: "south" } : null;
 }
@@ -527,16 +527,20 @@ const currentDepot = () => state.depots[state.dimension] ?? { holder: null, queu
 const currentQueue = () => state.jobQueues[state.dimension] ?? { paused: false, jobs: [] };
 
 // The fleet settings as the shown dimension's turtles see them: its own depot,
-// protected areas and home row height, everything else shared.
+// protected areas and home row, everything else shared.
 function dimFleet(fleet = state.fleet, dimension = state.dimension) {
   if (!fleet) return fleet;
-  if (dimension === "overworld") return { ...fleet, homeY: 67 };
+  if (dimension === "overworld") return { ...fleet, homeY: 67, homeZ: -55 };
   const own = fleet.dimensions?.nether ?? {};
-  return { ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] }, homeY: own.homeY ?? 67 };
+  return {
+    ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] },
+    homeY: own.homeY ?? 67, homeZ: own.homeZ ?? -55,
+  };
 }
 
-// The home row's height in the shown dimension: 67 in the Overworld.
+// The home row in the shown dimension: Y 67, Z -55 in the Overworld.
 const homeRowY = () => dimFleet()?.homeY ?? 67;
+const homeRowZ = () => dimFleet()?.homeZ ?? -55;
 
 function setDimension(dimension) {
   if (dimension === state.dimension) return;
@@ -1780,8 +1784,8 @@ function fillFleetForm() {
     $('[data-field="depot.fuel"]').value = "west";
   }
   $("#areas").replaceChildren(...(f.protect?.areas ?? []).map(areaRow));
-  // The Overworld's home row is always at Y 67.
-  $('[data-field="homeY"]').disabled = state.dimension === "overworld";
+  // The Overworld's home row is always Y 67, Z -55; only the Nether's is set here.
+  $("#home-row-fields").hidden = state.dimension === "overworld";
   renderDockApproach();
   setSaveMsg("");
 }
@@ -1817,9 +1821,9 @@ function collectFleet() {
   if (out.protect.areas.some((a) => ["x1", "y1", "z1", "x2", "y2", "z2"].some((k) => a[k] === null))) {
     return { error: "Every protected area needs both corners filled in." };
   }
-  const { homeY, ...shared } = out;
+  const { homeY, homeZ, ...shared } = out;
   if (state.dimension === "overworld") return { fleet: shared };
-  if (!Number.isInteger(homeY)) return { error: "Fill in the Nether's home row Y." };
+  if (!Number.isInteger(homeY) || !Number.isInteger(homeZ)) return { error: "Fill in the Nether's home row Y and Z." };
   // The depot, areas and home row edited here are the Nether's; the Overworld's stay.
   const base = state.fleet ?? {};
   return {
@@ -1827,7 +1831,7 @@ function collectFleet() {
       ...shared,
       depot: base.depot ?? null,
       protect: { ...shared.protect, areas: base.protect?.areas ?? [] },
-      dimensions: { ...base.dimensions, nether: { depot: shared.depot, areas: shared.protect.areas, homeY } },
+      dimensions: { ...base.dimensions, nether: { depot: shared.depot, areas: shared.protect.areas, homeY, homeZ } },
     },
   };
 }
@@ -1948,8 +1952,8 @@ function bindEvents() {
     if (!t) return;
     const other = dimOf(t) === "nether" ? "overworld" : "nether";
     const name = DIMENSION_NAMES[other];
-    const rowY = dimFleet(state.fleet, other)?.homeY ?? 67;
-    if (!confirm(`Make ${nameOf(t)} a ${name} turtle? Its saved home, stairs and any paused job are forgotten. In the ${name}, place it at its home row (Y ${rowY}, Z -55) facing south.`)) return;
+    const row = dimFleet(state.fleet, other);
+    if (!confirm(`Make ${nameOf(t)} a ${name} turtle? Its saved home, stairs and any paused job are forgotten. In the ${name}, place it at its home row (Y ${row?.homeY ?? 67}, Z ${row?.homeZ ?? -55}) facing south.`)) return;
     command("setDimension", { dimension: other });
     toast(`${nameOf(t)} moves to the ${name} tab once it switches.`, "info");
   });

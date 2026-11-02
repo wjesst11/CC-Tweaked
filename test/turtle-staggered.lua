@@ -990,13 +990,15 @@ test("a turtle put back on the home row by hand walks along the surface to its o
   assert(sim.digs==digs,"dug on the surface")
 end)
 
-test("a Nether turtle with its home row at Y 97 digs its stairs from there, mines, and comes home",function()
-  local NHOME={x=100,y=97,z=-55}
+test("a Nether turtle with its home row at Y 97, Z 6 digs its stairs from there, mines, and comes home",function()
+  local NHOME={x=100,y=97,z=6}
+  -- Stair Z from the Nether row instead of Z -55.
+  local function nStairZ(step,r) return stairZ(step,r)+55+NHOME.z end
   local function nkey(w) return key({x=NHOME.x-w.x,y=w.y-NHOME.y,z=w.z-NHOME.z}) end
   local r,yTop,yBottom=4,90,86
   local api,sim=miner()
   local settings=fleetConfig()
-  settings.dimensions={nether={depot={x=108,y=97,z=-55,junk="down",valuables="north",fuel="west"},areas={},homeY=97}}
+  settings.dimensions={nether={depot={x=108,y=97,z=6,junk="down",valuables="north",fuel="west"},areas={},homeY=97,homeZ=6}}
   api.config(settings)
   api.command({action="setDimension",args={dimension="nether"}})
   api.fix({x=0,y=0,z=0},NHOME)
@@ -1017,16 +1019,17 @@ test("a Nether turtle with its home row at Y 97 digs its stairs from there, mine
   end
   local a={
     kind="branchMine",pattern="staggered",routeMode="southRow",access="southStairs",entryY=97,
-    routeHome={x=100,y=97,z=-55,facing="south"},stairBottom={x=100,y=A,z=stairZ(97-A,r)},
-    x=96,z=-55,y=A,dir="south",radius=r,first=96,last=104,low=low,yTop=yTop,yBottom=yBottom,
+    routeHome={x=100,y=97,z=6,facing="south"},stairBottom={x=100,y=A,z=nStairZ(97-A,r)},
+    x=96,z=6,y=A,dir="south",radius=r,first=96,last=104,low=low,yTop=yTop,yBottom=yBottom,
     scan=true,band=0,spacing=5,goal=0,goalItem="valuables",coverage="allSides",
-    veinBounds={x1=95,x2=105,y1=low-1,y2=A,z1=-55-r-1,z2=-55+r+1},
+    veinBounds={x1=95,x2=105,y1=low-1,y2=A,z1=6-r-1,z2=6+r+1},
     queueId="nether:97",
   }
   api.command({action="fleetJob",args=a})
   finished(api,a)
   for _,p in ipairs(sim.history) do assert(p.y<=0,"went above its Y 97 home row") end
-  assert(api.state().miningRoute.home.y==97)
+  local home=api.state().miningRoute.home
+  assert(home.y==97 and home.z==6,"saved its home off the Nether row")
 end)
 
 test("a turtle standing still takes its position from GPS again once a wrong GPS host is corrected",function()

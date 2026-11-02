@@ -28,21 +28,25 @@ export const DEFAULT_FLEET = {
   veinBlocks: ["*_ore", "*ancient_debris*"],
   // The depot and protected areas above are the Overworld's. Each other
   // dimension has its own; everything else is shared.
-  dimensions: { nether: { depot: null, areas: [], homeY: 67 } },
+  dimensions: { nether: { depot: null, areas: [], homeY: 67, homeZ: -55 } },
 };
 
-// The Overworld's home row height. The Nether's is its own setting.
+// The Overworld's home row: its height and Z. The Nether's are its own settings.
 export const HOME_Y = 67;
+export const HOME_Z = -55;
 
 export const DIMENSIONS = ["overworld", "nether"];
 export const dimensionOf = (value) => (value === "nether" ? "nether" : "overworld");
 
 // Fleet settings as one dimension's turtles see them: that dimension's depot,
-// protected areas and home row height, with everything else shared.
+// protected areas and home row, with everything else shared.
 export function dimensionFleet(fleet, dimension) {
-  if (dimensionOf(dimension) === "overworld") return { ...fleet, homeY: HOME_Y };
+  if (dimensionOf(dimension) === "overworld") return { ...fleet, homeY: HOME_Y, homeZ: HOME_Z };
   const own = fleet.dimensions?.nether ?? {};
-  return { ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] }, homeY: own.homeY ?? HOME_Y };
+  return {
+    ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] },
+    homeY: own.homeY ?? HOME_Y, homeZ: own.homeZ ?? HOME_Z,
+  };
 }
 
 function int(v, lo, hi) {
@@ -114,6 +118,7 @@ export function sanitizeFleet(input = {}) {
         depot: sanitizeDepot(input.dimensions?.nether?.depot),
         areas: sanitizeAreas(input.dimensions?.nether?.areas),
         homeY: height(input.dimensions?.nether?.homeY) ?? HOME_Y,
+        homeZ: coord(input.dimensions?.nether?.homeZ) ?? HOME_Z,
       },
     },
   };
@@ -140,9 +145,9 @@ const insideCylinder = (cylinder, point) =>
 // World Z of staircase step `step` (step n has its foot at Y 67 - n). When
 // the radius is smaller than the depth the stairs switch back: south to
 // Z -55 + radius, north to Z -55, and so on. Same as the turtle's stairZ.
-export function stairZ(step, radius) {
+export function stairZ(step, radius, z0 = HOME_Z) {
   const p = step % (2 * radius);
-  return -55 + (p <= radius ? p : 2 * radius - p);
+  return z0 + (p <= radius ? p : 2 * radius - p);
 }
 
 // Staggered tunnels: column x has a tunnel at level y when (x + 2y) % 5 is 0.
@@ -191,7 +196,7 @@ export function validateFleet(fleet) {
 // home itself is never an access block to be dug out.
 function stairAccess(home, y, radius) {
   return Array.from({ length: home.y - y }, (_, index) => {
-    const step = index + 1, py = home.y - step, pz = stairZ(step, radius);
+    const step = index + 1, py = home.y - step, pz = stairZ(step, radius, home.z);
     return box(home.x, py, pz, home.x, py + 1, pz);
   });
 }
@@ -199,14 +204,14 @@ function stairAccess(home, y, radius) {
 // One turtle's share of a staggered job: columns west to east, swept from
 // the end nearer its stairs. `done` marks work another turtle already did.
 function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, jobId, done }) {
-  const zb = stairZ(home.y - y, radius);
+  const zb = stairZ(home.y - y, radius, home.z);
   const [first, last] = Math.abs(west - home.x) <= Math.abs(east - home.x) ? [west, east] : [east, west];
   // Ore checks reach the next turtle's nearest column, the level below the
   // lowest tunnel and the corridor above the top one.
-  const volume = box(west - 1, low - 1, -55 - radius - 1, east + 1, y, -55 + radius + 1);
+  const volume = box(west - 1, low - 1, home.z - radius - 1, east + 1, y, home.z + radius + 1);
   return {
     args: {
-      kind: "branchMine", pattern: "staggered", x: first, z: -55, y, dir: "south", radius, first, last, low, peak, yTop, yBottom,
+      kind: "branchMine", pattern: "staggered", x: first, z: home.z, y, dir: "south", radius, first, last, low, peak, yTop, yBottom,
       scan: true, spacing: 5, band: 0, goal: 0, goalItem: "valuables",
       routeMode: "southRow", routeHome: { ...home }, stairBottom: { x: home.x, y, z: zb }, access: "southStairs", entryY: home.y,
       coverage: "allSides", veinBounds: volume,
@@ -216,7 +221,7 @@ function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, j
     circle: { x: home.x, z: home.z, radius },
     // From the stair bottom along the home column to the corridor, and
     // along the corridor to the far end of its columns.
-    assembly: [box(home.x, y, zb, home.x, y, -55), box(Math.min(home.x, west), y, -55, Math.max(home.x, east), y, -55)],
+    assembly: [box(home.x, y, zb, home.x, y, home.z), box(Math.min(home.x, west), y, home.z, Math.max(home.x, east), y, home.z)],
     access: stairAccess(home, y, radius),
   };
 }
@@ -297,7 +302,7 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     if (params.routeMode !== "southRow") {
       return { error: "This level job uses an old route layout. Create a new south-row level job." };
     }
-    const homeY = fleet.homeY ?? HOME_Y;
+    const homeY = fleet.homeY ?? HOME_Y, homeZ = fleet.homeZ ?? HOME_Z;
     if (fleet.depot.y !== homeY) return { error: `The shared depot must be at Y=${homeY}, the home row's height, for south-row mining.` };
     const radius = params.radius;
     if (!Number.isInteger(radius) || radius < 1 || radius > 1024) {
@@ -306,8 +311,8 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     for (const turtle of ready) {
       const home = turtle.home;
       if (!home || !Number.isInteger(home.x) || coord(home.x) === null ||
-          home.y !== homeY || home.z !== -55 || home.facing !== "south") {
-        return { error: `${turtle.name || `Turtle ${turtle.id}`} needs a confirmed south-facing home at Y=${homeY}, Z=-55.` };
+          home.y !== homeY || home.z !== homeZ || home.facing !== "south") {
+        return { error: `${turtle.name || `Turtle ${turtle.id}`} needs a confirmed south-facing home at Y=${homeY}, Z=${homeZ}.` };
       }
     }
     if (new Set(ready.map(({ home }) => home.x)).size !== ready.length) {
@@ -324,7 +329,7 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
         return { error: "Check the tunnel settings." };
       }
       selected = [...ready].sort((a, b) => b.home.x - a.home.x);
-      const x = selected[0].home.x, z = stairZ(homeY - y, radius);
+      const x = selected[0].home.x, z = stairZ(homeY - y, radius, homeZ);
       const spacing = 2, band = 0, goal = 0, goalItem = "valuables", scan = true;
       for (const [k, turtle] of selected.entries()) {
         const home = turtle.home, cylinder = { x: home.x, z: home.z, radius };
@@ -491,7 +496,7 @@ export function planJoin(fleet, members, helpers, homes) {
       jobs.push(job);
       // The busy turtle keeps its sweep direction, so first stays on the same side.
       const [first, last] = m.args.first <= m.args.last ? keep : [keep[1], keep[0]];
-      const volume = box(keep[0] - 1, m.args.low - 1, -55 - radius - 1, keep[1] + 1, m.args.y, -55 + radius + 1);
+      const volume = box(keep[0] - 1, m.args.low - 1, m.args.z - radius - 1, keep[1] + 1, m.args.y, m.args.z + radius + 1);
       updates.push({ id: m.id, args: { ...m.args, x: first, first, last, veinBounds: volume, done: { pass: p, cols: within(keep) } } });
       assignments.push({ id: helper.id, args: job.args, after: m.id, expect: { first, last } });
       w.split = placed = true;

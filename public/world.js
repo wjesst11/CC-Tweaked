@@ -58,10 +58,11 @@ const validPoint = (p) => p && [p.x, p.y, p.z].every(Number.isFinite);
 
 // World Z of staircase step `step`, switching back at the radius. Same as
 // stairZ in fleet.js and the turtle script.
-function stairZ(step, radius) {
-  if (!Number.isInteger(radius) || radius < 1) return -55 + step;
+// From the home's Z (Z -55 in the Overworld's home row).
+function stairZ(step, radius, z0 = -55) {
+  if (!Number.isInteger(radius) || radius < 1) return z0 + step;
   const p = step % (2 * radius);
-  return -55 + (p <= radius ? p : 2 * radius - p);
+  return z0 + (p <= radius ? p : 2 * radius - p);
 }
 
 function boxBetween(a, b) {
@@ -436,11 +437,11 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
     }
     for (const { id, home, bottom, radius, job } of routes) {
       const depth = home.y - bottom.y;
-      if (!Number.isInteger(depth) || depth < 0 || depth > 131 || home.x !== bottom.x || bottom.z !== stairZ(depth, radius)) continue;
+      if (!Number.isInteger(depth) || depth < 0 || depth > 131 || home.x !== bottom.x || bottom.z !== stairZ(depth, radius, home.z)) continue;
       const points = [centre(home)];
       for (let step = 1; step <= depth; step++) {
-        points.push(centre({ x: home.x, y: home.y - step + 1, z: stairZ(step, radius) }));
-        points.push(centre({ x: home.x, y: home.y - step, z: stairZ(step, radius) }));
+        points.push(centre({ x: home.x, y: home.y - step + 1, z: stairZ(step, radius, home.z) }));
+        points.push(centre({ x: home.x, y: home.y - step, z: stairZ(step, radius, home.z) }));
       }
       const path = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: cssColor("--ink-2"), transparent: true, opacity: 0.65 }));
       groups.homes.add(path);

@@ -516,9 +516,10 @@
             <section class="card">
               <div class="card-head"><h2>Depot</h2><span id="depot-status" class="muted"></span></div>
               <p class="hint flush">Turtles take turns standing on the dock block to sort their items into three chests next to it and refuel.</p>
-              <p class="hint flush">Home-row mining requires the dock at the home row's height: Y 67 in the Overworld, the Nether's own home row Y below. Surface routes between the home row and depot stay at that level.</p>
-              <div class="fields">
-                <label class="field" title="The height of this dimension's home row (Z -55). The Overworld's is always 67."><span>Home row Y</span><input data-field="homeY" type="number" min="-60" max="319"></label>
+              <p class="hint flush">Home-row mining requires the dock at the home row's height: Y 67 in the Overworld, the Nether's own home row below. Surface routes between the home row and depot stay at that level.</p>
+              <div class="fields" id="home-row-fields">
+                <label class="field" title="The height of the Nether's home row: the Y the turtles stand at."><span>Home row Y</span><input data-field="homeY" type="number" min="-60" max="319"></label>
+                <label class="field" title="The Z of the Nether's home row: the Z the turtles stand at. Their stairs go south from it."><span>Home row Z</span><input data-field="homeZ" type="number"></label>
               </div>
               <div class="fields">
                 <label class="field"><span>Dock X</span><input data-field="depot.x" type="number"></label>

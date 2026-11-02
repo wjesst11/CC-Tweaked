@@ -423,14 +423,14 @@ test("each dimension has its own dock turns, job queue and fleet-wide commands",
   assert.equal(dashboard.messages.some((msg) => msg.type === "jobQueue" && msg.dimension === "overworld" && msg.queue.paused), false);
 });
 
-test("a Nether turtle on a Y 97 home row gets a job saved from that row", async (t) => {
+test("a Nether turtle on a Y 97, Z 6 home row gets a job saved from that row", async (t) => {
   const { dashboard: openDashboard, turtle } = await harness(t);
   const dashboard = await openDashboard();
   const fleet = {
     ...FLEET,
-    dimensions: { nether: { homeY: 97, depot: { x: 5, y: 97, z: -55, junk: "down", valuables: "north", fuel: "west" }, areas: [] } },
+    dimensions: { nether: { homeY: 97, homeZ: 6, depot: { x: 5, y: 97, z: 6, junk: "down", valuables: "north", fuel: "west" }, areas: [] } },
   };
-  const status = { ...IDLE, dimension: "nether", world: { x: 100, y: 97, z: -55 }, homeWorld: null };
+  const status = { ...IDLE, dimension: "nether", world: { x: 100, y: 97, z: 6 }, homeWorld: null };
   const nether = await turtle(status, true, { dimension: "nether", fleet });
   await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.status?.dimension === "nether");
   dashboard.send({
@@ -439,6 +439,8 @@ test("a Nether turtle on a Y 97 home row gets a job saved from that row", async 
   });
   const { args } = await nether.wait(command);
   assert.equal(args.routeHome.y, 97);
+  assert.equal(args.routeHome.z, 6);
   assert.equal(args.entryY, 97);
   assert.equal(args.y, 92);
+  assert.equal(args.z, 6);
 });

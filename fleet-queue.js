@@ -26,19 +26,22 @@ function idle(status) {
   return status && !status.job && !status.fleetJob && !status.miningRoute?.intent && !(Number(status.queued) > 0);
 }
 
-function rowPosition(position, homeY) {
-  return position && Number.isInteger(position.x) && position.y === homeY && position.z === -55;
+// On the home row: at its height and Z, given as row { y, z }.
+function rowPosition(position, row) {
+  return position && Number.isInteger(position.x) && position.y === row.y && position.z === row.z;
 }
 
-function located(status, kind, homeY) {
+function located(status, kind, row) {
   // Initial row placement supplies the known south-facing orientation. A GPS
   // fix at that row is enough to start without first moving off the home cell.
-  return status?.gpsTrusted || (kind === "branchMine" && !status?.miningRoute && rowPosition(status?.world, homeY));
+  return status?.gpsTrusted || (kind === "branchMine" && !status?.miningRoute && rowPosition(status?.world, row));
 }
 
 export class FleetJobQueue {
-  // homeY gives the home row's height in this queue's dimension.
-  constructor({ state, persist, plan, inspect, dispatch, now = Date.now, makeId = () => crypto.randomUUID(), homeY = () => 67 }) {
+  // homeRow gives the home row's height and Z in this queue's dimension.
+  constructor({
+    state, persist, plan, inspect, dispatch, now = Date.now, makeId = () => crypto.randomUUID(), homeRow = () => ({ y: 67, z: -55 }),
+  }) {
     for (const [name, callback] of Object.entries({ persist, plan, inspect, dispatch, now, makeId })) {
       if (typeof callback !== "function") throw new TypeError(`${name} must be a function`);
     }
@@ -48,7 +51,7 @@ export class FleetJobQueue {
     this.dispatch = dispatch;
     this.now = now;
     this.makeId = makeId;
-    this.homeY = homeY;
+    this.homeRow = homeRow;
     this.state = { paused: state?.paused === true, jobs: copy(Array.isArray(state?.jobs) ? state.jobs : []) };
     if (this.state.jobs.some((job) => !job || !STATES.has(job.state))) throw new Error("Invalid saved fleet queue");
     prune(this.state.jobs);
@@ -61,9 +64,9 @@ export class FleetJobQueue {
     return copy(this.state);
   }
 
-  // The home row's height in this queue's dimension.
-  rowY() {
-    return typeof this.homeY === "function" ? this.homeY() : 67;
+  // The home row in this queue's dimension.
+  rowAt() {
+    return typeof this.homeRow === "function" ? this.homeRow() : { y: 67, z: -55 };
   }
 
   // Persist a separate copy before committing memory or sending a command.
@@ -162,14 +165,15 @@ export class FleetJobQueue {
       if (job.kind === "branchMine" && !status.southRowSupported) return `Update ${label}'s script for the saved south staircase`;
       if (job.kind === "branchMine" && !status.radiusSupported) return `Update ${label}'s script for the home mining radius`;
       if (job.kind === "branchMine" && !status.staggeredSupported) return `Update ${label}'s script for staggered tunnels`;
-      const homeY = this.rowY();
-      if (!located(status, job.kind, homeY)) return `Waiting for ${label}'s GPS position`;
+      const row = this.rowAt();
+      if (!located(status, job.kind, row)) return `Waiting for ${label}'s GPS position`;
       if (!idle(status)) return `Waiting for ${label} to finish its current work`;
       if (job.kind === "branchMine") {
         const home = status.miningRoute?.home ?? status.world;
-        const rowY = Number.isInteger(status.miningRoute?.home?.y) ? status.miningRoute.home.y : homeY;
-        if (!rowPosition(home, rowY) || !rowPosition(status.world, rowY) || home.x !== status.world.x) {
-          return `Waiting for ${label} at its home on Y=${rowY}, Z=-55`;
+        const saved = status.miningRoute?.home;
+        const at = Number.isInteger(saved?.y) && Number.isInteger(saved?.z) ? { y: saved.y, z: saved.z } : row;
+        if (!rowPosition(home, at) || !rowPosition(status.world, at) || home.x !== status.world.x) {
+          return `Waiting for ${label} at its home on Y=${at.y}, Z=${at.z}`;
         }
       }
     }
@@ -286,7 +290,7 @@ export class FleetJobQueue {
       if (assignment.done || this.acknowledged.has(assignment.queueId)) continue;
       const turtle = this.inspect(assignment.id);
       const status = turtle?.status;
-      if (!turtle?.online || !turtle.fresh || !status?.queueSupported || !located(status, job.kind, this.rowY()) || !idle(status)) continue;
+      if (!turtle?.online || !turtle.fresh || !status?.queueSupported || !located(status, job.kind, this.rowAt()) || !idle(status)) continue;
       const time = this.now();
       if (this.sentAt.has(assignment.queueId) && time - this.sentAt.get(assignment.queueId) < RETRY_MS) continue;
       // Record attempts even if the transport throws; the same ID is retried.
