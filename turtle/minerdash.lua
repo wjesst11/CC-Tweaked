@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.5.1"
+local VERSION = "2.5.2"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1959,7 +1959,20 @@ function rowRoute.rejoin(current)
   end
   log("warn", ("Off its saved route at %s: digging back to its shaft at %d, %d, %d"):format(at, t.x, t.y, t.z))
   setDetail("Digging back to its shaft")
-  goWorld(t, "zxy")
+  local ok, err = pcall(goWorld, t, "zxy")
+  if ok then return end
+  if err == STOP or not tostring(err):find("protected") then error(err, 0) end
+  -- A block it may not break is in the way (spawn protection, a land claim
+  -- or a protected area): it digs around it on the level it's on, inside its
+  -- radius, then up or down its shaft.
+  local w = toWorld(pos)
+  log("warn", ("Can't dig straight back from %d, %d, %d (%s): digging around it"):format(w.x, w.y, w.z, tostring(err)))
+  local goal = cellGoal(fromWorld({ x = t.x, y = w.y, z = t.z }))
+  local level = fromWorld(w).y
+  goal.allowed = function(x, y, z) return y == level and rowRoute.withinRadius(toWorld({ x = x, y = y, z = z })) end
+  goal.mining, goal.blocked, goal.limit = true, {}, 40000
+  navigate(goal)
+  goWorld(t, "y")
 end
 
 -- Outside its radius below the Home area, it first walks straight back into

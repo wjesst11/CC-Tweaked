@@ -794,6 +794,26 @@ test("a turtle off its route below the Home protected area digs back to its shaf
   assert(said,"didn't say it was digging back")
 end)
 
+test("digging back to its shaft, a block it may not break in the way is dug around, never through",function()
+  local api,sim,files,a=offRoute()
+  api.protection({homeArea(64)})
+  local w=api.state().world
+  -- Spawn protection or a claim refuses the block straight towards its shaft.
+  local wall={}
+  for _,dx in ipairs({-1,0}) do
+    local cell=lkey({x=w.x+dx,y=w.y,z=w.z-1})
+    sim.blocks[cell]="minecraft:deepslate"
+    sim.refuse[cell]="Cannot break protected block"
+    wall[#wall+1]=cell
+  end
+  api.command({action="goHome"})
+  same(api.state().world,a.routeHome)
+  for _,cell in ipairs(wall) do assert(sim.blocks[cell]=="minecraft:deepslate","dug a refused block") end
+  local said=false
+  for _,line in ipairs(sim.prints) do if line:find("digging around it",1,true) then said=true end end
+  assert(said,"didn't say it was digging around")
+end)
+
 test("an off-route turtle at or above the Home floor, or with no Home area, never digs a new way back",function()
   for _,areas in ipairs({{homeArea(50)},{},{{name="Base",x1=-2500,x2=2500,y1=64,y2=320,z1=-2500,z2=2500}}}) do
     local api,sim,files,a=offRoute()
