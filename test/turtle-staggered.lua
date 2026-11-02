@@ -990,5 +990,44 @@ test("a turtle put back on the home row by hand walks along the surface to its o
   assert(sim.digs==digs,"dug on the surface")
 end)
 
+test("a Nether turtle with its home row at Y 97 digs its stairs from there, mines, and comes home",function()
+  local NHOME={x=100,y=97,z=-55}
+  local function nkey(w) return key({x=NHOME.x-w.x,y=w.y-NHOME.y,z=w.z-NHOME.z}) end
+  local r,yTop,yBottom=4,90,86
+  local api,sim=miner()
+  local settings=fleetConfig()
+  settings.dimensions={nether={depot={x=108,y=97,z=-55,junk="down",valuables="north",fuel="west"},areas={},homeY=97}}
+  api.config(settings)
+  api.command({action="setDimension",args={dimension="nether"}})
+  api.fix({x=0,y=0,z=0},NHOME)
+  local A,low=yTop+2,yBottom-1
+  for x=NHOME.x-r-1,NHOME.x+r+1 do
+    for y=low-2,96 do
+      for z=NHOME.z-r-1,NHOME.z+r+1 do sim.blocks[nkey({x=x,y=y,z=z})]="minecraft:netherrack" end
+    end
+  end
+  sim.blocks["-8,-1,0"]="minecraft:chest"
+  sim.blocks["-8,0,-1"]="minecraft:chest"
+  sim.blocks["-7,0,0"]="minecraft:chest"
+  sim.chests["-7,0,0"]={name="minecraft:coal",count=200}
+  api.lease("granted")
+  sim.beforeMove=function()
+    local route=api.state().miningRoute
+    if route and route.phase=="toDepot" then api.lease("granted") end
+  end
+  local a={
+    kind="branchMine",pattern="staggered",routeMode="southRow",access="southStairs",entryY=97,
+    routeHome={x=100,y=97,z=-55,facing="south"},stairBottom={x=100,y=A,z=stairZ(97-A,r)},
+    x=96,z=-55,y=A,dir="south",radius=r,first=96,last=104,low=low,yTop=yTop,yBottom=yBottom,
+    scan=true,band=0,spacing=5,goal=0,goalItem="valuables",coverage="allSides",
+    veinBounds={x1=95,x2=105,y1=low-1,y2=A,z1=-55-r-1,z2=-55+r+1},
+    queueId="nether:97",
+  }
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  for _,p in ipairs(sim.history) do assert(p.y<=0,"went above its Y 97 home row") end
+  assert(api.state().miningRoute.home.y==97)
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

@@ -287,7 +287,7 @@
                   <button id="btn-reset-pos" class="btn ghost needs-idle" title="Use after moving the turtle by hand">Reset position</button>
                   <button id="btn-dimension" class="btn ghost needs-idle"></button>
                 </div>
-                <p class="hint">Home and depot returns use the saved stair bottom, then the exact staircase north. Underground returns may mine at the target safe Y; stair climbing only clears fallen sand or gravel. Surface travel stays at Y 67; protected blocks, areas and other turtles stay protected.</p>
+                <p class="hint">Home and depot returns use the saved stair bottom, then the exact staircase north. Underground returns may mine at the target safe Y; stair climbing only clears fallen sand or gravel. Surface travel stays at the home row's height; protected blocks, areas and other turtles stay protected.</p>
                 <form id="home-form" class="home-form" hidden>
                   <div class="fields">
                     <label class="field"><span>X</span><input name="x" type="number" required></label>
@@ -516,7 +516,10 @@
             <section class="card">
               <div class="card-head"><h2>Depot</h2><span id="depot-status" class="muted"></span></div>
               <p class="hint flush">Turtles take turns standing on the dock block to sort their items into three chests next to it and refuel.</p>
-              <p class="hint flush">Home-row mining requires the dock at Y 67. Surface routes between the home row and depot stay at that level.</p>
+              <p class="hint flush">Home-row mining requires the dock at the home row's height: Y 67 in the Overworld, the Nether's own home row Y below. Surface routes between the home row and depot stay at that level.</p>
+              <div class="fields">
+                <label class="field" title="The height of this dimension's home row (Z -55). The Overworld's is always 67."><span>Home row Y</span><input data-field="homeY" type="number" min="-60" max="319"></label>
+              </div>
               <div class="fields">
                 <label class="field"><span>Dock X</span><input data-field="depot.x" type="number"></label>
                 <label class="field"><span>Dock Y</span><input data-field="depot.y" type="number"></label>

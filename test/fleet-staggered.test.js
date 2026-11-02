@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_FLEET, STAGGERED_HIGHEST, STAGGERED_LOWEST, planFleetJob, staggeredTunnel, stairZ } from "../fleet.js";
+import { DEFAULT_FLEET, STAGGERED_HIGHEST, STAGGERED_LOWEST, dimensionFleet, planFleetJob, sanitizeFleet, staggeredTunnel, stairZ } from "../fleet.js";
 
 const fleet = () => ({
   ...structuredClone(DEFAULT_FLEET),
@@ -188,4 +188,23 @@ test("helpers go to the busiest turtles, one each, and only inside their own rad
   assert.equal(result.assignments[0].after, 1, "the busiest turtle shares first");
   assert.deepEqual(result.unused, ["Miner 4"], "a turtle whose radius can't reach is left out");
   assert.match(planJoin(fleet(), [busy], [turtle(4, 300)], []).error, /enough columns left to share/);
+});
+
+test("a Nether home row at Y 97 plans its stairs, depot and top level from there", () => {
+  const nether = (depotY) => dimensionFleet(sanitizeFleet({
+    dimensions: { nether: { homeY: 97, depot: { x: 1000, y: depotY, z: 1000, junk: "down", valuables: "north", fuel: "west" } } },
+  }), "nether");
+  const home = (id, x) => ({ id, name: `Miner ${id}`, home: { x, y: 97, z: -55, facing: "south" } });
+  const params = { ...SETTINGS, yTop: 90, yBottom: 86, radius: 6 };
+  const result = planFleetJob(nether(97), "branchMine", params, [home(1, 100)], []);
+  assert.equal(result.error, undefined);
+  const a = result.assignments[0].args;
+  assert.equal(a.routeHome.y, 97);
+  assert.equal(a.entryY, 97);
+  assert.equal(a.y, 92);
+  assert.equal(a.stairBottom.z, stairZ(97 - 92, 6));
+  assert.match(planFleetJob(nether(67), "branchMine", params, [home(1, 100)], []).error, /depot must be at Y=97/);
+  assert.match(planFleetJob(nether(97), "branchMine", { ...params, yTop: 95 }, [home(1, 100)], []).error, /to Y 94/);
+  // An Overworld home (Y 67) isn't a Nether home.
+  assert.match(planFleetJob(nether(97), "branchMine", params, [turtle(1, 100)], []).error, /home at Y=97/);
 });

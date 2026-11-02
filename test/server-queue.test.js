@@ -422,3 +422,23 @@ test("each dimension has its own dock turns, job queue and fleet-wide commands",
   assert.equal(overworld.messages.slice(after).some((msg) => msg.type === "cmd" && msg.action === "pause"), false);
   assert.equal(dashboard.messages.some((msg) => msg.type === "jobQueue" && msg.dimension === "overworld" && msg.queue.paused), false);
 });
+
+test("a Nether turtle on a Y 97 home row gets a job saved from that row", async (t) => {
+  const { dashboard: openDashboard, turtle } = await harness(t);
+  const dashboard = await openDashboard();
+  const fleet = {
+    ...FLEET,
+    dimensions: { nether: { homeY: 97, depot: { x: 5, y: 97, z: -55, junk: "down", valuables: "north", fuel: "west" }, areas: [] } },
+  };
+  const status = { ...IDLE, dimension: "nether", world: { x: 100, y: 97, z: -55 }, homeWorld: null };
+  const nether = await turtle(status, true, { dimension: "nether", fleet });
+  await dashboard.wait((msg) => msg.type === "turtle" && msg.turtle.status?.dimension === "nether");
+  dashboard.send({
+    type: "fleetJob", kind: "branchMine", ids: [7], dimension: "nether",
+    params: { routeMode: "southRow", pattern: "staggered", yTop: 90, yBottom: 86, radius: 6 },
+  });
+  const { args } = await nether.wait(command);
+  assert.equal(args.routeHome.y, 97);
+  assert.equal(args.entryY, 97);
+  assert.equal(args.y, 92);
+});

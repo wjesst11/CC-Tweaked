@@ -28,18 +28,21 @@ export const DEFAULT_FLEET = {
   veinBlocks: ["*_ore", "*ancient_debris*"],
   // The depot and protected areas above are the Overworld's. Each other
   // dimension has its own; everything else is shared.
-  dimensions: { nether: { depot: null, areas: [] } },
+  dimensions: { nether: { depot: null, areas: [], homeY: 67 } },
 };
+
+// The Overworld's home row height. The Nether's is its own setting.
+export const HOME_Y = 67;
 
 export const DIMENSIONS = ["overworld", "nether"];
 export const dimensionOf = (value) => (value === "nether" ? "nether" : "overworld");
 
-// Fleet settings as one dimension's turtles see them: that dimension's depot
-// and protected areas, with everything else shared.
+// Fleet settings as one dimension's turtles see them: that dimension's depot,
+// protected areas and home row height, with everything else shared.
 export function dimensionFleet(fleet, dimension) {
-  if (dimensionOf(dimension) === "overworld") return fleet;
+  if (dimensionOf(dimension) === "overworld") return { ...fleet, homeY: HOME_Y };
   const own = fleet.dimensions?.nether ?? {};
-  return { ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] } };
+  return { ...fleet, depot: own.depot ?? null, protect: { ...fleet.protect, areas: own.areas ?? [] }, homeY: own.homeY ?? HOME_Y };
 }
 
 function int(v, lo, hi) {
@@ -110,6 +113,7 @@ export function sanitizeFleet(input = {}) {
       nether: {
         depot: sanitizeDepot(input.dimensions?.nether?.depot),
         areas: sanitizeAreas(input.dimensions?.nether?.areas),
+        homeY: height(input.dimensions?.nether?.homeY) ?? HOME_Y,
       },
     },
   };
@@ -149,8 +153,9 @@ export const staggeredTunnel = (x, y) => (((x + 2 * y) % 5) + 5) % 5 === 0;
 // The lowest level the pattern checks fully. Its tunnels one below stay out
 // of the bedrock that starts at Y -60.
 export const STAGGERED_LOWEST = -58;
-// The highest: its access corridor (two above the top tunnel) stays below Y 67.
-export const STAGGERED_HIGHEST = 64;
+// The highest: its access corridor (two above the top tunnel) stays below the
+// home row, Y 67 in the Overworld.
+export const STAGGERED_HIGHEST = HOME_Y - 3;
 
 // Work bounds are conservative boxes around a lane. Only integer block cells
 // inside that turtle's original-home cylinder can actually be mined.
@@ -185,8 +190,8 @@ export function validateFleet(fleet) {
 // Forward, then down, from this turtle's own saved surface home. The surface
 // home itself is never an access block to be dug out.
 function stairAccess(home, y, radius) {
-  return Array.from({ length: 67 - y }, (_, index) => {
-    const step = index + 1, py = 67 - step, pz = stairZ(step, radius);
+  return Array.from({ length: home.y - y }, (_, index) => {
+    const step = index + 1, py = home.y - step, pz = stairZ(step, radius);
     return box(home.x, py, pz, home.x, py + 1, pz);
   });
 }
@@ -194,7 +199,7 @@ function stairAccess(home, y, radius) {
 // One turtle's share of a staggered job: columns west to east, swept from
 // the end nearer its stairs. `done` marks work another turtle already did.
 function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, jobId, done }) {
-  const zb = stairZ(67 - y, radius);
+  const zb = stairZ(home.y - y, radius);
   const [first, last] = Math.abs(west - home.x) <= Math.abs(east - home.x) ? [west, east] : [east, west];
   // Ore checks reach the next turtle's nearest column, the level below the
   // lowest tunnel and the corridor above the top one.
@@ -203,7 +208,7 @@ function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, j
     args: {
       kind: "branchMine", pattern: "staggered", x: first, z: -55, y, dir: "south", radius, first, last, low, peak, yTop, yBottom,
       scan: true, spacing: 5, band: 0, goal: 0, goalItem: "valuables",
-      routeMode: "southRow", routeHome: { ...home }, stairBottom: { x: home.x, y, z: zb }, access: "southStairs", entryY: 67,
+      routeMode: "southRow", routeHome: { ...home }, stairBottom: { x: home.x, y, z: zb }, access: "southStairs", entryY: home.y,
       coverage: "allSides", veinBounds: volume,
       ...(jobId ? { jobId } : {}), ...(done ? { done } : {}),
     },
@@ -222,13 +227,14 @@ function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, j
 // the shafts hang off a corridor along Z -55 at the access level y, two
 // above the top tunnel, where each staircase ends. Every block from the top
 // to the bottom level is checked: the tunnels run one level beyond each.
-function planStaggered(params, ready, radius) {
+function planStaggered(params, ready, radius, homeY = HOME_Y) {
   const yTop = Number(params.yTop), yBottom = Number(params.yBottom);
   if (params.yTop === null || params.yBottom === null || !Number.isInteger(yTop) || !Number.isInteger(yBottom) || yBottom > yTop) {
     return { error: "Choose a top and a bottom level, with the bottom at or below the top." };
   }
-  if (yBottom < STAGGERED_LOWEST || yTop > STAGGERED_HIGHEST) {
-    return { error: `Choose levels from Y ${STAGGERED_LOWEST} to Y ${STAGGERED_HIGHEST}; deeper tunnels would run into bedrock.` };
+  const highest = homeY - 3;
+  if (yBottom < STAGGERED_LOWEST || yTop > highest) {
+    return { error: `Choose levels from Y ${STAGGERED_LOWEST} to Y ${highest}; deeper tunnels would run into bedrock.` };
   }
   const y = yTop + 2, low = yBottom - 1;
   // Where the ore is most common: tunnels start there and work outward.
@@ -291,7 +297,8 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     if (params.routeMode !== "southRow") {
       return { error: "This level job uses an old route layout. Create a new south-row level job." };
     }
-    if (fleet.depot.y !== 67) return { error: "The shared depot must be at Y=67 for south-row mining." };
+    const homeY = fleet.homeY ?? HOME_Y;
+    if (fleet.depot.y !== homeY) return { error: `The shared depot must be at Y=${homeY}, the home row's height, for south-row mining.` };
     const radius = params.radius;
     if (!Number.isInteger(radius) || radius < 1 || radius > 1024) {
       return { error: "Choose a mining radius from 1 to 1024 whole blocks, measured horizontally from each turtle's original home." };
@@ -299,25 +306,25 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
     for (const turtle of ready) {
       const home = turtle.home;
       if (!home || !Number.isInteger(home.x) || coord(home.x) === null ||
-          home.y !== 67 || home.z !== -55 || home.facing !== "south") {
-        return { error: `${turtle.name || `Turtle ${turtle.id}`} needs a confirmed south-facing home at Y=67, Z=-55.` };
+          home.y !== homeY || home.z !== -55 || home.facing !== "south") {
+        return { error: `${turtle.name || `Turtle ${turtle.id}`} needs a confirmed south-facing home at Y=${homeY}, Z=-55.` };
       }
     }
     if (new Set(ready.map(({ home }) => home.x)).size !== ready.length) {
       return { error: "Each turtle needs its own X position in the home row." };
     }
     if (params.pattern === "staggered") {
-      const planned = planStaggered(params, ready, radius);
+      const planned = planStaggered(params, ready, radius, homeY);
       if (planned.error) return planned;
       ({ jobs, selected } = planned);
     } else {
       // Jobs queued before staggered tunnels: parallel lanes on one level.
       const y = Number(params.y);
-      if (params.y === null || !Number.isInteger(y) || y < -64 || y > 67) {
+      if (params.y === null || !Number.isInteger(y) || y < -64 || y > homeY) {
         return { error: "Check the tunnel settings." };
       }
       selected = [...ready].sort((a, b) => b.home.x - a.home.x);
-      const x = selected[0].home.x, z = stairZ(67 - y, radius);
+      const x = selected[0].home.x, z = stairZ(homeY - y, radius);
       const spacing = 2, band = 0, goal = 0, goalItem = "valuables", scan = true;
       for (const [k, turtle] of selected.entries()) {
         const home = turtle.home, cylinder = { x: home.x, z: home.z, radius };
@@ -331,7 +338,7 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
           return { error: `${turtle.name || `Turtle ${turtle.id}`}'s assigned lane starts outside its home cylinder. It needs at least ${needed} blocks horizontally; increase the radius or select fewer turtles.` };
         }
       }
-      const dir = COMPASS.indexOf("south"), entryY = 67;
+      const dir = COMPASS.indexOf("south"), entryY = homeY;
       const right = (dir + 1) % 4;
       // Automatic lanes have one shared wall. Their ore-check bounds include
       // every exposed side, and the circle clips the final reachable blocks.

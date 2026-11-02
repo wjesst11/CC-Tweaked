@@ -213,25 +213,30 @@ function setDimension(turtle, value) {
   if (old && old !== turtle.dimension) releaseDepot(old, turtle.id);
 }
 
-function onHomeRow(position) {
-  return position && Number.isInteger(position.x) && position.y === 67 && position.z === -55;
+// The home row's height in a turtle's dimension: 67 in the Overworld.
+const homeYOf = (t) => dimensionFleet(fleet, dimOf(t)).homeY;
+
+function onHomeRow(position, homeY) {
+  return position && Number.isInteger(position.x) && position.y === homeY && position.z === -55;
 }
 
-function rowHome(status) {
+// A saved home keeps the height it was saved at.
+function rowHome(status, homeY) {
   const saved = status?.miningRoute?.home;
-  if (onHomeRow(saved)) return { x: saved.x, y: 67, z: -55, facing: "south" };
-  if (onHomeRow(status?.world)) return { x: status.world.x, y: 67, z: -55, facing: "south" };
+  if (onHomeRow(saved, saved?.y)) return { x: saved.x, y: saved.y, z: -55, facing: "south" };
+  if (onHomeRow(status?.world, homeY)) return { x: status.world.x, y: homeY, z: -55, facing: "south" };
   return null;
 }
 
-function atRowHome(status) {
-  const home = rowHome(status);
-  return home && onHomeRow(status?.world) && status.world.x === home.x;
+function atRowHome(status, homeY) {
+  const home = rowHome(status, homeY);
+  const w = status?.world;
+  return Boolean(home && w) && w.x === home.x && w.y === home.y && w.z === home.z;
 }
 
 function plannerTurtle(id) {
   const t = turtles.get(id);
-  return { id, name: t ? nameOf(t) : `Turtle #${id}`, home: rowHome(t?.status), position: t?.status?.world };
+  return { id, name: t ? nameOf(t) : `Turtle #${id}`, home: rowHome(t?.status, homeYOf(t)), position: t?.status?.world };
 }
 
 // Queued work outlives browser sessions and server restarts. Persist before
@@ -270,6 +275,7 @@ function makeQueue(dimension) {
       const t = turtles.get(id);
       if (t?.socket) dispatch(t, action, args);
     },
+    homeY: () => dimensionFleet(fleet, dimension).homeY,
   });
   // Dashboards get each queue in their snapshot, then only its changes.
   const q = { dimension, jobs, storageError: null, lastJson: undefined, emergencyHold: false };
@@ -394,13 +400,13 @@ function readyTurtles(ids, kind, dimension = "overworld") {
     if (!t.socket) skipped.push(`${nameOf(t)} is offline`);
     else if (dimOf(t) !== dimension) skipped.push(`${nameOf(t)} works in the ${dimensionName(dimOf(t))}`);
     else if (!t.freshStatus) skipped.push(`${nameOf(t)} is still reporting its status`);
-    else if (!s.gpsTrusted && !(kind === "branchMine" && !s.miningRoute && onHomeRow(s.world))) skipped.push(`${nameOf(t)} doesn't know its GPS position yet`);
+    else if (!s.gpsTrusted && !(kind === "branchMine" && !s.miningRoute && onHomeRow(s.world, homeYOf(t)))) skipped.push(`${nameOf(t)} doesn't know its GPS position yet`);
     else if (kind === "branchMine" && !s.staircaseSupported) skipped.push(`${nameOf(t)} needs the latest script for staircase mining`);
     else if (kind === "branchMine" && !s.oreScanSupported) skipped.push(`${nameOf(t)} needs the latest script for complete side checks`);
     else if (kind === "branchMine" && !s.southRowSupported) skipped.push(`${nameOf(t)} needs script 2.0.0 for the saved south staircase`);
     else if (kind === "branchMine" && !s.radiusSupported) skipped.push(`${nameOf(t)} needs script 2.1.0 for the home mining radius`);
     else if (kind === "branchMine" && !s.staggeredSupported) skipped.push(`${nameOf(t)} needs script 2.2.0 for staggered tunnels`);
-    else if (kind === "branchMine" && !atRowHome(s)) skipped.push(`${nameOf(t)} must be at its saved home on Y=67, Z=-55`);
+    else if (kind === "branchMine" && !atRowHome(s, homeYOf(t))) skipped.push(`${nameOf(t)} must be at its saved home on Y=${rowHome(s, homeYOf(t))?.y ?? homeYOf(t)}, Z=-55`);
     else if (s.job || s.fleetJob || s.miningRoute?.intent || s.queued > 0 || t.pendingFleetUntil > Date.now() || queueOwns(t.id)) skipped.push(`${nameOf(t)} is busy or has saved work`);
     else ready.push(plannerTurtle(t.id));
   }
