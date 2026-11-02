@@ -12,6 +12,7 @@ const BLOCK_COLORS = [
   [/gold/, 0xf5c542],
   [/iron/, 0xd8af93],
   [/copper/, 0xe07a4f],
+  [/titanium/, 0x9db4ff],
   [/redstone/, 0xe02a2a],
   [/lapis/, 0x2f5bd3],
   [/quartz/, 0xe9e3db],
@@ -243,11 +244,11 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
     return null;
   }
 
-  // Turtles: a body coloured by status and a darker nose showing its facing.
-  // Far away they're drawn bigger so they never shrink to a dot, and their name
-  // tags can be clicked like the turtles themselves.
+  // Turtles: a body coloured by status and a darker nose showing its facing,
+  // nearly a block in size at any zoom. Their name tags can be clicked like
+  // the turtles themselves.
   const turtles = new Map(); // id -> { group, body, label, target }
-  const bodyGeometry = new THREE.BoxGeometry(0.86, 0.86, 0.86);
+  const bodyGeometry = new THREE.BoxGeometry(0.94, 0.94, 0.94);
   const noseGeometry = new THREE.BoxGeometry(0.34, 0.34, 0.2);
   const noseMaterial = new THREE.MeshLambertMaterial({ color: 0x222222 });
   const ringGeometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.25, 1.25, 1.25));
@@ -264,7 +265,7 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
         const body = new THREE.Mesh(bodyGeometry, new THREE.MeshLambertMaterial());
         body.userData.turtleId = t.id;
         const nose = new THREE.Mesh(noseGeometry, noseMaterial);
-        nose.position.set(0, 0.05, -0.52);
+        nose.position.set(0, 0.05, -0.56);
         const ring = new THREE.LineSegments(ringGeometry, new THREE.LineBasicMaterial());
         ring.visible = false;
         const tag = label("", "map3d-label turtle");
@@ -579,35 +580,38 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
   const shift = new THREE.Vector3();
 
   // Arrow keys move over the ground while the map is on screen: up and down
-  // along the way the camera looks, left and right sideways, faster the
-  // further out it is zoomed. Typing in a field keeps its arrow keys.
-  const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+  // along the way the camera looks, left and right sideways. W and S move
+  // straight up and down. Faster the further out it is zoomed. Typing in a
+  // field keeps its keys.
+  const MOVE_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "w", "s"]);
+  const moveKey = (event) => (event.key.length === 1 ? event.key.toLowerCase() : event.key);
   const held = new Set();
   const onScreen = () => Boolean(container.offsetParent || document.fullscreenElement);
   addEventListener("keydown", (event) => {
-    if (!ARROWS.has(event.key) || event.ctrlKey || event.metaKey || event.altKey || !onScreen()) return;
+    if (!MOVE_KEYS.has(moveKey(event)) || event.ctrlKey || event.metaKey || event.altKey || !onScreen()) return;
     if (event.target.closest?.("input, select, textarea, [contenteditable]")) return;
     event.preventDefault();
-    held.add(event.key);
+    held.add(moveKey(event));
     if (follow) {
       follow = false;
       onFollowChange(false);
     }
   });
-  addEventListener("keyup", (event) => held.delete(event.key));
+  addEventListener("keyup", (event) => held.delete(moveKey(event)));
   addEventListener("blur", () => held.clear());
   const ahead = new THREE.Vector3(), aside = new THREE.Vector3(), step = new THREE.Vector3();
   let lastFrame = 0;
   function moveWithKeys(seconds) {
     const along = (held.has("ArrowUp") ? 1 : 0) - (held.has("ArrowDown") ? 1 : 0);
     const across = (held.has("ArrowRight") ? 1 : 0) - (held.has("ArrowLeft") ? 1 : 0);
-    if (!along && !across) return;
+    const rise = (held.has("w") ? 1 : 0) - (held.has("s") ? 1 : 0);
+    if (!along && !across && !rise) return;
     camera.getWorldDirection(ahead).setY(0);
     // Looking straight down, "ahead" is the top of the screen.
     if (ahead.lengthSq() < 1e-6) ahead.set(0, 1, 0).applyQuaternion(camera.quaternion).setY(0);
     ahead.normalize();
     aside.crossVectors(ahead, camera.up).normalize();
-    step.copy(ahead).multiplyScalar(along).addScaledVector(aside, across).normalize()
+    step.copy(ahead).multiplyScalar(along).addScaledVector(aside, across).setY(rise).normalize()
       .multiplyScalar(camera.position.distanceTo(controls.target) * 0.5 * seconds);
     camera.position.add(step);
     controls.target.add(step);
@@ -675,7 +679,6 @@ export function createWorld(container, { onSelect, onOpen, nameOf, onFollowChang
     }
     for (const e of turtles.values()) {
       e.group.position.lerp(e.target, 0.25);
-      e.group.scale.setScalar(THREE.MathUtils.clamp(camera.position.distanceTo(e.group.position) / 90, 1, 8));
     }
     const followed = follow && turtles.get(selectedId);
     if (followed) {

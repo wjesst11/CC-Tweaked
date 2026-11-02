@@ -159,12 +159,12 @@ Run `npm test` for the planner, queue, and WebSocket integration checks. With Lu
 
 The **3D map** tab draws the world in Minecraft's own coordinates.
 
-**Turtles** are colored by status, with a nose showing which way each one faces. You also see the depot and its chests, protected areas (red), job areas, homes and a ground grid in chunks (bigger squares for a big area).
+**Turtles** are drawn about a block in size, colored by status, with a nose showing which way each one faces. You also see the depot and its chests, protected areas (red), job areas, homes and a ground grid in chunks (bigger squares for a big area).
 
 **Mined blocks** are every block any turtle has dug since the server started, colored by what it was. Ores stand out.
 
 **Using it:**
-- Drag to spin, right-drag to pan, and scroll to zoom.
+- Drag to spin, right-drag or the arrow keys to pan, **W** and **S** to move up and down, and scroll to zoom.
 - Click a turtle to select it, or double-click to open its page.
 - Hover a turtle or a mined block for details, including which turtle mined the block.
 - **Fit** frames everything. **Follow** keeps the camera on the selected turtle.

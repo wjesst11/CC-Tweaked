@@ -50,6 +50,7 @@ const ITEM_COLORS = [
   [/gold/, "#f5c542"],
   [/iron/, "#d8af93"],
   [/copper/, "#e07a4f"],
+  [/titanium/, "#9db4ff"],
   [/redstone/, "#e02a2a"],
   [/lapis/, "#2f5bd3"],
   [/quartz/, "#e9e3db"],
