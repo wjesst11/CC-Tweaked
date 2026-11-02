@@ -213,6 +213,25 @@ test("return mines at the safe level to the own bottom before climbing", functio
   same(api.state().world,a.routeHome)
 end)
 
+test("on its own stairs below its saved progress, it takes the steps above as dug and climbs home", function()
+  local api,sim,files,a=rowMiner(40)
+  -- Stopped on step 8 of the first descent.
+  local cell="0,-8,8"
+  sim.refuse[cell]="Cannot break protected block"
+  pcall(api.row.enter,a)
+  sim.refuse[cell]=nil
+  same(api.state().world,{x=100,y=60,z=-47})
+  -- Its saved progress fell behind, as when a GPS correction made a step's save miss.
+  local route=api.state().miningRoute
+  route.stair.completed,route.stair.half,route.stair.pending=3,false,nil
+  api.save()
+  local digs=sim.digs
+  api.row.recover()
+  same(api.state().world,a.routeHome)
+  assert(sim.digs==digs,"dug on stairs it had already opened")
+  assert(api.state().miningRoute.stair.completed>=7,"didn't keep the steps it came down")
+end)
+
 test("return refuses rock that couldn't have formed in an opened stair cell", function()
   local api,sim,files,a=rowMiner()
   -- A protected area elsewhere, and none named Home.

@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.4.4"
+local VERSION = "2.4.5"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -2194,6 +2194,17 @@ function rowRoute.exit(intent)
     rowRoute.surface(miningRoute.home)
   else
     local step, upper = rowRoute.position(w)
+    if step and not rowRoute.opened(w) then
+      -- On its own staircase below where its saved progress says it dug
+      -- (a step's save went astray, as on a GPS correction mid-descent): it
+      -- came down these steps, so they count as open up to here.
+      local stair = miningRoute.stair
+      if upper then stair.completed, stair.half = math.max(stair.completed, step - 1), true
+      else stair.completed, stair.half = math.max(stair.completed, step), false end
+      stair.pending = nil
+      rowRoute.save()
+      log("warn", ("Its saved staircase stopped short of step %d, where it stands: taking the steps above as dug"):format(step))
+    end
     if not step or not rowRoute.opened(w) then
       rowRoute.save("toBottom")
       rowRoute.corridor(miningRoute.bottom)
