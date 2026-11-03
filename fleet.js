@@ -191,12 +191,14 @@ function stairAccess(home, y, radius) {
 
 // One turtle's share of a staggered job: columns west to east, swept from
 // the end nearer its stairs. `done` marks work another turtle already did.
-function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, jobId, done }) {
+function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, jobId, done, zMin, zMax }) {
   const zb = stairZ(home.y - y, radius, home.z);
   const [first, last] = Math.abs(west - home.x) <= Math.abs(east - home.x) ? [west, east] : [east, west];
   // Ore checks reach the next turtle's nearest column, the level below the
-  // lowest tunnel and the corridor above the top one.
-  const volume = box(west - 1, low - 1, home.z - radius - 1, east + 1, y, home.z + radius + 1);
+  // lowest tunnel and the corridor above the top one. With rows sharing
+  // columns, its tunnels stay in its row's share, zMin to zMax.
+  const north = Math.max(home.z - radius, zMin ?? -Infinity), south = Math.min(home.z + radius, zMax ?? Infinity);
+  const volume = box(west - 1, low - 1, north - 1, east + 1, y, south + 1);
   return {
     args: {
       kind: "branchMine", pattern: "staggered", x: first, z: home.z, y, dir: "south", radius, first, last, low, peak, yTop, yBottom,
@@ -204,6 +206,7 @@ function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, j
       routeMode: "southRow", routeHome: { ...home }, stairBottom: { x: home.x, y, z: zb }, access: "southStairs", entryY: home.y,
       coverage: "allSides", veinBounds: volume,
       ...(jobId ? { jobId } : {}), ...(done ? { done } : {}),
+      ...(zMin !== undefined ? { zMin } : {}), ...(zMax !== undefined ? { zMax } : {}),
     },
     volume,
     circle: { x: home.x, z: home.z, radius },
@@ -214,6 +217,19 @@ function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, j
   };
 }
 
+// Turtles in rows: one per home Z, north to south. Rows share the columns
+// they reach, split halfway between them: each row's tunnels run only in its
+// share, zMin to zMax (open at the ends), so no two turtles dig the same
+// tunnel, and every column still has one turtle per row.
+function rowShares(ready) {
+  const zs = [...new Set(ready.map(({ home }) => home.z))].sort((a, b) => a - b);
+  return zs.map((z, i) => ({
+    turtles: ready.filter(({ home }) => home.z === z),
+    ...(i > 0 ? { zMin: Math.floor((zs[i - 1] + z) / 2) + 1 } : {}),
+    ...(i < zs.length - 1 ? { zMax: Math.floor((z + zs[i + 1]) / 2) } : {}),
+  }));
+}
+
 // Staggered tunnels through every turtle's cylinder from Y top down to Y
 // bottom, split into runs of whole columns, one run per turtle. A column's
 // tunnels cross its shaft at its owner's home Z and run to the circle's edge
@@ -221,7 +237,7 @@ function staggeredJob(home, west, east, { y, low, peak, yTop, yBottom, radius, j
 // y, two above the top tunnel, where each staircase ends. Every block from
 // the top to the bottom level is checked: the tunnels run one level beyond
 // each. The access corridor stays below every turtle's home.
-function planStaggered(params, ready, radius) {
+function planStaggered(params, ready, radius, share = {}) {
   const yTop = Number(params.yTop), yBottom = Number(params.yBottom);
   if (params.yTop === null || params.yBottom === null || !Number.isInteger(yTop) || !Number.isInteger(yBottom) || yBottom > yTop) {
     return { error: "Choose a top and a bottom level, with the bottom at or below the top." };
@@ -247,7 +263,9 @@ function planStaggered(params, ready, radius) {
       if (staggeredTunnel(x, level)) [tunnels, lowest] = [tunnels + 1, level];
     }
     const half = Math.floor(Math.sqrt(radius ** 2 - near ** 2));
-    columns.push({ x, weight: tunnels ? tunnels * (2 * half + 1) + (y - lowest) : 0 });
+    const z = sorted[0].home.z;
+    const reach = Math.min(half, z - (share.zMin ?? -Infinity)) + Math.min(half, (share.zMax ?? Infinity) - z) + 1;
+    columns.push({ x, weight: tunnels ? tunnels * reach + (y - lowest) : 0 });
   }
   // West to east, each turtle takes about its share. A column only one
   // turtle can reach always goes to it.
@@ -269,7 +287,7 @@ function planStaggered(params, ready, radius) {
   for (const [k, turtle] of sorted.entries()) {
     const run = runs[k];
     if (!run.some((c) => c.weight > 0)) continue;
-    jobs.push(staggeredJob(turtle.home, run[0].x, run.at(-1).x, { y, low, peak, yTop, yBottom, radius }));
+    jobs.push(staggeredJob(turtle.home, run[0].x, run.at(-1).x, { y, low, peak, yTop, yBottom, radius, ...share }));
     selected.push(turtle);
   }
   if (!jobs.length) return { error: "No tunnels fall inside these levels and radius. Widen the levels or the radius." };
@@ -319,18 +337,39 @@ export function planFleetJob(fleet, kind, params, ready, homes) {
         return { error: `${name}'s home is at Y ${home.y} but the dock is at Y ${fleet.depot.y}. Depot trips stay at home height, so the dock must be at each turtle's home height.` };
       }
     }
-    if (new Set(ready.map(({ home }) => home.x)).size !== ready.length) {
-      return { error: "Each turtle needs its own home X: its stairs run south along it." };
+    // Turtles can share an X: each row (home Z) gets its own share of the
+    // columns. Two homes on one X only clash right beside each other: a
+    // turtle's stairs run south along its X, one down per block, so homes
+    // one block apart in Z would dig into each other's steps.
+    const name = (t) => t.name || `Turtle ${t.id}`;
+    const byX = new Map();
+    for (const turtle of ready) byX.set(turtle.home.x, [...(byX.get(turtle.home.x) ?? []), turtle]);
+    for (const [x, same] of byX) {
+      const zs = same.map((t) => t.home.z).sort((a, b) => a - b);
+      const near = same.find((t, i) => same.some((u, j) => i !== j && Math.abs(t.home.z - u.home.z) <= 1));
+      if (near) {
+        const other = same.find((u) => u !== near && Math.abs(near.home.z - u.home.z) <= 1);
+        if (near.home.z === other.home.z) {
+          return { error: `${name(near)} and ${name(other)} share a home at ${x}, ${near.home.y}, ${near.home.z}. Give each its own with Set home.` };
+        }
+        return { error: `${name(near)} (Z ${near.home.z}) and ${name(other)} (Z ${other.home.z}) are on the same X ${x} right beside each other: their stairs would dig into each other. Homes on one X need at least one block between them in Z (here: ${zs.join(", ")}).` };
+      }
     }
     if (params.pattern === "staggered") {
-      const planned = planStaggered(params, ready, radius);
-      if (planned.error) return planned;
-      ({ jobs, selected } = planned);
+      jobs = [];
+      selected = [];
+      for (const { turtles: row, ...share } of rowShares(ready)) {
+        const planned = planStaggered(params, row, radius, share);
+        if (planned.error) return planned;
+        jobs.push(...planned.jobs);
+        selected.push(...planned.selected);
+      }
     } else {
       // Jobs queued before staggered tunnels: parallel lanes on one level,
       // from homes in one line.
       const { y: homeY, z: homeZ } = ready[0].home;
       if (ready.some(({ home }) => home.z !== homeZ)) return { error: "This older level job needs every turtle's home at one Z. Create a new level job." };
+      if (new Set(ready.map(({ home }) => home.x)).size !== ready.length) return { error: "This older level job needs each turtle at its own home X. Create a new level job." };
       const y = Number(params.y);
       if (params.y === null || !Number.isInteger(y) || y < -64 || y > homeY) {
         return { error: "Check the tunnel settings." };
@@ -497,6 +536,9 @@ export function planJoin(fleet, members, helpers, homes) {
       if (give[0] > give[1] || keep[0] > keep[1]) continue;
       const radius = m.args.radius;
       if (give.some((x) => Math.abs(x - helper.home.x) > radius)) continue;
+      // It digs those columns along its own circle: only one in the same row
+      // (home Z) covers the same stretch of them.
+      if (helper.home.z !== m.args.z) continue;
       // Done in the current pass: the earlier columns of this sweep, and
       // whatever was already marked done for it.
       const doneNow = [rising ? [lo, c - 1] : [c + 1, hi], ...(m.args.done?.pass === p ? m.args.done.cols : [])];
@@ -505,7 +547,9 @@ export function planJoin(fleet, members, helpers, homes) {
       jobs.push(job);
       // The busy turtle keeps its sweep direction, so first stays on the same side.
       const [first, last] = m.args.first <= m.args.last ? keep : [keep[1], keep[0]];
-      const volume = box(keep[0] - 1, m.args.low - 1, m.args.z - radius - 1, keep[1] + 1, m.args.y, m.args.z + radius + 1);
+      // Its ore checks keep to its row's share of the columns.
+      const volume = box(keep[0] - 1, m.args.low - 1, Math.max(m.args.z - radius, m.args.zMin ?? -Infinity) - 1,
+        keep[1] + 1, m.args.y, Math.min(m.args.z + radius, m.args.zMax ?? Infinity) + 1);
       updates.push({ id: m.id, args: { ...m.args, x: first, first, last, veinBounds: volume, done: { pass: p, cols: within(keep) } } });
       assignments.push({ id: helper.id, args: job.args, after: m.id, expect: { first, last } });
       w.split = placed = true;

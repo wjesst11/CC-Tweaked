@@ -21,7 +21,7 @@ const store = {
 const MAX_LOGS = 200;
 const MAX_TRAIL = 500;
 const RENDER_INTERVAL_MS = 150;
-const SCRIPT_VERSION = "2.5.3"; // the turtle script this dashboard expects
+const SCRIPT_VERSION = "2.5.4"; // the turtle script this dashboard expects
 
 // "2.2.9" is older than "2.2.10": versions compare part by part, as numbers.
 function olderVersion(version, than) {
@@ -173,6 +173,7 @@ function notQueueReady(t) {
   const s = t.status ?? {};
   if (fleetTab() === "branchMine") {
     if (!s.radiusSupported || !s.staggeredSupported) return "update script for staggered tunnels";
+    if (!s.rowSharesSupported) return "update script to 2.5.4";
     if (!s.southRowSupported) return "update script for level mining";
     if (!turtleHome(t)) return "no saved home: use Set home";
     // Before its first level job a turtle at its home finds its facing itself.

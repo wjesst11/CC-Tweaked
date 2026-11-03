@@ -42,7 +42,7 @@ Use script **2.1.1** on every mining turtle. Each needs an equipped pickaxe, an 
 
 Set up before starting a level job:
 
-1. Place each turtle where it should mine from, each at its own X, and use **Set home** (or pick them and use **Set homes here**). They can face any way, and there's no home row: different Z is fine. The dock must be at the same Y as the homes, because depot trips stay at home height.
+1. Place each turtle where it should mine from and use **Set home** (or pick them and use **Set homes here**). They can face any way, and there's no home row: different Z is fine. Turtles can share an X: put them in rows (each row at its own Z). Each row mines its turtles' columns, and rows that reach the same columns split them halfway between the rows, so no two turtles dig the same tunnel. The only rule is that two homes on one X need at least one block between them in Z, since a turtle's stairs run south along its X, one block down per block. Needs script 2.5.4 on every turtle on the job. **Add picked turtles** only adds a turtle to turtles in its own row (same home Z). The dock must be at the same Y as the homes, because depot trips stay at home height.
 2. Leave an open block beside each home (it steps into it and back to find its facing with GPS), room above, and room for the stairs to extend south.
 3. Put coal or charcoal in each turtle. Select its fuel slot on the dashboard and click **Refuel from slot**; the client also consumes inventory fuel while idle.
 4. Wait for a GPS position.

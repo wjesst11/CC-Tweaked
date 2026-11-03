@@ -4,7 +4,7 @@ import { FleetJobQueue } from "../fleet-queue.js";
 
 function ready(label = "Miner") {
   return { online: true, fresh: true, label, status: {
-    queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: true, radiusSupported: true, staggeredSupported: true,
+    queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: true, radiusSupported: true, staggeredSupported: true, rowSharesSupported: true,
     gpsTrusted: true, queued: 0, world: { x: label === "Two" ? 2 : 1, y: 67, z: -55 },
     homeWorld: { x: label === "Two" ? 2 : 1, y: 67, z: -55 },
   } };
@@ -87,6 +87,7 @@ test("waits for every selected turtle to be online, fresh, updated, GPS ready, a
     ["no fixed row support", { status: { queueSupported: true, staircaseSupported: true, oreScanSupported: true, southRowSupported: false, gpsTrusted: true } }],
     ["no home radius support", { status: { radiusSupported: false } }],
     ["no staggered tunnel support", { status: { staggeredSupported: false } }],
+    ["no shared column support", { status: { rowSharesSupported: false } }],
     ["untrusted GPS", { status: { queueSupported: true, gpsTrusted: false, world: null } }],
     ["saved route with unconfirmed facing", { status: { gpsTrusted: false, miningRoute: { home: { x: 2, y: 67, z: -55 } } } }],
     ["away from saved home", { status: { miningRoute: { home: { x: 3, y: 67, z: -55 } } } }],

@@ -428,6 +428,7 @@ function readyTurtles(ids, kind, dimension = "overworld") {
     else if (kind === "branchMine" && !s.southRowSupported) skipped.push(`${nameOf(t)} needs script 2.0.0 for the saved south staircase`);
     else if (kind === "branchMine" && !s.radiusSupported) skipped.push(`${nameOf(t)} needs script 2.1.0 for the home mining radius`);
     else if (kind === "branchMine" && !s.staggeredSupported) skipped.push(`${nameOf(t)} needs script 2.2.0 for staggered tunnels`);
+    else if (kind === "branchMine" && !s.rowSharesSupported) skipped.push(`${nameOf(t)} needs script 2.5.4 so rows can share columns`);
     else if (kind === "branchMine" && !turtleHome(s)) skipped.push(`${nameOf(t)} has no saved home yet: use Set home`);
     else if (kind === "branchMine" && !atTurtleHome(s)) {
       const at = turtleHome(s);

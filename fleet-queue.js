@@ -155,6 +155,7 @@ export class FleetJobQueue {
       if (job.kind === "branchMine" && !status.southRowSupported) return `Update ${label}'s script for the saved south staircase`;
       if (job.kind === "branchMine" && !status.radiusSupported) return `Update ${label}'s script for the home mining radius`;
       if (job.kind === "branchMine" && !status.staggeredSupported) return `Update ${label}'s script for staggered tunnels`;
+      if (job.kind === "branchMine" && !status.rowSharesSupported) return `Update ${label}'s script to 2.5.4 so rows can share columns`;
       if (!located(status, job.kind)) return `Waiting for ${label}'s GPS position`;
       if (!idle(status)) return `Waiting for ${label} to finish its current work`;
       if (job.kind === "branchMine") {

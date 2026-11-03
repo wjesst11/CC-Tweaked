@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.5.3"
+local VERSION = "2.5.4"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -1836,6 +1836,10 @@ function rowRoute.validate(a)
     if a.y >= h.y or not integer(a.low, -64, a.y - 1) or (a.peak ~= nil and not integer(a.peak, -64, 320)) then
       error("Invalid staggered mining levels", 0)
     end
+    -- Its row's share of the columns, when rows of turtles share them.
+    if (a.zMin ~= nil and not integer(a.zMin, -3e7, a.z)) or (a.zMax ~= nil and not integer(a.zMax, a.z, 3e7)) then
+      error("Invalid share of the columns for its row", 0)
+    end
   end
 end
 
@@ -2697,8 +2701,12 @@ KINDS.branchMine = {
 -- pass has reached every column, later passes cross between shafts at depth.
 local staggeredPlans = setmetatable({}, { __mode = "k" })
 
-local function staggeredHalf(a, x)
-  return math.floor(math.sqrt(a.radius ^ 2 - (x - a.routeHome.x) ^ 2))
+-- How far a tunnel in column x runs north and south of the shafts' row: to
+-- the edge of its circle, or, with rows of turtles sharing columns, to the
+-- edge of its own row's share (a.zMin to a.zMax).
+local function staggeredReach(a, x)
+  local h = math.floor(math.sqrt(a.radius ^ 2 - (x - a.routeHome.x) ^ 2))
+  return math.min(h, a.zMin and a.z - a.zMin or h), math.min(h, a.zMax and a.zMax - a.z or h)
 end
 
 local function staggeredPlan(a)
@@ -2739,9 +2747,9 @@ local function staggeredPlan(a)
       for y = hi, lo, -1 do
         if (x + 2 * y) % 5 == 0 then
           if not finished(pass, x) then
-            local h = staggeredHalf(a, x)
-            plan[#plan + 1] = { x = x, y = y, h = h, floor = floor, pass = pass, start = plan.total }
-            plan.total = plan.total + 2 * h + 1
+            local n, s = staggeredReach(a, x)
+            plan[#plan + 1] = { x = x, y = y, n = n, s = s, floor = floor, pass = pass, start = plan.total }
+            plan.total = plan.total + n + s + 1
           end
           deepest[x] = math.min(deepest[x], y)
         end
@@ -2767,7 +2775,7 @@ local function staggeredCell(a, i)
   local t = plan[lo]
   local j = i - t.start
   return {
-    x = t.x, y = t.y, z = j <= t.h and a.z - j or a.z + j - t.h,
+    x = t.x, y = t.y, z = j <= t.n and a.z - j or a.z + j - t.n,
     floor = t.floor, pass = t.pass, passes = plan.passes, start = t.start,
   }
 end
@@ -2796,7 +2804,8 @@ KINDS.staggered = {
   inside = function(a, w)
     if w.x < math.min(a.first, a.last) or w.x > math.max(a.first, a.last) or w.y > a.y or w.y < a.low then return false end
     if w.z == a.z then return true end
-    return w.y < a.y and (w.x + 2 * w.y) % 5 == 0 and math.abs(w.z - a.z) <= staggeredHalf(a, w.x)
+    local n, s = staggeredReach(a, w.x)
+    return w.y < a.y and (w.x + 2 * w.y) % 5 == 0 and w.z >= a.z - n and w.z <= a.z + s
   end,
   mayDig = function(a, w)
     return rowRoute.inCircle(w, a.routeHome, a.radius) and type(a.veinBounds) == "table" and inBox(w, a.veinBounds)
@@ -2851,8 +2860,8 @@ KINDS.staggered = {
       if plan[mid].start <= i then lo = mid else hi = mid - 1 end
     end
     local t = plan[lo]
-    if why == "tunnel" and i - t.start <= t.h then return t.start + t.h + 1 end
-    return t.start + 2 * t.h + 1
+    if why == "tunnel" and i - t.start <= t.n then return t.start + t.n + 1 end
+    return t.start + t.n + t.s + 1
   end,
   -- Up, down, east and west. North and south are the tunnel itself.
   work = function(a, i, veins)
@@ -3192,6 +3201,7 @@ function rowRoute.jobArgs(a)
   if a.pattern == "staggered" then
     args.pattern, args.first, args.last, args.low, args.peak, args.spacing = "staggered", a.first, a.last, a.low, a.peak, 5
     args.yTop, args.yBottom = tonumber(a.yTop), tonumber(a.yBottom)
+    args.zMin, args.zMax = a.zMin, a.zMax
     args.length = nil
   end
   args.routeMode, args.access, args.entryY = "southRow", "southStairs", a.routeHome.y
@@ -3609,6 +3619,7 @@ function net.status()
     midJobUpdateSupported = true,
     jobShareSupported = true,
     dimensionSupported = true,
+    rowSharesSupported = true,
     dimension = cfg.dimension or "overworld",
     miningRoute = miningRoute and {
       home = miningRoute.home, bottom = miningRoute.bottom, targetY = miningRoute.targetY,

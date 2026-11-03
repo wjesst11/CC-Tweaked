@@ -1393,5 +1393,29 @@ test("a new turtle's status can be sent before GPS knows its facing",function()
   assert(ok,tostring(why))
 end)
 
+test("a turtle sharing its columns with another row digs its tunnels only up to its row's share",function()
+  local r,yTop,yBottom=4,60,58
+  local api,sim,files,a=setup(r,yTop,yBottom,96,104)
+  -- Another row's share starts at Z -52: this turtle stops at -53.
+  a.zMax=-53
+  a.veinBounds.z2=-52
+  api.command({action="fleetJob",args=a})
+  finished(api,a)
+  local north,south=0,0
+  for x=96,104 do
+    for y=yBottom-1,yTop+1 do
+      if tunnel(x,y) then
+        for z=-55-r,-55+r do
+          if inside(x,z,r) and not sim.blocks[lkey({x=x,y=y,z=z})] then
+            assert(z<=-53,"dug into the other row's share at "..x..","..y..","..z)
+            if z<-55 then north=north+1 elseif z>-55 then south=south+1 end
+          end
+        end
+      end
+    end
+  end
+  assert(north>0 and south>0,"didn't dig both ways from its shafts")
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

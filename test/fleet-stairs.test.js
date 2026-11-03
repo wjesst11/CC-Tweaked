@@ -68,7 +68,7 @@ test("requires each turtle's own saved home, at the dock's height, anywhere else
   assert.equal(plan(fleet(), settings, [{ ...ready[0], home: { x: 100, y: 67, z: -54, facing: "south" } }]).error, undefined);
   assert.match(plan(fleet(), settings, [{ ...ready[0], home: { x: 100, y: 66, z: -55, facing: "south" } }]).error,
     /Miner 1's home is at Y 66 but the dock is at Y 67/);
-  assert.match(plan(fleet(), settings, [ready[0], turtle(3, 100)]).error, /own home X/);
+  assert.match(plan(fleet(), settings, [ready[0], turtle(3, 100)]).error, /Miner 1 and Miner 3 share a home at 100, 67, -55/);
   const f = fleet();
   f.depot.y = 66;
   assert.match(plan(f).error, /home is at Y 67 but the dock is at Y 66/);

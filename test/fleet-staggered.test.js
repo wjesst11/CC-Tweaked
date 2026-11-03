@@ -219,3 +219,50 @@ test("turtles with homes at different Z each get their corridor along their own 
   assert.equal(byId.get(2).z, 20);
   assert.equal(byId.get(2).stairBottom.z, stairZ(67 - byId.get(2).y, 8, 20));
 });
+
+test("rows of turtles can share X: they split the shared columns halfway, and no tunnel block is dug twice", () => {
+  const at = (id, x, z) => ({ id, name: `Miner ${id}`, home: { x, y: 67, z, facing: "south" } });
+  const radius = 8;
+  // Two rows 10 apart in Z on the same X positions: their circles overlap.
+  const rows = [at(1, 100, -55), at(2, 104, -55), at(3, 100, -45), at(4, 104, -45)];
+  const result = plan({ ...SETTINGS, yTop: -50, yBottom: -52, radius }, rows);
+  assert.equal(result.error, undefined);
+  assert.equal(result.assignments.length, 4);
+  const byId = new Map(result.assignments.map(({ id, args }) => [id, args]));
+  for (const id of [1, 2]) assert.deepEqual([byId.get(id).z, byId.get(id).zMin, byId.get(id).zMax], [-55, undefined, -50]);
+  for (const id of [3, 4]) assert.deepEqual([byId.get(id).z, byId.get(id).zMin, byId.get(id).zMax], [-45, -49, undefined]);
+  // The tunnels as the turtles dig them: north and south of the shafts' row,
+  // to the circle's edge or the row's share.
+  const dug = new Map();
+  for (const [id, a] of byId) {
+    for (const x of columnsOf(a)) {
+      const h = half(a, x);
+      for (let y = a.y - 1; y >= a.low; y--) {
+        if (!staggeredTunnel(x, y)) continue;
+        for (let z = Math.max(a.z - h, a.zMin ?? -Infinity); z <= Math.min(a.z + h, a.zMax ?? Infinity); z++) {
+          const key = `${x},${y},${z}`;
+          assert.ok(!dug.has(key), `${key} dug by Miner ${dug.get(key)} and Miner ${id}`);
+          dug.set(key, id);
+        }
+      }
+    }
+  }
+  // Both rows' circles are covered where their shafts' rows reach.
+  for (const z of [-55, -50, -49, -45]) assert.ok([...dug.keys()].some((k) => k.endsWith(`,${z}`)), `nothing dug at Z ${z}`);
+  // Ore checks keep to each row's share.
+  assert.ok(byId.get(1).veinBounds.z2 <= -49 && byId.get(3).veinBounds.z1 >= -50);
+});
+
+test("homes on one X right beside each other, or at the same spot, are refused by name", () => {
+  const at = (id, x, z) => ({ id, name: `Miner ${id}`, home: { x, y: 67, z, facing: "south" } });
+  const levels = { ...SETTINGS, yTop: -50, yBottom: -52, radius: 8 };
+  assert.match(plan(levels, [at(1, 100, -55), at(3, 100, -54)]).error, /Miner 1 \(Z -55\) and Miner 3 \(Z -54\) are on the same X 100 right beside each other/);
+  assert.match(plan(levels, [at(1, 100, -55), at(3, 100, -55)]).error, /Miner 1 and Miner 3 share a home at 100, 67, -55/);
+  assert.equal(plan(levels, [at(1, 100, -55), at(3, 100, -53)]).error, undefined, "one block between them is enough");
+});
+
+test("a turtle joins a running job only from the same row: it digs columns along its own circle", () => {
+  const otherRow = { id: 2, name: "Miner 2", home: { x: 101, y: 67, z: -38, facing: "south" } };
+  assert.match(planJoin(fleet(), [member({ pass: 1, x: 90 })], [otherRow], []).error, /enough columns left to share/);
+  assert.equal(planJoin(fleet(), [member({ pass: 1, x: 90 })], [turtle(2, 101)], []).error, undefined);
+});
