@@ -1381,5 +1381,17 @@ test("a turtle off its stairs, not on any line from home, still doesn't dig its 
   assert(not (api.state().world.x==100 and api.state().world.y==67),"got home some other way")
 end)
 
+test("a new turtle's status can be sent before GPS knows its facing",function()
+  -- Its position and home are both the one GPS fix: the strict serializer,
+  -- like CC:Tweaked's JSON one, rejects the same table twice.
+  local api=miner()
+  api.fix({x=0,y=0,z=0},{x=13,y=70,z=17})
+  local status=api.status()
+  same(status.world,{x=13,y=70,z=17})
+  same(status.homeWorld,{x=13,y=70,z=17})
+  local ok,why=pcall(common.serialize,status)
+  assert(ok,tostring(why))
+end)
+
 assert(#failures==0,table.concat(failures,"\n"))
 print("Passed "..count.." staggered scenarios")

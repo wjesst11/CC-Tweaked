@@ -22,7 +22,7 @@
 -- Protected blocks are never dug. Only initial south-stair excavation may
 -- cross protected areas; all later mining retains ordinary area protection.
 
-local VERSION = "2.5.2"
+local VERSION = "2.5.3"
 local DEFAULT_URL = "__WS_URL__"
 local STATE_FILE = ".minerdash_state"
 local FLEET_FILE = ".minerdash_fleet"
@@ -3581,8 +3581,10 @@ function net.status()
     heading = heading,
     home = home,
     world = worldPos(),
-    -- Before GPS knows its facing, home is still known if it's where the fix was.
-    homeWorld = toWorld(home) or (calib and samePos(home, calib.l) and calib.w) or nil,
+    -- Before GPS knows its facing, home is still known if it's where the fix
+    -- was. A copy: world can be that same fix, and CC:Tweaked won't send the
+    -- same table twice in one message.
+    homeWorld = toWorld(home) or (calib and samePos(home, calib.l) and { x = calib.w.x, y = calib.w.y, z = calib.w.z }) or nil,
     homeFacing = calib and calib.f0 and COMPASS[(calib.f0 + home.heading) % 4] or nil,
     facing = calib and calib.f0 and COMPASS[(calib.f0 + heading) % 4] or nil,
     gpsState = gpsState,
